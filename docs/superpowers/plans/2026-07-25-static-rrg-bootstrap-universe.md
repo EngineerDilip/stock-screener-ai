@@ -4,7 +4,7 @@
 
 **Goal:** Build a static-only RRG bootstrap path that uses the current weekly-reference universe for historical group snapshots when restored rolling RRG history is insufficient.
 
-**Architecture:** Keep live app RRG untouched. Add a static bootstrap universe source and a small bootstrap backfill service that materializes balanced Market RS and group-rank snapshots for enough recent trading sessions. Wire it into `export_static_site.py` only when `--refresh-daily --market --rrg-history-dir` is used and the restored history has fewer than `MIN_TAIL_WEEKS`.
+**Architecture:** Keep live app RRG untouched. Add a static bootstrap universe source and a small bootstrap backfill service that delegates snapshot materialization to `GroupRankSnapshotCoordinator` for enough recent trading sessions. Keep bootstrap orchestration inside `StaticGroupsRRGRollingHistoryExportSession`, so the CLI only wires the rolling history source and prints typed diagnostics.
 
 **Tech Stack:** Python 3.11, SQLAlchemy ORM, pytest, existing Market RS services, existing static RRG history contracts.
 
@@ -21,11 +21,12 @@
 ## File Structure
 
 - Create `backend/app/services/static_rrg_bootstrap_universe.py`: current-active universe resolver that implements the `PointInTimeUniverseService.resolve()` shape for static bootstrap.
-- Create `backend/app/services/static_rrg_bootstrap_backfill_service.py`: orchestrates date selection, bootstrap Market RS snapshot calculation, group-rank persistence, and readiness diagnostics.
+- Create `backend/app/services/static_rrg_bootstrap_backfill_service.py`: selects weekly target dates, delegates Market RS and group-rank snapshot materialization to `GroupRankSnapshotCoordinator`, and reports readiness diagnostics.
 - Modify `backend/app/services/static_rrg_history_bundle.py`: expose a focused readiness helper that counts weekly snapshots against `MIN_TAIL_WEEKS`.
-- Modify `backend/app/scripts/export_static_site.py`: pass `rrg_history_dir` into daily refresh and invoke bootstrap after normal group-rank backfill when restored history is insufficient.
+- Modify `backend/app/services/static_groups_rrg_export.py`: invoke bootstrap from the rolling RRG export session when restored history is missing or insufficient, then rebuild the prepared payload state.
+- Modify `backend/app/scripts/export_static_site.py`: keep CLI responsibility to source wiring, persistence, and status output.
 - Test `backend/tests/unit/test_static_rrg_bootstrap_backfill_service.py`: isolated bootstrap service behavior.
-- Test `backend/tests/unit/test_export_static_site_script.py`: exporter invokes bootstrap only under the intended static conditions.
+- Test `backend/tests/unit/test_static_groups_rrg_sources.py`: rolling source invokes bootstrap only under the intended static conditions.
 
 ---
 
@@ -119,7 +120,7 @@ Expected: pass.
 - Produces: `StaticRRGBootstrapUniversePolicy = "current_weekly_reference_static_bootstrap"`
 - Produces: `StaticRRGBootstrapUniverse.resolve(db: Session, market: str, as_of_date: date) -> PointInTimeUniverse`
 - Produces: `StaticRRGBootstrapBackfillService.backfill(db: Session, market: str, through_date: date, formula_version: str) -> StaticRRGBootstrapBackfillResult`
-- Consumes: `MarketRsInputLoader`, `MarketRsSnapshotService`, `CanonicalGroupRankingService`, `MarketCalendarService`, `MarketRsRunRepository`
+- Consumes: `GroupRankSnapshotCoordinator`, `MarketCalendarService`, `MarketRsRunRepository`
 
 - [x] **Step 1: Write the universe resolver test**
 
@@ -159,10 +160,10 @@ class StaticRRGBootstrapUniverse:
 
 - [x] **Step 3: Write the backfill orchestration test**
 
-Use fakes for calendar, snapshot service, repository, and group service. Seed no
-existing group dates. Assert `backfill()` selects the latest trading session from
-each week and uses the last `MIN_TAIL_WEEKS` weekly targets, calls
-snapshot/group calculation for each missing date, and returns:
+Use fakes for calendar and `GroupRankSnapshotCoordinator`. Assert `backfill()`
+selects the latest trading session from each week, uses the last
+`MIN_TAIL_WEEKS` weekly targets, calls the coordinator once with typed
+`GroupSnapshotIdentity` values, and returns:
 
 ```python
 {
@@ -186,14 +187,11 @@ target_start = through_date - timedelta(days=DEFAULT_GROUP_RANK_HISTORY_LOOKBACK
 target_dates = calendar_service.trading_days(market, target_start, through_date)
 latest_by_week = {rrg_week_start(day): day for day in target_dates}
 selected_dates = tuple(latest_by_week[key] for key in sorted(latest_by_week)[-MIN_TAIL_WEEKS:])
-existing_dates = query IBDGroupRank.date for market/formula/selected range
-for calculation_date in selected_dates:
-    if calculation_date in existing_dates:
-        existing += 1
-        continue
-    run = market_rs_snapshot_service.calculate(...)
-    rows = canonical_group_service.calculate_and_store(...)
-    processed += 1
+report = group_snapshot_coordinator.backfill(
+    db,
+    identities=tuple(GroupSnapshotIdentity(market, day, formula_version) for day in selected_dates),
+    continue_on_error=True,
+)
 ```
 
 Use a bootstrap-specific `MarketRsInputLoader(point_in_time_universe=StaticRRGBootstrapUniverse())` in the default constructor so historical dates use the current active universe only inside this service.
@@ -206,74 +204,60 @@ Expected: pass.
 
 ---
 
-### Task 3: Static Export Integration
+### Task 3: Static Rolling RRG Integration
 
 **Files:**
+- Modify: `backend/app/services/static_groups_rrg_export.py`
 - Modify: `backend/app/scripts/export_static_site.py`
-- Test: `backend/tests/unit/test_export_static_site_script.py`
+- Test: `backend/tests/unit/test_static_groups_rrg_sources.py`
 
 **Interfaces:**
 - Consumes: `StaticRRGHistoryBundleService.prepare()` and `.has_minimum_history()`
 - Consumes: `StaticRRGBootstrapBackfillService.backfill()`
-- Produces daily-refresh result key: `rrg_bootstrap_backfill`
+- Produces session property: `StaticGroupsRRGRollingHistoryExportSession.bootstrap_backfill`
 
 - [x] **Step 1: Write the exporter tests**
 
-Add tests that monkeypatch:
+Add tests that inject:
 
 ```python
-export_script.StaticRRGHistoryBundleService
-export_script.StaticRRGBootstrapBackfillService
+StaticGroupsRRGRollingHistoryExportSession(
+    history_service=FakeHistoryService(),
+    bootstrap_service=FakeBootstrapService(),
+)
 ```
 
-Assert that `_run_daily_refresh(market="US", rrg_history_dir=Path("/tmp/rrg"))`
-invokes bootstrap when `prepare().state` has fewer than `MIN_TAIL_WEEKS`, and
-does not invoke bootstrap when the prepared state is sufficient.
+Assert the rolling source invokes bootstrap when `prepare().state` has fewer
+than `MIN_TAIL_WEEKS` or reports a missing current snapshot, prepares again
+after bootstrap, and does not invoke bootstrap when the prepared state is
+sufficient.
 
-Run: `cd backend && pytest tests/unit/test_export_static_site_script.py -k rrg_bootstrap -q`
+Run: `cd backend && pytest tests/unit/test_static_groups_rrg_sources.py -q`
 
-Expected: fail because `_run_daily_refresh` has no `rrg_history_dir` argument.
+Expected: fail before integration.
 
-- [x] **Step 2: Integrate into `_run_daily_refresh`**
+- [x] **Step 2: Integrate into `StaticGroupsRRGRollingHistoryExportSession`**
 
-Add parameter:
+After the first `history_service.prepare()`, add:
 
 ```python
-rrg_history_dir: Path | None = None,
+if self._should_bootstrap(preparation):
+    bootstrap_result = self.bootstrap_service.backfill(...)
+    preparation = self.history_service.prepare(...)
 ```
 
-After normal `group_rank_history_backfill`, add:
+Expose `bootstrap_backfill` from the session so the CLI can print diagnostics
+without branching on daily-refresh result dictionaries.
 
-```python
-rrg_bootstrap_backfill = {}
-if rrg_history_dir is not None:
-    for selected_market in selected_markets:
-        bootstrap_result = _bootstrap_static_rrg_history_if_needed(
-            db_session_factory=SessionLocal,
-            rrg_history_dir=rrg_history_dir,
-            market=selected_market,
-            as_of_date=as_of_by_market[selected_market],
-            formula_version=formula_by_market[selected_market],
-        )
-        rrg_bootstrap_backfill[selected_market] = bootstrap_result
-results["rrg_bootstrap_backfill"] = rrg_bootstrap_backfill
-```
+- [x] **Step 3: Keep CLI integration narrow**
 
-Implement `_bootstrap_static_rrg_history_if_needed()` to load/prepare current
-history, skip when RRG is not enabled or history is already sufficient, and run
-`StaticRRGBootstrapBackfillService().backfill()` otherwise.
+Construct `StaticGroupsRRGRollingHistoryExportSession` from `--rrg-history-dir`,
+pass it to `StaticSiteExportService`, print `session.bootstrap_backfill` when
+present, and persist after a successful export.
 
-- [x] **Step 3: Pass CLI history directory into refresh**
+- [x] **Step 4: Run rolling source and CLI tests**
 
-Change the `main()` call:
-
-```python
-rrg_history_dir=Path(args.rrg_history_dir) if args.rrg_history_dir else None,
-```
-
-- [x] **Step 4: Run exporter tests**
-
-Run: `cd backend && pytest tests/unit/test_export_static_site_script.py -k rrg_bootstrap -q`
+Run: `cd backend && pytest tests/unit/test_static_groups_rrg_sources.py tests/unit/test_export_static_rrg_history.py tests/unit/test_export_static_site_script.py -q`
 
 Expected: pass.
 
@@ -295,7 +279,8 @@ Run:
 cd backend
 pytest tests/unit/test_static_rrg_history_bundle.py::test_static_rrg_history_readiness_requires_min_tail_weeks \
        tests/unit/test_static_rrg_bootstrap_backfill_service.py \
-       tests/unit/test_export_static_site_script.py -k "rrg_bootstrap or static_rrg_history_readiness" -q
+       tests/unit/test_static_groups_rrg_sources.py \
+       tests/unit/test_export_static_rrg_history.py -q
 ```
 
 Expected: pass.
@@ -306,7 +291,10 @@ Run:
 
 ```bash
 cd backend
-pytest tests/unit/test_export_static_site_script.py tests/unit/test_static_rrg_history_bundle.py -q
+pytest tests/unit/test_export_static_site_script.py \
+       tests/unit/test_static_rrg_history_bundle.py \
+       tests/unit/test_static_groups_rrg_sources.py \
+       tests/unit/test_export_static_rrg_history.py -q
 ```
 
 Expected: pass.
@@ -319,11 +307,14 @@ Run:
 git add backend/app/services/static_rrg_bootstrap_universe.py \
         backend/app/services/static_rrg_bootstrap_backfill_service.py \
         backend/app/services/static_rrg_history_bundle.py \
+        backend/app/services/static_groups_rrg_export.py \
         backend/app/scripts/export_static_site.py \
         backend/tests/unit/test_static_rrg_bootstrap_backfill_service.py \
         backend/tests/unit/test_static_rrg_history_bundle.py \
+        backend/tests/unit/test_static_groups_rrg_sources.py \
+        backend/tests/unit/test_export_static_rrg_history.py \
         backend/tests/unit/test_export_static_site_script.py
-git commit -m "fix: bootstrap static rrg history with current universe"
+git commit -m "fix: keep static rrg bootstrap in export session"
 ```
 
 Expected: commit succeeds.

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
-from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -12,6 +11,11 @@ from app.models.industry import IBDGroupRank
 from app.models.stock_universe import StockUniverse
 from app.services.group_rank_history_backfill_service import (
     DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS,
+)
+from app.services.group_rank_snapshot_coordinator import (
+    GroupBackfillReport,
+    GroupSnapshotResult,
+    GroupSnapshotStatus,
 )
 from app.services.rrg_service import MIN_TAIL_WEEKS
 from app.services.static_rrg_bootstrap_backfill_service import (
@@ -67,8 +71,7 @@ def test_bootstrap_backfill_materializes_min_tail_weekly_targets():
         for offset in range((through_date - start).days + 1)
         if (start + timedelta(days=offset)).weekday() < 5
     ]
-    snapshot_calls: list[date] = []
-    group_calls: list[date] = []
+    captured_dates: list[date] = []
 
     class FakeCalendar:
         def trading_days(self, market, range_start, range_end):
@@ -77,22 +80,28 @@ def test_bootstrap_backfill_materializes_min_tail_weekly_targets():
             assert range_end == through_date
             return trading_days
 
-    class FakeSnapshotService:
-        def calculate(self, db, *, market, as_of_date, formula_version):
-            snapshot_calls.append(as_of_date)
-            return SimpleNamespace(id=len(snapshot_calls))
-
-    class FakeGroupService:
-        def calculate_and_store(self, db, *, market, as_of_date, formula_version):
-            group_calls.append(as_of_date)
-            return [{"industry_group": "Software", "rank": 1}]
+    class FakeCoordinator:
+        def backfill(self, db, *, identities, continue_on_error):
+            assert continue_on_error is True
+            captured = tuple(identities)
+            captured_dates.extend(identity.as_of_date for identity in captured)
+            return GroupBackfillReport(
+                results=tuple(
+                    GroupSnapshotResult(
+                        identity=identity,
+                        status=GroupSnapshotStatus.PROCESSED,
+                        row_count=1,
+                        market_rs_run_id=index,
+                    )
+                    for index, identity in enumerate(captured, start=1)
+                )
+            )
 
     try:
         with factory() as db:
             result = StaticRRGBootstrapBackfillService(
                 calendar_service=FakeCalendar(),
-                market_rs_snapshot_service=FakeSnapshotService(),
-                canonical_group_service=FakeGroupService(),
+                group_snapshot_coordinator=FakeCoordinator(),
             ).backfill(
                 db,
                 market="US",
@@ -114,8 +123,7 @@ def test_bootstrap_backfill_materializes_min_tail_weekly_targets():
             date(2026, 7, 17),
             date(2026, 7, 24),
         )
-        assert tuple(snapshot_calls) == expected_weekly_targets
-        assert tuple(group_calls) == expected_weekly_targets
+        assert tuple(captured_dates) == expected_weekly_targets
         assert result.as_dict() == {
             "status": "completed",
             "market": "US",

@@ -39,13 +39,6 @@ from app.services.static_site_export_service import (
 from app.services.static_groups_rrg_export import (
     StaticGroupsRRGRollingHistoryExportSession,
 )
-from app.services.static_rrg_bootstrap_backfill_service import (
-    StaticRRGBootstrapBackfillService,
-)
-from app.services.static_rrg_history_bundle import (
-    StaticRRGHistoryBundleService,
-    StaticRRGHistoryUnavailableReason,
-)
 from app.services.static_rrg_history_contract import StaticRRGHistoryBundleError
 from app.services.static_market_publish_policy import OPTIONAL_STATIC_MARKETS
 from app.tasks.data_fetch_lock import disable_serialized_data_fetch_lock
@@ -362,67 +355,6 @@ def _ensure_group_rank_history(
     )
 
 
-def _bootstrap_static_rrg_history_if_needed(
-    *,
-    rrg_history_dir: Path,
-    market: str,
-    as_of_date: date,
-    formula_version: str,
-) -> dict[str, Any]:
-    """Seed minimum rolling RRG history for a static market artifact if needed."""
-    normalized_market = market.upper()
-    history_service = StaticRRGHistoryBundleService()
-    with SessionLocal() as db:
-        preparation = history_service.prepare(
-            db,
-            market=normalized_market,
-            through_date=as_of_date,
-            directory=rrg_history_dir,
-            formula_version=formula_version,
-        )
-        warnings = list(preparation.warnings)
-        weeks_before = len(preparation.state.weeks) if preparation.state else 0
-
-        if (
-            preparation.state is None
-            and preparation.unavailable_reason
-            == StaticRRGHistoryUnavailableReason.NOT_ENABLED
-        ):
-            payload: dict[str, Any] = {
-                "status": "skipped",
-                "market": normalized_market,
-                "as_of_date": as_of_date.isoformat(),
-                "formula_version": formula_version,
-                "reason": "rrg_not_enabled",
-                "weeks_before": weeks_before,
-            }
-        elif history_service.has_minimum_history(preparation.state):
-            payload = {
-                "status": "skipped",
-                "market": normalized_market,
-                "as_of_date": as_of_date.isoformat(),
-                "formula_version": formula_version,
-                "reason": "history_sufficient",
-                "weeks_before": weeks_before,
-            }
-        else:
-            payload = StaticRRGBootstrapBackfillService().backfill(
-                db,
-                market=normalized_market,
-                through_date=as_of_date,
-                formula_version=formula_version,
-            ).as_dict()
-            payload["weeks_before"] = weeks_before
-            if preparation.unavailable_reason is not None:
-                payload["readiness_unavailable_reason"] = (
-                    preparation.unavailable_reason.value
-                )
-
-        if warnings:
-            payload["readiness_warnings"] = warnings
-        return payload
-
-
 def _ensure_breadth_history(
     *,
     as_of_date: date,
@@ -504,7 +436,6 @@ def _run_daily_refresh(
     hydrate_published_snapshot: bool = False,
     rs_formula_version: str = BALANCED_RS_FORMULA_VERSION,
     rs_formula_version_by_market: Mapping[str, str] | None = None,
-    rrg_history_dir: Path | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     from app.interfaces.tasks.feature_store_tasks import (
         _enrich_feature_run_with_ibd_metadata,
@@ -591,23 +522,6 @@ def _run_daily_refresh(
             group_rank_history[selected_market] = backfill
             group_rank_history_report[selected_market] = backfill.as_dict()
         results["group_rank_history_backfill"] = group_rank_history_report
-
-        if rrg_history_dir is not None:
-            bootstrap_report: dict[str, dict[str, Any]] = {}
-            for selected_market in selected_markets:
-                bootstrap_result = _bootstrap_static_rrg_history_if_needed(
-                    rrg_history_dir=rrg_history_dir,
-                    market=selected_market,
-                    as_of_date=as_of_by_market[selected_market],
-                    formula_version=formula_by_market[selected_market],
-                )
-                bootstrap_report[selected_market] = bootstrap_result
-                if bootstrap_result.get("status") == "errored":
-                    warnings.append(
-                        f"Static RRG bootstrap for {selected_market} did not complete: "
-                        f"{bootstrap_result.get('error') or bootstrap_result.get('reason')}"
-                    )
-            results["rrg_bootstrap_backfill"] = bootstrap_report
 
         market_exposure: dict[str, Any] = {}
         for selected_market in selected_markets:
@@ -888,9 +802,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 build_mode=args.build_mode,
                 hydrate_published_snapshot=args.hydrate_published_snapshot,
                 rs_formula_version_by_market=rs_formula_policy,
-                rrg_history_dir=(
-                    Path(args.rrg_history_dir) if args.rrg_history_dir else None
-                ),
             )
             refresh_warnings.extend(daily_refresh_warnings)
             print("Daily refresh complete:")
@@ -971,6 +882,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise
 
         if rrg_history_session is not None:
+            bootstrap_backfill = rrg_history_session.bootstrap_backfill
+            if bootstrap_backfill is not None:
+                print(f"Static RRG bootstrap: {bootstrap_backfill}")
             refresh_warnings.extend(rrg_history_session.warnings)
             try:
                 history_stats = rrg_history_session.persist(

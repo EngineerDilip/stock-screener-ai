@@ -11,12 +11,18 @@ from sqlalchemy.orm import Session
 
 from app.analysis.rrg_weekly import rrg_week_start
 from app.domain.markets import get_market_catalog
+from app.domain.relative_strength import GroupSnapshotIdentity
 from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
-from app.models.industry import IBDGroupRank
 from app.services.canonical_group_ranking_service import CanonicalGroupRankingService
 from app.services.group_rank_history_backfill_service import (
     DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS,
 )
+from app.services.group_rank_snapshot_coordinator import (
+    GroupBackfillReport,
+    GroupRankSnapshotCoordinator,
+    GroupSnapshotStatus,
+)
+from app.services.group_rank_snapshot_reader import GroupRankSnapshotReader
 from app.services.market_calendar_service import MarketCalendarService
 from app.services.market_rs_inputs import MarketRsInputLoader
 from app.services.market_rs_snapshot_service import MarketRsSnapshotService
@@ -70,6 +76,11 @@ class StaticRRGBootstrapBackfillResult:
         return payload
 
 
+class _UnsupportedBootstrapLegacyGroupService:
+    def calculate_group_rankings(self, *_args, **_kwargs):
+        raise ValueError("Static RRG bootstrap only supports canonical Market RS")
+
+
 class StaticRRGBootstrapBackfillService:
     """Seed minimum weekly RRG history for static first-run publication."""
 
@@ -77,15 +88,14 @@ class StaticRRGBootstrapBackfillService:
         self,
         *,
         calendar_service: MarketCalendarService | None = None,
-        market_rs_snapshot_service: MarketRsSnapshotService | None = None,
-        canonical_group_service: CanonicalGroupRankingService | None = None,
+        group_snapshot_coordinator: GroupRankSnapshotCoordinator | None = None,
         market_rs_repository: MarketRsRunRepository | None = None,
         lookback_days: int = DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS,
     ) -> None:
         self.calendar_service = calendar_service or MarketCalendarService()
         self.lookback_days = lookback_days
         repository = market_rs_repository or MarketRsRunRepository()
-        if market_rs_snapshot_service is None:
+        if group_snapshot_coordinator is None:
             input_loader = MarketRsInputLoader(
                 point_in_time_universe=StaticRRGBootstrapUniverse(),
                 market_calendar=self.calendar_service,
@@ -94,11 +104,15 @@ class StaticRRGBootstrapBackfillService:
                 input_loader=input_loader,
                 repository=repository,
             )
-        self.market_rs_snapshot_service = market_rs_snapshot_service
-        self.canonical_group_service = (
-            canonical_group_service
-            or CanonicalGroupRankingService(repository=repository)
-        )
+            group_snapshot_coordinator = GroupRankSnapshotCoordinator(
+                reader=GroupRankSnapshotReader(),
+                market_rs_snapshot_service=market_rs_snapshot_service,
+                canonical_group_service=CanonicalGroupRankingService(
+                    repository=repository
+                ),
+                legacy_group_service=_UnsupportedBootstrapLegacyGroupService(),
+            )
+        self.group_snapshot_coordinator = group_snapshot_coordinator
 
     @staticmethod
     def _weekly_targets(trading_days: list[date]) -> tuple[date, ...]:
@@ -147,48 +161,25 @@ class StaticRRGBootstrapBackfillService:
                 reason="insufficient_trading_weeks",
             )
 
-        existing_dates = {
-            record_date
-            for record_date, in db.query(IBDGroupRank.date)
-            .filter(
-                IBDGroupRank.market == normalized_market,
-                IBDGroupRank.date.in_(target_dates),
-                IBDGroupRank.rs_formula_version == formula_version,
-            )
-            .distinct()
-            .all()
-        }
-
-        processed = 0
-        errors: list[str] = []
-        for target_date in target_dates:
-            if target_date in existing_dates:
-                continue
-            try:
-                self.market_rs_snapshot_service.calculate(
-                    db,
-                    market=normalized_market,
-                    as_of_date=target_date,
-                    formula_version=formula_version,
+        report = self.group_snapshot_coordinator.backfill(
+            db,
+            identities=tuple(
+                GroupSnapshotIdentity(
+                    normalized_market,
+                    target_date,
+                    formula_version,
                 )
-                group_rows = self.canonical_group_service.calculate_and_store(
-                    db,
-                    market=normalized_market,
-                    as_of_date=target_date,
-                    formula_version=formula_version,
-                )
-                if not group_rows:
-                    raise RuntimeError("No group-ranking rows were produced")
-            except Exception as exc:
-                db.rollback()
-                errors.append(f"{target_date.isoformat()}: {exc}")
-                continue
-            processed += 1
-
-        filled = len(existing_dates) + processed
+                for target_date in target_dates
+            ),
+            continue_on_error=True,
+        )
+        empty_count = _count_status(report, GroupSnapshotStatus.EMPTY)
+        error_messages = _bootstrap_error_messages(report)
+        errors = report.errors + empty_count
+        filled = report.existing + report.processed
         status = (
             StaticRRGBootstrapBackfillStatus.COMPLETED
-            if not errors and filled >= MIN_TAIL_WEEKS
+            if errors == 0 and filled >= MIN_TAIL_WEEKS
             else StaticRRGBootstrapBackfillStatus.ERRORED
         )
         return StaticRRGBootstrapBackfillResult(
@@ -198,12 +189,31 @@ class StaticRRGBootstrapBackfillService:
             formula_version=formula_version,
             lookback_start_date=start_date,
             target_dates=target_dates,
-            existing=len(existing_dates),
-            processed=processed,
-            errors=len(errors),
+            existing=report.existing,
+            processed=report.processed,
+            errors=errors,
             total_dates=len(target_dates),
-            error="; ".join(errors) if errors else None,
+            error="; ".join(error_messages) if error_messages else None,
         )
+
+
+def _count_status(report: GroupBackfillReport, status: GroupSnapshotStatus) -> int:
+    return sum(item.status is status for item in report.results)
+
+
+def _bootstrap_error_messages(report: GroupBackfillReport) -> list[str]:
+    messages: list[str] = []
+    for item in report.results:
+        if item.status is GroupSnapshotStatus.ERRORED:
+            messages.append(
+                f"{item.identity.as_of_date.isoformat()}: "
+                f"{item.error or item.reason_code or item.status.value}"
+            )
+        elif item.status is GroupSnapshotStatus.EMPTY:
+            messages.append(
+                f"{item.identity.as_of_date.isoformat()}: no group-ranking rows"
+            )
+    return messages
 
 
 __all__ = [
