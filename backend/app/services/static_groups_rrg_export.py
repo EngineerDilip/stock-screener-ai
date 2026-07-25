@@ -257,9 +257,7 @@ class StaticGroupsRRGRollingHistoryExportSession:
     history_service: StaticRRGHistoryBundleService = field(
         default_factory=StaticRRGHistoryBundleService
     )
-    bootstrap_service: StaticRRGBootstrapBackfillService = field(
-        default_factory=StaticRRGBootstrapBackfillService
-    )
+    bootstrap_service: StaticRRGBootstrapBackfillService | None = None
     _state: _RollingRRGExportState = field(
         default_factory=_NewRollingRRGExport,
         init=False,
@@ -307,25 +305,39 @@ class StaticGroupsRRGRollingHistoryExportSession:
         warnings = list(preparation.warnings)
         bootstrap_result: StaticRRGBootstrapBackfillResult | None = None
         if self._should_bootstrap(preparation):
-            bootstrap_result = self.bootstrap_service.backfill(
-                db,
-                market=expected_market,
-                through_date=expected_as_of_date,
-                formula_version=formula_version,
-            )
-            if bootstrap_result.status is StaticRRGBootstrapBackfillStatus.ERRORED:
-                warnings.append(
-                    "Static RRG bootstrap did not complete: "
-                    f"{bootstrap_result.error or bootstrap_result.reason}"
+            try:
+                bootstrap_result = self._bootstrap_service().backfill(
+                    db,
+                    market=expected_market,
+                    through_date=expected_as_of_date,
+                    formula_version=formula_version,
                 )
-            preparation = self.history_service.prepare(
-                db,
-                market=expected_market,
-                through_date=expected_as_of_date,
-                directory=self.directory,
-                formula_version=formula_version,
-            )
-            warnings.extend(preparation.warnings)
+            except Exception as exc:
+                bootstrap_result = StaticRRGBootstrapBackfillResult(
+                    status=StaticRRGBootstrapBackfillStatus.ERRORED,
+                    market=expected_market,
+                    as_of_date=expected_as_of_date,
+                    formula_version=formula_version,
+                    lookback_start_date=expected_as_of_date,
+                    errors=1,
+                    reason="bootstrap_exception",
+                    error=str(exc),
+                )
+                warnings.append(_bootstrap_failure_warning(bootstrap_result))
+            else:
+                if (
+                    bootstrap_result.status
+                    is StaticRRGBootstrapBackfillStatus.ERRORED
+                ):
+                    warnings.append(_bootstrap_failure_warning(bootstrap_result))
+                preparation = self.history_service.prepare(
+                    db,
+                    market=expected_market,
+                    through_date=expected_as_of_date,
+                    directory=self.directory,
+                    formula_version=formula_version,
+                )
+                warnings.extend(preparation.warnings)
 
         self._state = _PreparedRollingRRGExport(
             preparation=preparation,
@@ -333,10 +345,10 @@ class StaticGroupsRRGRollingHistoryExportSession:
             bootstrap_result=bootstrap_result,
         )
         if preparation.state is None:
-            reason = (
-                warnings[-1]
-                if warnings
-                else f"RRG is not enabled for market {expected_market}."
+            reason = _availability_failure_reason(
+                market=expected_market,
+                warnings=warnings,
+                bootstrap_result=bootstrap_result,
             )
             raise StaticGroupsRRGUnavailableError(
                 section=f"{expected_market} rrg",
@@ -368,6 +380,11 @@ class StaticGroupsRRGRollingHistoryExportSession:
             StaticRRGHistoryUnavailableReason.SOURCE_UNAVAILABLE,
         }
 
+    def _bootstrap_service(self) -> StaticRRGBootstrapBackfillService:
+        if self.bootstrap_service is None:
+            self.bootstrap_service = StaticRRGBootstrapBackfillService()
+        return self.bootstrap_service
+
     def persist(self, *, exported_as_of_date: date) -> dict[str, Any] | None:
         if isinstance(self._state, _NewRollingRRGExport):
             raise RuntimeError("Rolling RRG export session must be built before persistence.")
@@ -384,6 +401,25 @@ class StaticGroupsRRGRollingHistoryExportSession:
             bootstrap_result=self._state.bootstrap_result,
         )
         return result
+
+
+def _availability_failure_reason(
+    *,
+    market: str,
+    warnings: list[str],
+    bootstrap_result: StaticRRGBootstrapBackfillResult | None,
+) -> str:
+    if (
+        bootstrap_result is not None
+        and bootstrap_result.status is StaticRRGBootstrapBackfillStatus.ERRORED
+    ):
+        return _bootstrap_failure_warning(bootstrap_result)
+    return warnings[-1] if warnings else f"RRG is not enabled for market {market}."
+
+
+def _bootstrap_failure_warning(result: StaticRRGBootstrapBackfillResult) -> str:
+    detail = result.error or result.reason or "unknown bootstrap failure"
+    return f"Static RRG bootstrap did not complete: {detail}"
 
 
 def _build_payload_from_state(

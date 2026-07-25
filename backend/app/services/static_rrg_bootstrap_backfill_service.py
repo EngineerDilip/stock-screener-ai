@@ -11,7 +11,10 @@ from sqlalchemy.orm import Session
 
 from app.analysis.rrg_weekly import rrg_week_start
 from app.domain.markets import get_market_catalog
-from app.domain.relative_strength import GroupSnapshotIdentity
+from app.domain.relative_strength import (
+    BALANCED_RS_FORMULA_VERSION,
+    GroupSnapshotIdentity,
+)
 from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
 from app.services.canonical_group_ranking_service import CanonicalGroupRankingService
 from app.services.group_rank_history_backfill_service import (
@@ -76,9 +79,12 @@ class StaticRRGBootstrapBackfillResult:
         return payload
 
 
+_UNSUPPORTED_FORMULA_ERROR = "Static RRG bootstrap only supports canonical Market RS"
+
+
 class _UnsupportedBootstrapLegacyGroupService:
     def calculate_group_rankings(self, *_args, **_kwargs):
-        raise ValueError("Static RRG bootstrap only supports canonical Market RS")
+        raise ValueError(_UNSUPPORTED_FORMULA_ERROR)
 
 
 class StaticRRGBootstrapBackfillService:
@@ -118,7 +124,11 @@ class StaticRRGBootstrapBackfillService:
     def _weekly_targets(trading_days: list[date]) -> tuple[date, ...]:
         latest_by_week: dict[date, date] = {}
         for trading_day in trading_days:
-            latest_by_week[rrg_week_start(trading_day)] = trading_day
+            week = rrg_week_start(trading_day)
+            latest_by_week[week] = max(
+                latest_by_week.get(week, trading_day),
+                trading_day,
+            )
         ordered = tuple(latest_by_week[week] for week in sorted(latest_by_week))
         return ordered[-MIN_TAIL_WEEKS:]
 
@@ -140,6 +150,18 @@ class StaticRRGBootstrapBackfillService:
                 formula_version=formula_version,
                 lookback_start_date=start_date,
                 reason="rrg_not_enabled",
+            )
+
+        if formula_version != BALANCED_RS_FORMULA_VERSION:
+            return StaticRRGBootstrapBackfillResult(
+                status=StaticRRGBootstrapBackfillStatus.ERRORED,
+                market=normalized_market,
+                as_of_date=through_date,
+                formula_version=formula_version,
+                lookback_start_date=start_date,
+                errors=1,
+                reason="unsupported_formula",
+                error=_UNSUPPORTED_FORMULA_ERROR,
             )
 
         target_dates = self._weekly_targets(

@@ -6,7 +6,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
+from app.domain.relative_strength import (
+    BALANCED_RS_FORMULA_VERSION,
+    LEGACY_RS_FORMULA_VERSION,
+)
 from app.models.industry import IBDGroupRank
 from app.models.stock_universe import StockUniverse
 from app.services.group_rank_history_backfill_service import (
@@ -21,6 +24,7 @@ from app.services.rrg_service import MIN_TAIL_WEEKS
 from app.services.static_rrg_bootstrap_backfill_service import (
     STATIC_RRG_BOOTSTRAP_UNIVERSE_POLICY,
     StaticRRGBootstrapBackfillService,
+    StaticRRGBootstrapBackfillStatus,
 )
 from app.services.static_rrg_bootstrap_universe import StaticRRGBootstrapUniverse
 
@@ -136,6 +140,63 @@ def test_bootstrap_backfill_materializes_min_tail_weekly_targets():
             "processed": MIN_TAIL_WEEKS,
             "errors": 0,
             "total_dates": MIN_TAIL_WEEKS,
+        }
+    finally:
+        engine.dispose()
+
+
+def test_weekly_targets_use_latest_day_per_week_without_sorted_input():
+    targets = StaticRRGBootstrapBackfillService._weekly_targets(
+        [
+            date(2026, 1, 9),
+            date(2026, 1, 5),
+            date(2026, 1, 7),
+            date(2026, 1, 16),
+            date(2026, 1, 12),
+        ]
+    )
+
+    assert targets == (date(2026, 1, 9), date(2026, 1, 16))
+
+
+def test_bootstrap_backfill_rejects_legacy_formula_before_snapshot_dispatch():
+    engine, factory = _session_factory()
+
+    class FakeCalendar:
+        def trading_days(self, *_args, **_kwargs):
+            raise AssertionError("unsupported formula must not enumerate dates")
+
+    class FakeCoordinator:
+        def backfill(self, *_args, **_kwargs):
+            raise AssertionError("unsupported formula must not dispatch snapshots")
+
+    try:
+        with factory() as db:
+            result = StaticRRGBootstrapBackfillService(
+                calendar_service=FakeCalendar(),
+                group_snapshot_coordinator=FakeCoordinator(),
+            ).backfill(
+                db,
+                market="US",
+                through_date=date(2026, 7, 24),
+                formula_version=LEGACY_RS_FORMULA_VERSION,
+            )
+
+        assert result.status is StaticRRGBootstrapBackfillStatus.ERRORED
+        assert result.as_dict() == {
+            "status": "errored",
+            "market": "US",
+            "as_of_date": "2026-07-24",
+            "formula_version": LEGACY_RS_FORMULA_VERSION,
+            "policy": STATIC_RRG_BOOTSTRAP_UNIVERSE_POLICY,
+            "lookback_start_date": "2026-04-15",
+            "target_dates": [],
+            "existing": 0,
+            "processed": 0,
+            "errors": 1,
+            "total_dates": 0,
+            "reason": "unsupported_formula",
+            "error": "Static RRG bootstrap only supports canonical Market RS",
         }
     finally:
         engine.dispose()

@@ -349,6 +349,126 @@ def test_rolling_source_bootstraps_missing_current_snapshot(monkeypatch, tmp_pat
     assert [call[0] for call in calls] == ["prepare", "bootstrap", "prepare"]
 
 
+def test_rolling_source_prefers_bootstrap_error_when_reprepare_still_missing(
+    tmp_path,
+):
+    export_date = date(2026, 4, 18)
+    plan = _plan(tmp_path, "HK")
+    preparations = [
+        StaticRRGHistoryPreparation(
+            plan=plan,
+            state=None,
+            warnings=("Rolling RRG history was not advanced: no current snapshot.",),
+            unavailable_reason=StaticRRGHistoryUnavailableReason.CURRENT_SNAPSHOT_MISSING,
+        ),
+        StaticRRGHistoryPreparation(
+            plan=plan,
+            state=None,
+            warnings=("Rolling RRG history was not advanced: no current snapshot.",),
+            unavailable_reason=StaticRRGHistoryUnavailableReason.CURRENT_SNAPSHOT_MISSING,
+        ),
+    ]
+
+    class _HistoryService:
+        def prepare(self, *_args, **_kwargs):
+            return preparations.pop(0)
+
+        def persist(self, *_args, **_kwargs):
+            raise AssertionError("persist is not part of this test")
+
+    class _BootstrapService:
+        def backfill(self, _db, *, market, through_date, formula_version):
+            return StaticRRGBootstrapBackfillResult(
+                status=StaticRRGBootstrapBackfillStatus.ERRORED,
+                market=market,
+                as_of_date=through_date,
+                formula_version=formula_version,
+                lookback_start_date=date(2026, 1, 1),
+                error="bootstrap price history unavailable",
+            )
+
+    source = StaticGroupsRRGRollingHistoryExportSession(
+        schema_version="static-site-v3",
+        market="HK",
+        directory=tmp_path,
+        history_service=_HistoryService(),
+        bootstrap_service=_BootstrapService(),
+    )
+
+    with pytest.raises(StaticGroupsRRGUnavailableError) as exc_info:
+        source.build(
+            db=object(),
+            generated_at="2026-04-18T22:00:00Z",
+            expected_as_of_date=export_date,
+            market="HK",
+            formula_version=BALANCED_RS_FORMULA_VERSION,
+        )
+
+    assert exc_info.value.reason == (
+        "Static RRG bootstrap did not complete: bootstrap price history unavailable"
+    )
+
+
+def test_rolling_source_contains_bootstrap_exception_in_optional_path(tmp_path):
+    export_date = date(2026, 4, 18)
+    calls = []
+
+    class _HistoryService:
+        def prepare(self, *_args, **_kwargs):
+            calls.append("prepare")
+            return StaticRRGHistoryPreparation(
+                plan=_plan(tmp_path, "HK"),
+                state=None,
+                warnings=("Rolling RRG history was not advanced: no current snapshot.",),
+                unavailable_reason=StaticRRGHistoryUnavailableReason.CURRENT_SNAPSHOT_MISSING,
+            )
+
+        def persist(self, *_args, **_kwargs):
+            raise AssertionError("persist is not part of this test")
+
+    class _BootstrapService:
+        def backfill(self, *_args, **_kwargs):
+            calls.append("bootstrap")
+            raise RuntimeError("calendar provider unavailable")
+
+    source = StaticGroupsRRGRollingHistoryExportSession(
+        schema_version="static-site-v3",
+        market="HK",
+        directory=tmp_path,
+        history_service=_HistoryService(),
+        bootstrap_service=_BootstrapService(),
+    )
+
+    with pytest.raises(StaticGroupsRRGUnavailableError) as exc_info:
+        source.build(
+            db=object(),
+            generated_at="2026-04-18T22:00:00Z",
+            expected_as_of_date=export_date,
+            market="HK",
+            formula_version=BALANCED_RS_FORMULA_VERSION,
+        )
+
+    assert calls == ["prepare", "bootstrap"]
+    assert exc_info.value.reason == (
+        "Static RRG bootstrap did not complete: calendar provider unavailable"
+    )
+    assert source.bootstrap_backfill == {
+        "status": "errored",
+        "market": "HK",
+        "as_of_date": "2026-04-18",
+        "formula_version": BALANCED_RS_FORMULA_VERSION,
+        "policy": "current_weekly_reference_static_bootstrap",
+        "lookback_start_date": "2026-04-18",
+        "target_dates": [],
+        "existing": 0,
+        "processed": 0,
+        "errors": 1,
+        "total_dates": 0,
+        "reason": "bootstrap_exception",
+        "error": "calendar provider unavailable",
+    }
+
+
 def test_rolling_source_does_not_bootstrap_sufficient_history(monkeypatch, tmp_path):
     export_date = date(2026, 4, 18)
     preparation = StaticRRGHistoryPreparation(
