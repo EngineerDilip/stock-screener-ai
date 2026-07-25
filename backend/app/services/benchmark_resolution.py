@@ -100,6 +100,7 @@ class BenchmarkResolution:
     bundle: BenchmarkDataBundle | None
     candidate_statuses: tuple[BenchmarkCandidateStatus, ...] = ()
     error: str | None = None
+    diagnostics: dict[str, object] | None = None
 
     def candidate_diagnostics(self) -> list[dict[str, str | None]]:
         return [status.as_diagnostic() for status in self.candidate_statuses]
@@ -110,6 +111,8 @@ class BenchmarkResolution:
             "market": market,
             "date": as_of_date.isoformat(),
         }
+        if self.diagnostics:
+            payload.update(self.diagnostics)
         diagnostics = self.candidate_diagnostics()
         if diagnostics:
             payload["benchmark_candidates"] = diagnostics

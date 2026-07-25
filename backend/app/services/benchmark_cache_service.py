@@ -355,7 +355,11 @@ class BenchmarkCacheService:
         from .yfinance_service import YFinanceService
 
         yfinance_service = YFinanceService()
-        return yfinance_service.get_historical_data(benchmark_symbol, period=period)
+        return yfinance_service.get_historical_data(
+            benchmark_symbol,
+            period=period,
+            use_cache=False,
+        )
 
     def _fetch_normalized_from_yfinance(self, benchmark_symbol: str, period: str) -> Optional[pd.DataFrame]:
         data = normalize_price_frame(self._fetch_from_yfinance(benchmark_symbol, period))

@@ -130,7 +130,7 @@ def test_static_market_validator_allows_selected_market_fallback_without_status(
     assert result.selected_fallback_diagnostics == {"CN": "missing status artifact"}
 
 
-def test_static_market_validator_allows_missing_cn_without_fallback(tmp_path: Path) -> None:
+def test_static_market_validator_allows_missing_non_us_without_fallback(tmp_path: Path) -> None:
     current_dir = tmp_path / "current"
     fallback_dir = tmp_path / "fallback"
     _write_market_manifest(current_dir, "static-market-US", "US")
@@ -138,12 +138,32 @@ def test_static_market_validator_allows_missing_cn_without_fallback(tmp_path: Pa
     result = validate_market_artifacts(
         current_dir=current_dir,
         fallback_dir=fallback_dir,
-        selected_markets={"CN"},
-        expected_markets={"US", "CN"},
+        selected_markets={"SG", "MY"},
+        expected_markets={"US", "SG", "MY"},
     )
 
     assert result.present_markets == {"US"}
-    assert result.allowed_missing_markets == {"CN"}
+    assert result.allowed_missing_markets == {"MY", "SG"}
+
+
+def test_static_market_validator_rejects_missing_us_without_fallback(
+    tmp_path: Path,
+) -> None:
+    current_dir = tmp_path / "current"
+    fallback_dir = tmp_path / "fallback"
+    _write_market_manifest(current_dir, "static-market-SG", "SG")
+
+    with pytest.raises(StaticMarketArtifactValidationError) as exc_info:
+        validate_market_artifacts(
+            current_dir=current_dir,
+            fallback_dir=fallback_dir,
+            selected_markets={"US"},
+            expected_markets={"US", "SG"},
+        )
+
+    message = str(exc_info.value)
+    assert "US" in message
+    assert "SG" not in message
 
 
 def test_static_market_validator_rejects_missing_cn_when_status_says_artifact_exists(
@@ -171,7 +191,7 @@ def test_static_market_validator_rejects_missing_cn_when_status_says_artifact_ex
     assert "CN" in str(exc_info.value)
 
 
-def test_static_market_validator_allows_missing_cn_after_export_failure(
+def test_static_market_validator_allows_missing_non_us_after_export_failure(
     tmp_path: Path,
 ) -> None:
     current_dir = tmp_path / "current"
@@ -179,7 +199,7 @@ def test_static_market_validator_allows_missing_cn_after_export_failure(
     _write_market_manifest(current_dir, "static-market-US", "US")
     _write_market_status(
         current_dir,
-        "CN",
+        "SG",
         has_current_artifact=False,
         status="failed",
         reason="export_failed",
@@ -188,12 +208,12 @@ def test_static_market_validator_allows_missing_cn_after_export_failure(
     result = validate_market_artifacts(
         current_dir=current_dir,
         fallback_dir=fallback_dir,
-        selected_markets={"CN"},
-        expected_markets={"US", "CN"},
+        selected_markets={"SG"},
+        expected_markets={"US", "SG"},
     )
 
     assert result.present_markets == {"US"}
-    assert result.allowed_missing_markets == {"CN"}
+    assert result.allowed_missing_markets == {"SG"}
 
 
 def test_static_market_validator_rejects_failed_selected_market_fallback(
@@ -251,21 +271,24 @@ def test_static_market_validator_rejects_failed_selected_required_market_fallbac
     assert "export_failed" in message
 
 
-def test_static_market_validator_still_rejects_missing_non_cn_market(tmp_path: Path) -> None:
+def test_static_market_validator_allows_missing_optional_market_but_not_us(
+    tmp_path: Path,
+) -> None:
     current_dir = tmp_path / "current"
     fallback_dir = tmp_path / "fallback"
-    _write_market_manifest(current_dir, "static-market-US", "US")
+    _write_market_manifest(current_dir, "static-market-HK", "HK")
 
     with pytest.raises(StaticMarketArtifactValidationError) as exc_info:
         validate_market_artifacts(
             current_dir=current_dir,
             fallback_dir=fallback_dir,
-            selected_markets={"HK"},
+            selected_markets={"US"},
             expected_markets={"US", "HK", "CN"},
         )
 
     message = str(exc_info.value)
-    assert "HK" in message
+    assert "US" in message
+    assert "HK" not in message
     assert "CN" not in message
 
 
@@ -308,7 +331,7 @@ def test_static_market_validator_warns_when_selected_market_uses_fallback(
     ) in capsys.readouterr().out
 
 
-def test_static_market_validator_warns_when_cn_is_missing(
+def test_static_market_validator_warns_when_optional_markets_are_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -318,7 +341,7 @@ def test_static_market_validator_warns_when_cn_is_missing(
     _write_market_manifest(current_dir, "static-market-US", "US")
     monkeypatch.setattr(
         "app.scripts.validate_static_market_artifacts.market_registry.supported_market_codes",
-        lambda: ("US", "CN"),
+        lambda: ("US", "CN", "SG"),
     )
 
     exit_code = main(
@@ -328,13 +351,13 @@ def test_static_market_validator_warns_when_cn_is_missing(
             "--fallback-dir",
             str(fallback_dir),
             "--selected-markets",
-            '["CN"]',
+            '["CN","SG"]',
         ]
     )
 
     output = capsys.readouterr().out
     assert exit_code == 0
-    assert "::warning::Publishing without optional market artifacts for: CN." in output
+    assert "::warning::Publishing without optional market artifacts for: CN, SG." in output
     assert "Required market artifacts present; static site is publishable." in output
 
 
