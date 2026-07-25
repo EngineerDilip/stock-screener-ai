@@ -187,6 +187,61 @@ def test_rolling_source_does_not_retry_failed_preparation(tmp_path):
     assert source.warnings == ("history unavailable",)
 
 
+def test_rolling_source_uses_unavailable_reason_when_warnings_empty(tmp_path):
+    export_date = date(2026, 4, 18)
+    plan = _plan(tmp_path, "HK")
+    preparations = [
+        StaticRRGHistoryPreparation(
+            plan=plan,
+            state=None,
+            unavailable_reason=StaticRRGHistoryUnavailableReason.CURRENT_SNAPSHOT_MISSING,
+        ),
+        StaticRRGHistoryPreparation(
+            plan=plan,
+            state=None,
+            unavailable_reason=StaticRRGHistoryUnavailableReason.CURRENT_SNAPSHOT_MISSING,
+        ),
+    ]
+
+    class _HistoryService:
+        def prepare(self, *_args, **_kwargs):
+            return preparations.pop(0)
+
+        def persist(self, *_args, **_kwargs):
+            raise AssertionError("persist is not part of this test")
+
+    class _BootstrapService:
+        def backfill(self, _db, *, market, through_date, formula_version):
+            return StaticRRGBootstrapBackfillResult(
+                status=StaticRRGBootstrapBackfillStatus.SKIPPED,
+                market=market,
+                as_of_date=through_date,
+                formula_version=formula_version,
+                lookback_start_date=through_date,
+            )
+
+    source = StaticGroupsRRGRollingHistoryExportSession(
+        schema_version="static-site-v3",
+        market="HK",
+        directory=tmp_path,
+        history_service=_HistoryService(),
+        bootstrap_service=_BootstrapService(),
+    )
+
+    with pytest.raises(StaticGroupsRRGUnavailableError) as exc_info:
+        source.build(
+            db=object(),
+            generated_at="2026-04-18T22:00:00Z",
+            expected_as_of_date=export_date,
+            market="HK",
+            formula_version=BALANCED_RS_FORMULA_VERSION,
+        )
+
+    assert exc_info.value.reason == (
+        "Rolling RRG history is unavailable for market HK: current_snapshot_missing."
+    )
+
+
 def test_rolling_source_bootstraps_short_prepared_history(monkeypatch, tmp_path):
     export_date = date(2026, 4, 18)
     plan = _plan(tmp_path, "HK")

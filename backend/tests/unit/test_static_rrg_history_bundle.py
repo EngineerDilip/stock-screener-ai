@@ -37,7 +37,7 @@ from app.services.group_ranking_repository import (
 )
 from app.services.ibd_group_rank_service import IBDGroupRankService
 from app.services.market_calendar_service import MarketCalendarService
-from app.services.rrg_service import MIN_TAIL_WEEKS, RRGService
+from app.services.rrg_service import DEFAULT_LOOKBACK_DAYS, MIN_TAIL_WEEKS, RRGService
 from app.services.static_rrg_history_bundle import (
     StaticRRGHistoryBundleService,
     StaticRRGHistoryProvider,
@@ -91,6 +91,37 @@ def test_static_rrg_history_readiness_requires_min_tail_weeks():
     assert service.has_minimum_history(None) is False
     assert service.has_minimum_history(short) is False
     assert service.has_minimum_history(enough) is True
+
+
+def test_static_rrg_history_readiness_counts_only_provider_usable_weeks():
+    service = StaticRRGHistoryBundleService()
+    group = StaticRRGGroupPoint(
+        industry_group="Software",
+        rank=1,
+        avg_rs_rating=80.0,
+        num_stocks=5,
+    )
+    through_date = date(2026, 7, 24)
+    old_week = StaticRRGWeek(
+        source_date=through_date - timedelta(days=DEFAULT_LOOKBACK_DAYS + 1),
+        groups=(group,),
+    )
+    recent_weeks = tuple(
+        StaticRRGWeek(
+            source_date=through_date - timedelta(weeks=MIN_TAIL_WEEKS - index - 2),
+            groups=(group,),
+        )
+        for index in range(MIN_TAIL_WEEKS - 1)
+    )
+    sparse = StaticRRGHistoryState(
+        schema_version=STATIC_RRG_HISTORY_SCHEMA_VERSION,
+        market="US",
+        rs_formula_version=BALANCED_RS_FORMULA_VERSION,
+        weeks=(old_week,) + recent_weeks,
+    )
+
+    assert len(sparse.weeks) == MIN_TAIL_WEEKS
+    assert service.has_minimum_history(sparse) is False
 
 
 def _session_factory():

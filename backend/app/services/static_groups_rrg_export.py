@@ -311,6 +311,7 @@ class StaticGroupsRRGRollingHistoryExportSession:
         if outcome.preparation.state is None:
             reason = _availability_failure_reason(
                 market=expected_market,
+                unavailable_reason=outcome.preparation.unavailable_reason,
                 warnings=outcome.warnings,
                 bootstrap_result=outcome.bootstrap_result,
             )
@@ -454,6 +455,7 @@ def _should_bootstrap(preparation: StaticRRGHistoryPreparation) -> bool:
 def _availability_failure_reason(
     *,
     market: str,
+    unavailable_reason: StaticRRGHistoryUnavailableReason | None,
     warnings: tuple[str, ...],
     bootstrap_result: StaticRRGBootstrapBackfillResult | None,
 ) -> str:
@@ -462,7 +464,17 @@ def _availability_failure_reason(
         and bootstrap_result.status is StaticRRGBootstrapBackfillStatus.ERRORED
     ):
         return _bootstrap_failure_warning(bootstrap_result)
-    return warnings[-1] if warnings else f"RRG is not enabled for market {market}."
+    if warnings:
+        return warnings[-1]
+    if (
+        unavailable_reason is None
+        or unavailable_reason is StaticRRGHistoryUnavailableReason.NOT_ENABLED
+    ):
+        return f"RRG is not enabled for market {market}."
+    return (
+        f"Rolling RRG history is unavailable for market {market}: "
+        f"{unavailable_reason.value}."
+    )
 
 
 def _bootstrap_failure_warning(result: StaticRRGBootstrapBackfillResult) -> str:
