@@ -39,7 +39,7 @@
 - Produces: `StaticRRGHistoryBundleService.has_minimum_history(state: StaticRRGHistoryState | None) -> bool`
 - Consumes: `MIN_TAIL_WEEKS` from `app.services.rrg_service`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add tests that validate `None`, short state, and exactly-enough state:
 
@@ -83,13 +83,13 @@ def test_static_rrg_history_readiness_requires_min_tail_weeks():
     assert service.has_minimum_history(enough) is True
 ```
 
-- [ ] **Step 2: Run the focused test**
+- [x] **Step 2: Run the focused test**
 
 Run: `cd backend && pytest tests/unit/test_static_rrg_history_bundle.py::test_static_rrg_history_readiness_requires_min_tail_weeks -q`
 
 Expected: fails because `has_minimum_history` does not exist.
 
-- [ ] **Step 3: Implement the helper**
+- [x] **Step 3: Implement the helper**
 
 Add the import and method:
 
@@ -100,7 +100,7 @@ def has_minimum_history(self, state: StaticRRGHistoryState | None) -> bool:
     return state is not None and len(state.weeks) >= MIN_TAIL_WEEKS
 ```
 
-- [ ] **Step 4: Run the focused test again**
+- [x] **Step 4: Run the focused test again**
 
 Run: `cd backend && pytest tests/unit/test_static_rrg_history_bundle.py::test_static_rrg_history_readiness_requires_min_tail_weeks -q`
 
@@ -121,7 +121,7 @@ Expected: pass.
 - Produces: `StaticRRGBootstrapBackfillService.backfill(db: Session, market: str, through_date: date, formula_version: str) -> StaticRRGBootstrapBackfillResult`
 - Consumes: `MarketRsInputLoader`, `MarketRsSnapshotService`, `CanonicalGroupRankingService`, `MarketCalendarService`, `MarketRsRunRepository`
 
-- [ ] **Step 1: Write the universe resolver test**
+- [x] **Step 1: Write the universe resolver test**
 
 Create a test that inserts two active US rows and one inactive row, calls
 `StaticRRGBootstrapUniverse.resolve()` for an older date, and asserts only active
@@ -131,7 +131,7 @@ Run: `cd backend && pytest tests/unit/test_static_rrg_bootstrap_backfill_service
 
 Expected: fail because the module does not exist.
 
-- [ ] **Step 2: Implement the universe resolver**
+- [x] **Step 2: Implement the universe resolver**
 
 Create `StaticRRGBootstrapUniverse`:
 
@@ -157,11 +157,12 @@ class StaticRRGBootstrapUniverse:
         )
 ```
 
-- [ ] **Step 3: Write the backfill orchestration test**
+- [x] **Step 3: Write the backfill orchestration test**
 
 Use fakes for calendar, snapshot service, repository, and group service. Seed no
-existing group dates. Assert `backfill()` selects the last enough trading sessions,
-calls snapshot/group calculation for each missing date, and returns:
+existing group dates. Assert `backfill()` selects the latest trading session from
+each week and uses the last `MIN_TAIL_WEEKS` weekly targets, calls
+snapshot/group calculation for each missing date, and returns:
 
 ```python
 {
@@ -176,14 +177,15 @@ Run: `cd backend && pytest tests/unit/test_static_rrg_bootstrap_backfill_service
 
 Expected: fail because `StaticRRGBootstrapBackfillService` does not exist.
 
-- [ ] **Step 4: Implement the backfill service**
+- [x] **Step 4: Implement the backfill service**
 
 Implement a dataclass result with `as_dict()` and a service that:
 
 ```python
 target_start = through_date - timedelta(days=DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS)
 target_dates = calendar_service.trading_days(market, target_start, through_date)
-selected_dates = target_dates[-MIN_TAIL_WEEKS:]
+latest_by_week = {rrg_week_start(day): day for day in target_dates}
+selected_dates = tuple(latest_by_week[key] for key in sorted(latest_by_week)[-MIN_TAIL_WEEKS:])
 existing_dates = query IBDGroupRank.date for market/formula/selected range
 for calculation_date in selected_dates:
     if calculation_date in existing_dates:
@@ -196,7 +198,7 @@ for calculation_date in selected_dates:
 
 Use a bootstrap-specific `MarketRsInputLoader(point_in_time_universe=StaticRRGBootstrapUniverse())` in the default constructor so historical dates use the current active universe only inside this service.
 
-- [ ] **Step 5: Run the bootstrap service tests**
+- [x] **Step 5: Run the bootstrap service tests**
 
 Run: `cd backend && pytest tests/unit/test_static_rrg_bootstrap_backfill_service.py -q`
 
@@ -215,7 +217,7 @@ Expected: pass.
 - Consumes: `StaticRRGBootstrapBackfillService.backfill()`
 - Produces daily-refresh result key: `rrg_bootstrap_backfill`
 
-- [ ] **Step 1: Write the exporter tests**
+- [x] **Step 1: Write the exporter tests**
 
 Add tests that monkeypatch:
 
@@ -232,7 +234,7 @@ Run: `cd backend && pytest tests/unit/test_export_static_site_script.py -k rrg_b
 
 Expected: fail because `_run_daily_refresh` has no `rrg_history_dir` argument.
 
-- [ ] **Step 2: Integrate into `_run_daily_refresh`**
+- [x] **Step 2: Integrate into `_run_daily_refresh`**
 
 Add parameter:
 
@@ -261,7 +263,7 @@ Implement `_bootstrap_static_rrg_history_if_needed()` to load/prepare current
 history, skip when RRG is not enabled or history is already sufficient, and run
 `StaticRRGBootstrapBackfillService().backfill()` otherwise.
 
-- [ ] **Step 3: Pass CLI history directory into refresh**
+- [x] **Step 3: Pass CLI history directory into refresh**
 
 Change the `main()` call:
 
@@ -269,7 +271,7 @@ Change the `main()` call:
 rrg_history_dir=Path(args.rrg_history_dir) if args.rrg_history_dir else None,
 ```
 
-- [ ] **Step 4: Run exporter tests**
+- [x] **Step 4: Run exporter tests**
 
 Run: `cd backend && pytest tests/unit/test_export_static_site_script.py -k rrg_bootstrap -q`
 
@@ -285,7 +287,7 @@ Expected: pass.
 **Interfaces:**
 - Produces: committed implementation branch.
 
-- [ ] **Step 1: Run focused RRG tests**
+- [x] **Step 1: Run focused RRG tests**
 
 Run:
 
@@ -298,7 +300,7 @@ pytest tests/unit/test_static_rrg_history_bundle.py::test_static_rrg_history_rea
 
 Expected: pass.
 
-- [ ] **Step 2: Run broader static/export tests**
+- [x] **Step 2: Run broader static/export tests**
 
 Run:
 
@@ -309,7 +311,7 @@ pytest tests/unit/test_export_static_site_script.py tests/unit/test_static_rrg_h
 
 Expected: pass.
 
-- [ ] **Step 3: Commit implementation**
+- [x] **Step 3: Commit implementation**
 
 Run:
 

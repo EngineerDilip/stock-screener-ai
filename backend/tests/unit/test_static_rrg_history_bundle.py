@@ -44,11 +44,53 @@ from app.services.static_rrg_history_bundle import (
 )
 from app.services.static_rrg_history_contract import (
     STATIC_RRG_HISTORY_SCHEMA_VERSION,
+    StaticRRGGroupPoint,
     StaticRRGHistoryBundleError,
+    StaticRRGHistoryState,
+    StaticRRGWeek,
 )
 from app.scanners.criteria.relative_strength import (
     RelativeStrengthCalculator,
 )
+
+
+def test_static_rrg_history_readiness_requires_min_tail_weeks():
+    service = StaticRRGHistoryBundleService()
+    group = StaticRRGGroupPoint(
+        industry_group="Software",
+        rank=1,
+        avg_rs_rating=80.0,
+        num_stocks=5,
+    )
+
+    short = StaticRRGHistoryState(
+        schema_version=STATIC_RRG_HISTORY_SCHEMA_VERSION,
+        market="US",
+        rs_formula_version=BALANCED_RS_FORMULA_VERSION,
+        weeks=tuple(
+            StaticRRGWeek(
+                source_date=date(2026, 1, 2) + timedelta(weeks=day),
+                groups=(group,),
+            )
+            for day in range(MIN_TAIL_WEEKS - 1)
+        ),
+    )
+    enough = short.model_copy(
+        update={
+            "weeks": short.weeks
+            + (
+                StaticRRGWeek(
+                    source_date=date(2026, 1, 2)
+                    + timedelta(weeks=MIN_TAIL_WEEKS - 1),
+                    groups=(group,),
+                ),
+            )
+        }
+    )
+
+    assert service.has_minimum_history(None) is False
+    assert service.has_minimum_history(short) is False
+    assert service.has_minimum_history(enough) is True
 
 
 def _session_factory():
