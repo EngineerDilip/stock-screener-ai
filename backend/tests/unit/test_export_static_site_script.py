@@ -226,6 +226,454 @@ def test_run_daily_refresh_activates_balanced_rs_before_static_consumers(
     }
 
 
+def test_prepare_balanced_static_rs_force_hydrates_required_benchmark_anchor(
+    monkeypatch,
+    _stub_balanced_static_rs_preparation,
+):
+    calls: list[dict[str, object]] = []
+    events: list[str] = []
+
+    class FakeBenchmarkCache:
+        def resolve_benchmark_bundle(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                bundle=SimpleNamespace(benchmark_symbol="ES3.SI"),
+                error_payload=lambda **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("successful benchmark hydration must not build an error")
+                ),
+            )
+
+    @contextmanager
+    def fake_session():
+        yield SimpleNamespace(commit=lambda: events.append("formula_commit"))
+
+    class FakeMarketRsRepository:
+        def activate_formula(self, _db, *, market, formula_version):
+            events.append(f"activate:{market}:{formula_version}")
+
+    real_helper = _stub_balanced_static_rs_preparation
+    if real_helper is not None:
+        monkeypatch.setattr(export_script, "_prepare_balanced_static_rs", real_helper)
+    monkeypatch.setattr(export_script, "get_benchmark_cache", lambda: FakeBenchmarkCache())
+    monkeypatch.setattr(export_script, "SessionLocal", fake_session)
+    monkeypatch.setattr(
+        export_script,
+        "MarketRsRunRepository",
+        FakeMarketRsRepository,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        market_rs_tasks,
+        "calculate_market_rs_snapshot",
+        SimpleNamespace(
+            run=lambda **kwargs: {
+                "status": "completed",
+                "market": kwargs["market"],
+                "as_of_date": kwargs["calculation_date"],
+                "formula_version": kwargs["formula_version"],
+                "market_rs_run_id": 42,
+            }
+        ),
+    )
+
+    result = export_script._prepare_balanced_static_rs(
+        market="SG",
+        as_of_date=date(2026, 7, 24),
+    )
+
+    assert calls == [
+        {
+            "market": "SG",
+            "period": "2y",
+            "force_refresh": True,
+            "fallback_policy": export_script.BenchmarkFallbackPolicy.ALLOW,
+            "required_as_of_date": date(2026, 7, 24),
+        }
+    ]
+    assert events == [
+        f"activate:SG:{BALANCED_RS_FORMULA_VERSION}",
+        "formula_commit",
+    ]
+    assert result["market_rs_run_id"] == 42
+
+
+def test_prepare_balanced_static_rs_retries_stale_benchmark_anchor_before_market_rs(
+    monkeypatch,
+    _stub_balanced_static_rs_preparation,
+):
+    calls: list[dict[str, object]] = []
+    events: list[str] = []
+
+    class FakeStaleResolution:
+        bundle = None
+
+        @staticmethod
+        def error_payload(*, market, as_of_date):
+            return {
+                "error": "benchmark_not_current",
+                "market": market,
+                "date": as_of_date.isoformat(),
+            }
+
+    class FakeBenchmarkCache:
+        def resolve_benchmark_bundle(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return FakeStaleResolution()
+            return SimpleNamespace(
+                bundle=SimpleNamespace(benchmark_symbol="ES3.SI"),
+                error_payload=lambda **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("successful benchmark retry must not build an error")
+                ),
+            )
+
+    @contextmanager
+    def fake_session():
+        yield SimpleNamespace(commit=lambda: events.append("formula_commit"))
+
+    class FakeMarketRsRepository:
+        def activate_formula(self, _db, *, market, formula_version):
+            events.append(f"activate:{market}:{formula_version}")
+
+    real_helper = _stub_balanced_static_rs_preparation
+    if real_helper is not None:
+        monkeypatch.setattr(export_script, "_prepare_balanced_static_rs", real_helper)
+    monkeypatch.setattr(export_script, "get_benchmark_cache", lambda: FakeBenchmarkCache())
+    monkeypatch.setattr(export_script, "SessionLocal", fake_session)
+    monkeypatch.setattr(
+        export_script,
+        "MarketRsRunRepository",
+        FakeMarketRsRepository,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        market_rs_tasks,
+        "calculate_market_rs_snapshot",
+        SimpleNamespace(
+            run=lambda **kwargs: events.append("market_rs_snapshot")
+            or {
+                "status": "completed",
+                "market": kwargs["market"],
+                "as_of_date": kwargs["calculation_date"],
+                "formula_version": kwargs["formula_version"],
+                "market_rs_run_id": 42,
+            }
+        ),
+    )
+
+    result = export_script._prepare_balanced_static_rs(
+        market="SG",
+        as_of_date=date(2026, 7, 24),
+    )
+
+    assert calls == [
+        {
+            "market": "SG",
+            "period": "2y",
+            "force_refresh": True,
+            "fallback_policy": export_script.BenchmarkFallbackPolicy.ALLOW,
+            "required_as_of_date": date(2026, 7, 24),
+        },
+        {
+            "market": "SG",
+            "period": "2y",
+            "force_refresh": True,
+            "fallback_policy": export_script.BenchmarkFallbackPolicy.ALLOW,
+            "required_as_of_date": date(2026, 7, 24),
+        },
+    ]
+    assert events == [
+        "market_rs_snapshot",
+        f"activate:SG:{BALANCED_RS_FORMULA_VERSION}",
+        "formula_commit",
+    ]
+    assert result["market_rs_run_id"] == 42
+
+
+def test_prepare_balanced_static_rs_reports_missing_required_benchmark_anchor(
+    monkeypatch,
+    _stub_balanced_static_rs_preparation,
+):
+    class FakeResolution:
+        bundle = None
+
+        @staticmethod
+        def error_payload(*, market, as_of_date):
+            return {
+                "error": "benchmark_not_current",
+                "market": market,
+                "date": as_of_date.isoformat(),
+                "benchmark_candidates": [
+                    {
+                        "symbol": "^STI",
+                        "role": "primary",
+                        "source": "fetch",
+                        "status": "stale_required_date",
+                        "latest_date": "2026-07-23",
+                    },
+                    {
+                        "symbol": "ES3.SI",
+                        "role": "fallback",
+                        "source": "fetch",
+                        "status": "stale_required_date",
+                        "latest_date": "2026-07-23",
+                    },
+                ],
+            }
+
+    class FakeBenchmarkCache:
+        def resolve_benchmark_bundle(self, **_kwargs):
+            return FakeResolution()
+
+    real_helper = _stub_balanced_static_rs_preparation
+    if real_helper is not None:
+        monkeypatch.setattr(export_script, "_prepare_balanced_static_rs", real_helper)
+    monkeypatch.setattr(export_script, "get_benchmark_cache", lambda: FakeBenchmarkCache())
+    monkeypatch.setattr(
+        market_rs_tasks,
+        "calculate_market_rs_snapshot",
+        SimpleNamespace(
+            run=lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("balanced RS must not run without a current benchmark anchor")
+            )
+        ),
+    )
+
+    result = export_script._prepare_balanced_static_rs(
+        market="SG",
+        as_of_date=date(2026, 7, 24),
+    )
+
+    assert result == {
+        "status": "failed",
+        "market": "SG",
+        "as_of_date": "2026-07-24",
+        "formula_version": BALANCED_RS_FORMULA_VERSION,
+        "reason_code": "benchmark_adjusted_anchor_missing",
+        "diagnostics": {
+            "error": "benchmark_not_current",
+            "market": "SG",
+            "date": "2026-07-24",
+            "benchmark_candidates": [
+                {
+                    "symbol": "^STI",
+                    "role": "primary",
+                    "source": "fetch",
+                    "status": "stale_required_date",
+                    "latest_date": "2026-07-23",
+                },
+                {
+                    "symbol": "ES3.SI",
+                    "role": "fallback",
+                    "source": "fetch",
+                    "status": "stale_required_date",
+                    "latest_date": "2026-07-23",
+                },
+            ],
+        },
+        "market_rs_run_id": None,
+    }
+
+
+def test_run_daily_refresh_skips_snapshot_when_market_rs_benchmark_anchor_missing(
+    monkeypatch,
+):
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        export_script,
+        "_resolve_latest_completed_trading_date",
+        lambda _market: date(2026, 7, 24),
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_refresh_static_daily_prices",
+        lambda *, as_of_date, market=None: calls.append(f"price:{market}") or {"status": "completed"},
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_prepare_static_rs_formula",
+        lambda *, market, as_of_date, formula_version: calls.append(f"market-rs:{market}")
+        or {
+            "status": "failed",
+            "market": market,
+            "as_of_date": as_of_date.isoformat(),
+            "formula_version": formula_version,
+            "reason_code": "benchmark_adjusted_anchor_missing",
+            "diagnostics": {
+                "error": "benchmark_not_current",
+                "benchmark_candidates": [
+                    {
+                        "symbol": "^STI",
+                        "role": "primary",
+                        "source": "fetch",
+                        "status": "stale_required_date",
+                        "latest_date": "2026-07-23",
+                    }
+                ],
+            },
+            "market_rs_run_id": None,
+        },
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_ensure_group_rank_history",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("group-rank history must not run without market RS")
+        ),
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_compute_static_market_exposure",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("market exposure must not run without market RS")
+        ),
+    )
+    monkeypatch.setattr(
+        feature_store_tasks,
+        "build_daily_snapshot",
+        SimpleNamespace(
+            run=lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("feature snapshot must not run without market RS")
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        feature_store_tasks,
+        "_enrich_feature_run_with_ibd_metadata",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("metadata enrichment must not run without a snapshot")
+        ),
+    )
+    monkeypatch.setattr(
+        export_script.IBDIndustryService,
+        "load_from_csv",
+        lambda _db, csv_path=None: 1,
+    )
+
+    results, warnings = export_script._run_daily_refresh(
+        market="SG",
+        skip_universe_refresh=True,
+        skip_fundamentals_refresh=True,
+    )
+
+    assert calls == ["price:SG", "market-rs:SG"]
+    assert results["feature_snapshots"]["SG"] == {
+        "status": "skipped",
+        "reason": "market_rs_not_ready",
+        "market": "SG",
+        "as_of_date": "2026-07-24",
+        "failure_diagnostics": {
+            "reason_code": "benchmark_adjusted_anchor_missing",
+            "diagnostics": {
+                "error": "benchmark_not_current",
+                "benchmark_candidates": [
+                    {
+                        "symbol": "^STI",
+                        "role": "primary",
+                        "source": "fetch",
+                        "status": "stale_required_date",
+                        "latest_date": "2026-07-23",
+                    }
+                ],
+            },
+        },
+        "warnings": [
+            "Static export market SG Market RS not ready for 2026-07-24: "
+            "benchmark_adjusted_anchor_missing."
+        ],
+    }
+    assert results["group_rank_history_backfill"]["SG"]["status"] == "skipped"
+    assert results["market_exposure"]["SG"]["status"] == "skipped"
+    assert results["ibd_metadata_refresh"]["SG"]["reason"] == "snapshot_not_ready"
+    assert (
+        "Static export market SG Market RS not ready for 2026-07-24: "
+        "benchmark_adjusted_anchor_missing."
+    ) in warnings
+
+
+def test_run_daily_refresh_treats_explicit_legacy_rs_selection_as_ready(
+    monkeypatch,
+):
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        export_script,
+        "_resolve_latest_completed_trading_date",
+        lambda _market: date(2026, 7, 24),
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_refresh_static_daily_prices",
+        lambda *, as_of_date, market=None: calls.append(f"price:{market}")
+        or {"status": "completed"},
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_prepare_static_rs_formula",
+        lambda *, market, as_of_date, formula_version: calls.append(f"market-rs:{market}")
+        or {
+            "status": "selected",
+            "market": market,
+            "as_of_date": as_of_date.isoformat(),
+            "formula_version": formula_version,
+            "market_rs_run_id": None,
+        },
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_ensure_group_rank_history",
+        lambda *, as_of_date, market, formula_version: calls.append(f"group:{market}")
+        or _backfill_result(
+            status=GroupRankHistoryBackfillStatus.COMPLETED,
+            market=market,
+            as_of_date=as_of_date,
+        ),
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_compute_static_market_exposure",
+        lambda *, as_of_date, market: calls.append(f"exposure:{market}")
+        or {"status": "completed"},
+    )
+    monkeypatch.setattr(
+        feature_store_tasks,
+        "build_daily_snapshot",
+        SimpleNamespace(
+            run=lambda **kwargs: calls.append(f"snapshot:{kwargs['market']}")
+            or {"status": "published", "run_id": 77}
+        ),
+    )
+    monkeypatch.setattr(
+        feature_store_tasks,
+        "_enrich_feature_run_with_ibd_metadata",
+        lambda **_kwargs: {"status": "completed"},
+    )
+    monkeypatch.setattr(
+        export_script.IBDIndustryService,
+        "load_from_csv",
+        lambda _db, csv_path=None: 1,
+    )
+    monkeypatch.setattr(export_script, "_upsert_feature_run_pointer", lambda **_kwargs: None)
+
+    results, warnings = export_script._run_daily_refresh(
+        market="US",
+        skip_universe_refresh=True,
+        skip_fundamentals_refresh=True,
+        rs_formula_version=LEGACY_RS_FORMULA_VERSION,
+    )
+
+    assert warnings == []
+    assert calls == [
+        "price:US",
+        "market-rs:US",
+        "group:US",
+        "exposure:US",
+        "snapshot:US",
+    ]
+    assert results["feature_snapshots"]["US"]["run_id"] == 77
+
+
 def test_prepare_static_rs_formula_supports_explicit_legacy_rollback(monkeypatch):
     events: list[str] = []
 

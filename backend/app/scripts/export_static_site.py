@@ -25,6 +25,7 @@ from app.services.ibd_industry_service import IBDIndustryService
 from app.services.group_rank_history_backfill_service import (
     GroupRankHistoryBackfillResult,
     GroupRankHistoryBackfillService,
+    GroupRankHistoryBackfillStatus,
 )
 from app.services.benchmark_cache_service import BenchmarkFallbackPolicy
 from app.services.static_daily_price_refresh_service import (
@@ -44,6 +45,7 @@ from app.services.static_market_publish_policy import OPTIONAL_STATIC_MARKETS
 from app.tasks.data_fetch_lock import disable_serialized_data_fetch_lock
 from app.tasks.workload_coordination import disable_serialized_market_workload
 from app.wiring.bootstrap import (
+    get_benchmark_cache,
     get_group_rank_snapshot_coordinator,
     get_market_calendar_service,
     get_price_cache,
@@ -60,6 +62,8 @@ STATIC_DEFAULT_MARKET = "US"
 STATIC_EXPOSURE_PRIMARY_ONLY_BENCHMARK_MARKETS = frozenset({"US"})
 STATIC_EXPORT_SKIPPED_EXIT_CODE = 78
 STATIC_EXPORT_NO_CURRENT_ARTIFACT_EXIT_CODE = 79
+STATIC_RS_BENCHMARK_HYDRATION_PERIOD = "2y"
+STATIC_RS_BENCHMARK_HYDRATION_ATTEMPTS = 2
 SUPPORTED_RS_FORMULA_VERSIONS = frozenset(
     {BALANCED_RS_FORMULA_VERSION, LEGACY_RS_FORMULA_VERSION}
 )
@@ -167,6 +171,50 @@ def _snapshot_publishable(snapshot: dict[str, Any]) -> bool:
     return False
 
 
+def _static_market_rs_ready(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if result.get("formula_version") == LEGACY_RS_FORMULA_VERSION:
+        return result.get("status") == "selected"
+    return (
+        result.get("status") == "completed"
+        and result.get("market_rs_run_id") is not None
+    )
+
+
+def _market_rs_not_ready_warning(
+    *,
+    market: str,
+    as_of_date: date,
+    result: dict[str, Any],
+) -> str:
+    reason = result.get("reason_code") or result.get("status") or "unknown"
+    return (
+        f"Static export market {market} Market RS not ready "
+        f"for {as_of_date.isoformat()}: {reason}."
+    )
+
+
+def _market_rs_not_ready_snapshot(
+    *,
+    market: str,
+    as_of_date: date,
+    result: dict[str, Any],
+    warning: str,
+) -> dict[str, Any]:
+    return {
+        "status": "skipped",
+        "reason": "market_rs_not_ready",
+        "market": market,
+        "as_of_date": as_of_date.isoformat(),
+        "failure_diagnostics": {
+            "reason_code": result.get("reason_code"),
+            "diagnostics": result.get("diagnostics") or {},
+        },
+        "warnings": [warning],
+    }
+
+
 def _selected_market_non_publishable_snapshot(
     refresh_results: dict[str, Any],
     market: str | None,
@@ -261,17 +309,63 @@ def _refresh_static_daily_prices(*, as_of_date: date, market: str | None = None)
     )
 
 
+def _resolve_static_rs_benchmark_anchors(*, market: str, as_of_date: date) -> Any:
+    benchmark_cache = get_benchmark_cache()
+    last_resolution: Any = None
+    for attempt in range(STATIC_RS_BENCHMARK_HYDRATION_ATTEMPTS):
+        last_resolution = benchmark_cache.resolve_benchmark_bundle(
+            market=market,
+            period=STATIC_RS_BENCHMARK_HYDRATION_PERIOD,
+            force_refresh=True,
+            fallback_policy=BenchmarkFallbackPolicy.ALLOW,
+            required_as_of_date=as_of_date,
+        )
+        if last_resolution.bundle is not None:
+            return last_resolution
+        if attempt + 1 < STATIC_RS_BENCHMARK_HYDRATION_ATTEMPTS:
+            print(
+                f"[static-rs] Benchmark anchor for {market} is missing or stale "
+                f"for {as_of_date.isoformat()}; retrying benchmark candidates.",
+                flush=True,
+            )
+    return last_resolution
+
+
 def _prepare_balanced_static_rs(*, market: str, as_of_date: date) -> dict[str, Any]:
     """Build the exact canonical snapshot and select it in this private build DB."""
     from app.tasks.market_rs_tasks import calculate_market_rs_snapshot
 
     normalized_market = market.upper()
+    benchmark_resolution = _resolve_static_rs_benchmark_anchors(
+        market=normalized_market,
+        as_of_date=as_of_date,
+    )
+    if benchmark_resolution.bundle is None:
+        return {
+            "status": "failed",
+            "market": normalized_market,
+            "as_of_date": as_of_date.isoformat(),
+            "formula_version": BALANCED_RS_FORMULA_VERSION,
+            "reason_code": "benchmark_adjusted_anchor_missing",
+            "diagnostics": benchmark_resolution.error_payload(
+                market=normalized_market,
+                as_of_date=as_of_date,
+            ),
+            "market_rs_run_id": None,
+        }
+
     result = calculate_market_rs_snapshot.run(
         market=normalized_market,
         calculation_date=as_of_date.isoformat(),
         formula_version=BALANCED_RS_FORMULA_VERSION,
         rebuild_incompatible=True,
     )
+    if (
+        isinstance(result, dict)
+        and result.get("status") == "failed"
+        and result.get("reason_code") == "benchmark_adjusted_anchor_missing"
+    ):
+        return {**result, "market_rs_run_id": None}
     if (
         not isinstance(result, dict)
         or result.get("status") != "completed"
@@ -510,10 +604,33 @@ def _run_daily_refresh(
                 formula_version=formula_by_market[selected_market],
             )
         results["market_rs"] = market_rs_results
+        market_rs_not_ready_warnings = {
+            selected_market: _market_rs_not_ready_warning(
+                market=selected_market,
+                as_of_date=as_of_by_market[selected_market],
+                result=market_rs_results[selected_market],
+            )
+            for selected_market in selected_markets
+            if not _static_market_rs_ready(market_rs_results.get(selected_market))
+        }
+        warnings.extend(market_rs_not_ready_warnings.values())
 
         group_rank_history: dict[str, GroupRankHistoryBackfillResult] = {}
         group_rank_history_report: dict[str, dict[str, Any]] = {}
         for selected_market in selected_markets:
+            if selected_market in market_rs_not_ready_warnings:
+                skipped = GroupRankHistoryBackfillResult(
+                    status=GroupRankHistoryBackfillStatus.SKIPPED,
+                    market=selected_market,
+                    as_of_date=as_of_by_market[selected_market],
+                    lookback_start_date=as_of_by_market[selected_market],
+                    error="market_rs_not_ready",
+                )
+                group_rank_history[selected_market] = skipped
+                report = skipped.as_dict()
+                report["reason"] = "market_rs_not_ready"
+                group_rank_history_report[selected_market] = report
+                continue
             backfill = _ensure_group_rank_history(
                 as_of_date=as_of_by_market[selected_market],
                 market=selected_market,
@@ -526,6 +643,14 @@ def _run_daily_refresh(
         market_exposure: dict[str, Any] = {}
         for selected_market in selected_markets:
             market_as_of = as_of_by_market[selected_market]
+            if selected_market in market_rs_not_ready_warnings:
+                market_exposure[selected_market] = {
+                    "status": "skipped",
+                    "reason": "market_rs_not_ready",
+                    "market": selected_market,
+                    "date": market_as_of.isoformat(),
+                }
+                continue
             try:
                 exposure_result = _compute_static_market_exposure(
                     as_of_date=market_as_of,
@@ -558,6 +683,15 @@ def _run_daily_refresh(
         feature_snapshots: dict[str, Any] = {}
         for selected_market in selected_markets:
             market_as_of = as_of_by_market[selected_market]
+            market_rs_warning = market_rs_not_ready_warnings.get(selected_market)
+            if market_rs_warning is not None:
+                feature_snapshots[selected_market] = _market_rs_not_ready_snapshot(
+                    market=selected_market,
+                    as_of_date=market_as_of,
+                    result=market_rs_results[selected_market],
+                    warning=market_rs_warning,
+                )
+                continue
             exposure_result = market_exposure.get(selected_market)
             if isinstance(exposure_result, dict) and exposure_result.get("error"):
                 exposure_warning = (
