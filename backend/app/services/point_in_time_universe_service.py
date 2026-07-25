@@ -31,6 +31,11 @@ class PointInTimeUniverseUnavailable(RuntimeError):
     """Raised when historical lifecycle evidence cannot reproduce membership."""
 
 
+def hash_point_in_time_universe_symbols(symbols: tuple[str, ...]) -> str:
+    payload = "".join(f"{symbol}\n" for symbol in symbols).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 class PointInTimeUniverseService:
     def __init__(
         self,
@@ -40,11 +45,6 @@ class PointInTimeUniverseService:
     ) -> None:
         self._market_calendar = market_calendar or MarketCalendarService()
         self._market_catalog = market_catalog or get_market_catalog()
-
-    @staticmethod
-    def _universe_hash(symbols: tuple[str, ...]) -> str:
-        payload = "".join(f"{symbol}\n" for symbol in symbols).encode("utf-8")
-        return hashlib.sha256(payload).hexdigest()
 
     def _snapshot(
         self,
@@ -57,7 +57,7 @@ class PointInTimeUniverseService:
             market=market,
             as_of_date=as_of_date,
             symbols=symbols,
-            universe_hash=self._universe_hash(symbols),
+            universe_hash=hash_point_in_time_universe_symbols(symbols),
         )
 
     def resolve(

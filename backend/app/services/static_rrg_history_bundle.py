@@ -26,7 +26,7 @@ from app.services.group_rank_snapshot_reader import (
 )
 from app.services.market_taxonomy_service import get_market_taxonomy_service
 from app.services.rrg_history_provider import RRGHistoryResult
-from app.services.rrg_service import RRGService
+from app.services.rrg_service import DEFAULT_LOOKBACK_DAYS, MIN_TAIL_WEEKS, RRGService
 from app.services.static_rrg_history_contract import (
     STATIC_RRG_HISTORY_RETENTION_WEEKS,
     STATIC_RRG_HISTORY_SCHEMA_VERSION,
@@ -79,6 +79,17 @@ class StaticRRGHistoryBundleService:
     snapshot_reader: GroupRankSnapshotReader = field(
         default_factory=GroupRankSnapshotReader
     )
+
+    @staticmethod
+    def has_minimum_history(state: StaticRRGHistoryState | None) -> bool:
+        if state is None:
+            return False
+        cutoff = state.through_date - timedelta(days=DEFAULT_LOOKBACK_DAYS)
+        usable_weeks = [
+            week for week in state.weeks
+            if cutoff <= week.source_date <= state.through_date
+        ]
+        return len(usable_weeks) >= MIN_TAIL_WEEKS
 
     def prepare(
         self,
