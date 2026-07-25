@@ -28,6 +28,7 @@ from app.services.group_rank_history_backfill_service import (
     GroupRankHistoryBackfillStatus,
 )
 from app.services.benchmark_cache_service import BenchmarkFallbackPolicy
+from app.services.benchmark_resolution import BenchmarkResolution
 from app.services.static_daily_price_refresh_service import (
     StaticDailyPriceRefreshService,
     static_daily_price_refresh_batch_size as _static_daily_price_refresh_batch_size,
@@ -64,6 +65,7 @@ STATIC_EXPORT_SKIPPED_EXIT_CODE = 78
 STATIC_EXPORT_NO_CURRENT_ARTIFACT_EXIT_CODE = 79
 STATIC_RS_BENCHMARK_HYDRATION_PERIOD = "2y"
 STATIC_RS_BENCHMARK_HYDRATION_ATTEMPTS = 2
+STATIC_RS_BENCHMARK_RESOLUTION_EXCEPTION = "benchmark_resolution_exception"
 SUPPORTED_RS_FORMULA_VERSIONS = frozenset(
     {BALANCED_RS_FORMULA_VERSION, LEGACY_RS_FORMULA_VERSION}
 )
@@ -309,16 +311,50 @@ def _refresh_static_daily_prices(*, as_of_date: date, market: str | None = None)
     )
 
 
+def _benchmark_resolution_exception(exc: Exception) -> BenchmarkResolution:
+    return BenchmarkResolution(
+        bundle=None,
+        error=STATIC_RS_BENCHMARK_RESOLUTION_EXCEPTION,
+        diagnostics={
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+        },
+    )
+
+
+def _resolve_static_rs_benchmark_bundle(
+    benchmark_cache: Any,
+    *,
+    market: str,
+    as_of_date: date,
+    force_refresh: bool,
+) -> BenchmarkResolution:
+    try:
+        return benchmark_cache.resolve_benchmark_bundle(
+            market=market,
+            period=STATIC_RS_BENCHMARK_HYDRATION_PERIOD,
+            force_refresh=force_refresh,
+            fallback_policy=BenchmarkFallbackPolicy.ALLOW,
+            required_as_of_date=as_of_date,
+        )
+    except Exception as exc:  # pragma: no cover - provider/cache variability
+        print(
+            f"[static-rs] Benchmark resolution for {market} failed "
+            f"for {as_of_date.isoformat()}: {type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return _benchmark_resolution_exception(exc)
+
+
 def _resolve_static_rs_benchmark_anchors(*, market: str, as_of_date: date) -> Any:
     benchmark_cache = get_benchmark_cache()
     last_resolution: Any = None
     for attempt in range(STATIC_RS_BENCHMARK_HYDRATION_ATTEMPTS):
-        last_resolution = benchmark_cache.resolve_benchmark_bundle(
+        last_resolution = _resolve_static_rs_benchmark_bundle(
+            benchmark_cache,
             market=market,
-            period=STATIC_RS_BENCHMARK_HYDRATION_PERIOD,
+            as_of_date=as_of_date,
             force_refresh=True,
-            fallback_policy=BenchmarkFallbackPolicy.ALLOW,
-            required_as_of_date=as_of_date,
         )
         if last_resolution.bundle is not None:
             return last_resolution
@@ -328,7 +364,76 @@ def _resolve_static_rs_benchmark_anchors(*, market: str, as_of_date: date) -> An
                 f"for {as_of_date.isoformat()}; retrying benchmark candidates.",
                 flush=True,
             )
+    cached_resolution = _resolve_static_rs_benchmark_bundle(
+        benchmark_cache,
+        market=market,
+        as_of_date=as_of_date,
+        force_refresh=False,
+    )
+    if cached_resolution.bundle is not None:
+        return cached_resolution
+    if (
+        getattr(last_resolution, "error", None)
+        == STATIC_RS_BENCHMARK_RESOLUTION_EXCEPTION
+    ):
+        return last_resolution
+    if (
+        getattr(cached_resolution, "error", None)
+        == STATIC_RS_BENCHMARK_RESOLUTION_EXCEPTION
+    ):
+        return cached_resolution
+    last_statuses = tuple(getattr(last_resolution, "candidate_statuses", ()) or ())
+    cached_statuses = tuple(getattr(cached_resolution, "candidate_statuses", ()) or ())
+    if last_statuses or cached_statuses:
+        return BenchmarkResolution(
+            bundle=None,
+            candidate_statuses=tuple((*last_statuses, *cached_statuses)),
+            error=getattr(cached_resolution, "error", None)
+            or getattr(last_resolution, "error", None),
+        )
     return last_resolution
+
+
+def _benchmark_resolution_candidates(resolution: Any) -> tuple[str, ...]:
+    bundle = getattr(resolution, "bundle", None)
+    candidate_symbols = getattr(bundle, "candidate_symbols", None)
+    if candidate_symbols:
+        return tuple(str(symbol) for symbol in candidate_symbols if str(symbol))
+    return ()
+
+
+def _hydrate_remaining_static_rs_benchmarks(
+    *,
+    market: str,
+    as_of_date: date,
+    resolution: Any,
+) -> None:
+    bundle = getattr(resolution, "bundle", None)
+    selected_symbol = getattr(bundle, "benchmark_symbol", None)
+    if selected_symbol is None:
+        return
+
+    benchmark_cache = get_benchmark_cache()
+    remaining_symbols = tuple(
+        symbol
+        for symbol in _benchmark_resolution_candidates(resolution)
+        if symbol != selected_symbol
+    )
+    for benchmark_symbol in remaining_symbols:
+        try:
+            benchmark_cache.fetch_and_cache_benchmark(
+                benchmark_symbol=benchmark_symbol,
+                market=market,
+                period=STATIC_RS_BENCHMARK_HYDRATION_PERIOD,
+                required_as_of_date=as_of_date,
+            )
+        except Exception as exc:  # pragma: no cover - provider/cache variability
+            print(
+                f"[static-rs] Fallback benchmark hydration for {market} "
+                f"{benchmark_symbol} failed for {as_of_date.isoformat()}: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
 
 
 def _prepare_balanced_static_rs(*, market: str, as_of_date: date) -> dict[str, Any]:
@@ -365,7 +470,23 @@ def _prepare_balanced_static_rs(*, market: str, as_of_date: date) -> dict[str, A
         and result.get("status") == "failed"
         and result.get("reason_code") == "benchmark_adjusted_anchor_missing"
     ):
-        return {**result, "market_rs_run_id": None}
+        _hydrate_remaining_static_rs_benchmarks(
+            market=normalized_market,
+            as_of_date=as_of_date,
+            resolution=benchmark_resolution,
+        )
+        result = calculate_market_rs_snapshot.run(
+            market=normalized_market,
+            calculation_date=as_of_date.isoformat(),
+            formula_version=BALANCED_RS_FORMULA_VERSION,
+            rebuild_incompatible=True,
+        )
+        if (
+            isinstance(result, dict)
+            and result.get("status") == "failed"
+            and result.get("reason_code") == "benchmark_adjusted_anchor_missing"
+        ):
+            return {**result, "market_rs_run_id": None}
     if (
         not isinstance(result, dict)
         or result.get("status") != "completed"
