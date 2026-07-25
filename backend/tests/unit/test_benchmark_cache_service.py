@@ -104,6 +104,32 @@ def test_fetch_and_cache_benchmark_without_redis_fetches_directly_and_persists()
     assert calls["store_db"] == 1
 
 
+def test_fetch_from_yfinance_bypasses_general_price_cache(monkeypatch):
+    from app.services import yfinance_service as yfinance_module
+
+    service = BenchmarkCacheService(redis_client=None, session_factory=lambda: None)
+    data = _ohlcv_frame([100.0], ["2026-07-24"])
+    captured: dict[str, object] = {}
+
+    class FakeYFinanceService:
+        def get_historical_data(self, symbol, *, period, use_cache):
+            captured.update(
+                {
+                    "symbol": symbol,
+                    "period": period,
+                    "use_cache": use_cache,
+                }
+            )
+            return data
+
+    monkeypatch.setattr(yfinance_module, "YFinanceService", FakeYFinanceService)
+
+    result = service._fetch_from_yfinance("^STI", "2y")
+
+    assert result is data
+    assert captured == {"symbol": "^STI", "period": "2y", "use_cache": False}
+
+
 def test_fetch_and_cache_benchmark_cleans_non_finite_rows_before_cache_db_and_return():
     class FakeRedis:
         def __init__(self):
