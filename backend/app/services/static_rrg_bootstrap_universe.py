@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-import hashlib
 from datetime import date
 
 from sqlalchemy.orm import Session
 
 from app.models.stock_universe import StockUniverse
-from app.services.point_in_time_universe_service import PointInTimeUniverse
+from app.services.point_in_time_universe_service import (
+    PointInTimeUniverse,
+    hash_point_in_time_universe_symbols,
+)
 
 
 STATIC_RRG_BOOTSTRAP_UNIVERSE_POLICY = "current_weekly_reference_static_bootstrap"
@@ -16,11 +18,6 @@ STATIC_RRG_BOOTSTRAP_UNIVERSE_POLICY = "current_weekly_reference_static_bootstra
 
 class StaticRRGBootstrapUniverse:
     """Resolve historical bootstrap membership from the current active universe."""
-
-    @staticmethod
-    def _universe_hash(symbols: tuple[str, ...]) -> str:
-        payload = "".join(f"{symbol}\n" for symbol in symbols).encode("utf-8")
-        return hashlib.sha256(payload).hexdigest()
 
     def resolve(
         self,
@@ -44,7 +41,7 @@ class StaticRRGBootstrapUniverse:
             market=normalized_market,
             as_of_date=as_of_date,
             symbols=symbols,
-            universe_hash=self._universe_hash(symbols),
+            universe_hash=hash_point_in_time_universe_symbols(symbols),
         )
 
 

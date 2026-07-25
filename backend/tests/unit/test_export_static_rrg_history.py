@@ -108,7 +108,7 @@ def test_main_configures_and_persists_market_rrg_state(monkeypatch, tmp_path):
 
     class _RollingHistorySource:
         warnings = ()
-        bootstrap_backfill = None
+        bootstrap_result = None
 
         def __init__(self, *, schema_version, market, directory):
             calls.append(("source", schema_version, market, directory))
@@ -160,7 +160,7 @@ def test_main_does_not_fail_when_rrg_state_cannot_be_persisted(
 ):
     class _RollingHistorySource:
         warnings = ()
-        bootstrap_backfill = None
+        bootstrap_result = None
 
         def __init__(self, **_kwargs):
             pass

@@ -882,9 +882,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise
 
         if rrg_history_session is not None:
-            bootstrap_backfill = rrg_history_session.bootstrap_backfill
-            if bootstrap_backfill is not None:
-                print(f"Static RRG bootstrap: {bootstrap_backfill}")
+            bootstrap_result = rrg_history_session.bootstrap_result
+            if bootstrap_result is not None:
+                print(f"Static RRG bootstrap: {bootstrap_result.as_dict()}")
             refresh_warnings.extend(rrg_history_session.warnings)
             try:
                 history_stats = rrg_history_session.persist(

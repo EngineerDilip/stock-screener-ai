@@ -271,19 +271,16 @@ def test_rolling_source_bootstraps_short_prepared_history(monkeypatch, tmp_path)
         export_date,
         BALANCED_RS_FORMULA_VERSION,
     )
-    assert source.bootstrap_backfill == {
-        "status": "completed",
-        "market": "HK",
-        "as_of_date": "2026-04-18",
-        "formula_version": BALANCED_RS_FORMULA_VERSION,
-        "policy": "current_weekly_reference_static_bootstrap",
-        "lookback_start_date": "2026-01-01",
-        "target_dates": ["2026-04-18"],
-        "existing": 0,
-        "processed": 1,
-        "errors": 0,
-        "total_dates": 1,
-    }
+    assert source.bootstrap_result == StaticRRGBootstrapBackfillResult(
+        status=StaticRRGBootstrapBackfillStatus.COMPLETED,
+        market="HK",
+        as_of_date=export_date,
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+        lookback_start_date=date(2026, 1, 1),
+        target_dates=(export_date,),
+        processed=1,
+        total_dates=1,
+    )
     assert source.warnings == (
         f"Rolling RRG history has only {MIN_TAIL_WEEKS - 1} weekly points.",
         "Rolling RRG history was advanced after bootstrap.",
@@ -452,21 +449,16 @@ def test_rolling_source_contains_bootstrap_exception_in_optional_path(tmp_path):
     assert exc_info.value.reason == (
         "Static RRG bootstrap did not complete: calendar provider unavailable"
     )
-    assert source.bootstrap_backfill == {
-        "status": "errored",
-        "market": "HK",
-        "as_of_date": "2026-04-18",
-        "formula_version": BALANCED_RS_FORMULA_VERSION,
-        "policy": "current_weekly_reference_static_bootstrap",
-        "lookback_start_date": "2026-04-18",
-        "target_dates": [],
-        "existing": 0,
-        "processed": 0,
-        "errors": 1,
-        "total_dates": 0,
-        "reason": "bootstrap_exception",
-        "error": "calendar provider unavailable",
-    }
+    assert source.bootstrap_result == StaticRRGBootstrapBackfillResult(
+        status=StaticRRGBootstrapBackfillStatus.ERRORED,
+        market="HK",
+        as_of_date=export_date,
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+        lookback_start_date=export_date,
+        errors=1,
+        reason="bootstrap_exception",
+        error="calendar provider unavailable",
+    )
 
 
 def test_rolling_source_does_not_bootstrap_sufficient_history(monkeypatch, tmp_path):
@@ -507,7 +499,7 @@ def test_rolling_source_does_not_bootstrap_sufficient_history(monkeypatch, tmp_p
         market="HK",
         formula_version=BALANCED_RS_FORMULA_VERSION,
     ) == {"available": True}
-    assert source.bootstrap_backfill is None
+    assert source.bootstrap_result is None
 
 
 def test_rolling_source_rejects_wrong_market_before_preparation(tmp_path):

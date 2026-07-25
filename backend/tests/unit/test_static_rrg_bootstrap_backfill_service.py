@@ -20,6 +20,9 @@ from app.services.group_rank_snapshot_coordinator import (
     GroupSnapshotResult,
     GroupSnapshotStatus,
 )
+from app.services.point_in_time_universe_service import (
+    hash_point_in_time_universe_symbols,
+)
 from app.services.rrg_service import MIN_TAIL_WEEKS
 from app.services.static_rrg_bootstrap_backfill_service import (
     STATIC_RRG_BOOTSTRAP_UNIVERSE_POLICY,
@@ -61,7 +64,9 @@ def test_bootstrap_universe_uses_current_active_market_rows_for_historical_date(
         assert universe.market == "US"
         assert universe.as_of_date == date(2026, 4, 17)
         assert universe.symbols == ("AAPL", "MSFT")
-        assert len(universe.universe_hash) == 64
+        assert universe.universe_hash == hash_point_in_time_universe_symbols(
+            universe.symbols
+        )
     finally:
         engine.dispose()
 
