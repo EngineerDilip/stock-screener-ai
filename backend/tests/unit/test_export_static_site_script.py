@@ -213,9 +213,9 @@ def test_run_daily_refresh_activates_balanced_rs_before_static_consumers(
         "market_rs_snapshot",
         "formula_activate",
         "formula_commit",
-        "group_history",
         "exposure",
         "feature_snapshot",
+        "group_history",
     ]
     assert results["market_rs"]["US"] == {
         "status": "completed",
@@ -891,9 +891,9 @@ def test_run_daily_refresh_treats_explicit_legacy_rs_selection_as_ready(
     assert calls == [
         "price:US",
         "market-rs:US",
-        "group:US",
         "exposure:US",
         "snapshot:US",
+        "group:US",
     ]
     assert results["feature_snapshots"]["US"]["run_id"] == 77
 
@@ -1204,7 +1204,6 @@ def test_run_daily_refresh_skips_snapshot_when_market_exposure_errors(monkeypatc
 
     assert calls == [
         "price:US:2026-06-25",
-        "group:US:2026-06-25",
         "exposure:US:2026-06-25",
     ]
     assert results["feature_snapshots"] == {
@@ -1222,7 +1221,16 @@ def test_run_daily_refresh_skips_snapshot_when_market_exposure_errors(monkeypatc
             ],
         }
     }
-    assert results["group_rank_history_backfill"]["US"]["status"] == "completed"
+    assert results["group_rank_history_backfill"]["US"] == {
+        "status": "skipped",
+        "market": "US",
+        "as_of_date": "2026-06-25",
+        "lookback_start_date": "2025-12-20",
+        "missing_dates": 0,
+        "processed": 0,
+        "errors": 0,
+        "reason": "snapshot_not_ready",
+    }
     assert results["ibd_metadata_refresh"]["US"]["reason"] == "snapshot_not_ready"
     assert "Static export market US exposure not stored for 2026-06-25: no_benchmark_data." in warnings
 
@@ -1694,12 +1702,11 @@ def test_run_daily_refresh_uses_static_daily_mode_and_group_rank_bypass(monkeypa
     }
 
 
-def test_run_daily_refresh_reenriches_ibd_metadata_after_group_rank_backfill(monkeypatch):
-    """Group ranks for ``as_of_date`` are backfilled by ``_ensure_group_rank_history``
-    only after ``build_daily_snapshot`` has already run its inner enrichment.
-    The driver must re-run ``_enrich_feature_run_with_ibd_metadata`` so the
-    static export reads up-to-date ``ibd_group_rank`` values from
-    ``details_json``."""
+def test_run_daily_refresh_builds_snapshot_before_group_rank_backfill_and_reenriches(monkeypatch):
+    """``build_daily_snapshot`` hydrates broad historical prices in static CI.
+    The group-rank history backfill must run after that hydration step, then
+    re-run metadata enrichment so static export reads up-to-date
+    ``ibd_group_rank`` values from ``details_json``."""
 
     events: list[str] = []
 
@@ -1762,14 +1769,14 @@ def test_run_daily_refresh_reenriches_ibd_metadata_after_group_rank_backfill(mon
     results, warnings = export_script._run_daily_refresh(market="US")  # noqa: SLF001 - intentional unit test coverage
 
     assert warnings == []
-    # Order matters: the re-enrich step must run *after* the group-rank
-    # backfill (otherwise it would re-read the same empty IBDGroupRank rows
-    # build_daily_snapshot already saw).
+    # Order matters: the group-rank backfill needs the historical prices
+    # hydrated by build_daily_snapshot, and the re-enrich step must run after
+    # the backfill so it can repair the inner enrichment's missing ranks.
     assert events == [
         "universe_refresh",
         "fundamentals_refresh",
-        "group_rank:US",
         "feature_snapshot",
+        "group_rank:US",
         "enrich:77",
     ]
     assert group_rank_calls == [{
