@@ -102,10 +102,14 @@ def test_ensure_group_rank_history_uses_static_bootstrap_coordinator(
         as_of_date=as_of_date,
     )
 
+    def build_static_coordinator(*, calendar_service):
+        assert calendar_service is expected_calendar_service
+        return static_coordinator
+
     monkeypatch.setattr(
         export_script,
         "build_static_group_snapshot_coordinator",
-        lambda *, calendar_service: static_coordinator,
+        build_static_coordinator,
         raising=False,
     )
     monkeypatch.setattr(
