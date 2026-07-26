@@ -146,6 +146,75 @@ def test_ensure_group_rank_history_uses_static_bootstrap_coordinator(
     assert result is expected
 
 
+def test_ensure_group_rank_history_preserves_runtime_coordinator_for_legacy(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        export_script,
+        "_ensure_group_rank_history",
+        _REAL_ENSURE_GROUP_RANK_HISTORY,
+    )
+    as_of_date = date(2026, 7, 24)
+    runtime_coordinator = object()
+    expected_calendar_service = object()
+    expected = _backfill_result(
+        status=GroupRankHistoryBackfillStatus.COMPLETED,
+        market="US",
+        as_of_date=as_of_date,
+    )
+
+    monkeypatch.setattr(
+        export_script,
+        "build_static_group_snapshot_coordinator",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy history must use the runtime coordinator")
+        ),
+    )
+    monkeypatch.setattr(
+        export_script,
+        "get_group_rank_snapshot_coordinator",
+        lambda: runtime_coordinator,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        export_script,
+        "get_market_calendar_service",
+        lambda: expected_calendar_service,
+    )
+
+    class RecordingBackfillService:
+        def __init__(
+            self,
+            *,
+            session_factory,
+            calendar_service,
+            group_snapshot_coordinator,
+        ):
+            assert session_factory is export_script.SessionLocal
+            assert calendar_service is expected_calendar_service
+            assert group_snapshot_coordinator is runtime_coordinator
+
+        def backfill(self, *, as_of_date, market, formula_version):
+            assert as_of_date == date(2026, 7, 24)
+            assert market == "US"
+            assert formula_version == LEGACY_RS_FORMULA_VERSION
+            return expected
+
+    monkeypatch.setattr(
+        export_script,
+        "GroupRankHistoryBackfillService",
+        RecordingBackfillService,
+    )
+
+    result = export_script._ensure_group_rank_history(
+        as_of_date=as_of_date,
+        market="US",
+        formula_version=LEGACY_RS_FORMULA_VERSION,
+    )
+
+    assert result is expected
+
+
 @pytest.fixture(autouse=True)
 def _stub_balanced_static_rs_preparation(monkeypatch):
     """Keep legacy refresh tests focused; parity coverage restores the real helper."""
