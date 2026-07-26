@@ -503,6 +503,7 @@ def build_daily_snapshot(
     bootstrap_coverage_report: dict | None = None,
     bootstrap_coverage_retry_count: int = 0,
     rs_formula_version_override: str | None = None,
+    skip_ibd_metadata_enrichment: bool = False,
 ) -> dict:
     """Build a full feature snapshot for a trading day.
 
@@ -926,16 +927,22 @@ def build_daily_snapshot(
         )
 
     if result.status == "published":
-        metadata_refresh_stats = _enrich_feature_run_with_ibd_metadata(
-            feature_run_id=result.run_id,
-            ranking_date=as_of,
-        )
-        logger.info(
-            "Enriched feature run %d with IBD metadata for %s: %s rows updated",
-            result.run_id,
-            as_of,
-            metadata_refresh_stats["updated_rows"],
-        )
+        if skip_ibd_metadata_enrichment:
+            metadata_refresh_stats = {
+                "status": "skipped",
+                "reason": "deferred",
+            }
+        else:
+            metadata_refresh_stats = _enrich_feature_run_with_ibd_metadata(
+                feature_run_id=result.run_id,
+                ranking_date=as_of,
+            )
+            logger.info(
+                "Enriched feature run %d with IBD metadata for %s: %s rows updated",
+                result.run_id,
+                as_of,
+                metadata_refresh_stats["updated_rows"],
+            )
         auto_scan_id = _create_auto_scan_for_published_run(
             feature_run_id=result.run_id,
             universe_name=universe_name,
