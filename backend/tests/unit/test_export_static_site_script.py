@@ -808,6 +808,8 @@ def test_run_daily_refresh_skips_snapshot_when_market_rs_benchmark_anchor_missin
         ],
     }
     assert results["group_rank_history_backfill"]["SG"]["status"] == "skipped"
+    assert results["group_rank_history_backfill"]["SG"]["reason"] == "market_rs_not_ready"
+    assert "error" not in results["group_rank_history_backfill"]["SG"]
     assert results["market_exposure"]["SG"]["status"] == "skipped"
     assert results["ibd_metadata_refresh"]["SG"]["reason"] == "snapshot_not_ready"
     assert (
@@ -1816,7 +1818,12 @@ def test_run_daily_refresh_skips_reenrich_when_group_rank_backfill_errored(monke
         feature_store_tasks,
         "build_daily_snapshot",
         SimpleNamespace(
-            run=lambda **kwargs: {"status": "published", "run_id": 77, "kwargs": kwargs}
+            run=lambda **kwargs: {
+                "status": "skipped",
+                "reason": "already_published",
+                "existing_run_id": 77,
+                "kwargs": kwargs,
+            }
         ),
     )
     monkeypatch.setattr(
@@ -1859,6 +1866,95 @@ def test_run_daily_refresh_skips_reenrich_when_group_rank_backfill_errored(monke
         "status": "skipped",
         "market": "US",
         "reason": "group_rank_backfill_errored",
+    }
+
+
+def test_run_daily_refresh_quarantines_fresh_deferred_snapshot_when_group_rank_backfill_errored(
+    monkeypatch,
+):
+    enrich_calls: list[dict] = []
+
+    def fake_enrich(**kwargs):
+        enrich_calls.append(kwargs)
+        return {"updated_rows": 99}
+
+    monkeypatch.setattr(
+        universe_tasks,
+        "refresh_stock_universe",
+        SimpleNamespace(run=lambda **_kwargs: {"task": "universe_refresh"}),
+    )
+    monkeypatch.setattr(
+        fundamentals_tasks,
+        "refresh_all_fundamentals",
+        SimpleNamespace(run=lambda **_kwargs: {"task": "fundamentals_refresh"}),
+    )
+    monkeypatch.setattr(
+        feature_store_tasks,
+        "build_daily_snapshot",
+        SimpleNamespace(
+            run=lambda **kwargs: {
+                "status": "published",
+                "run_id": 77,
+                "metadata_refresh": {
+                    "status": "skipped",
+                    "reason": "deferred",
+                },
+                "kwargs": kwargs,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        feature_store_tasks,
+        "_enrich_feature_run_with_ibd_metadata",
+        fake_enrich,
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_ensure_group_rank_history",
+        lambda *, as_of_date, market, formula_version: _backfill_result(
+            status=GroupRankHistoryBackfillStatus.ERRORED,
+            market=market,
+            as_of_date=as_of_date,
+            error="Failed to fetch SPY benchmark data",
+        ),
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_refresh_static_daily_prices",
+        lambda *, as_of_date, market=None: {"task": "price_refresh"},
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_resolve_latest_completed_trading_date",
+        lambda _market: date(2026, 4, 2),
+    )
+    monkeypatch.setattr(
+        export_script.IBDIndustryService,
+        "load_from_csv",
+        lambda db, csv_path=None: 10105,
+    )
+    monkeypatch.setattr(export_script, "_upsert_feature_run_pointer", lambda **_kwargs: None)
+    _stub_static_market_exposure(monkeypatch)
+
+    results, warnings = export_script._run_daily_refresh(market="US")  # noqa: SLF001 - intentional unit test coverage
+
+    snapshot = results["feature_snapshots"]["US"]
+    assert snapshot["status"] == "quarantined"
+    assert snapshot["reason"] == "group_rank_backfill_not_ready"
+    assert snapshot["run_id"] == 77
+    assert snapshot["failure_diagnostics"]["group_rank_history_backfill"]["status"] == "errored"
+    assert snapshot["failure_diagnostics"]["group_rank_history_backfill"]["error"] == (
+        "Failed to fetch SPY benchmark data"
+    )
+    assert (
+        "Static export market US group-rank history backfill not ready for 2026-04-02: errored."
+        in warnings
+    )
+    assert enrich_calls == []
+    assert results["ibd_metadata_refresh"]["US"] == {
+        "status": "skipped",
+        "market": "US",
+        "reason": "snapshot_not_ready",
     }
 
 
@@ -2473,6 +2569,90 @@ def test_write_market_diagnostics_records_quarantined_snapshot(tmp_path):
         "warnings": ["price rows missing"],
         "failure_diagnostics": {"failed_symbol_count": 2},
     }
+
+
+def test_main_returns_no_current_artifact_code_for_group_rank_backfill_failure(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    export_calls: list[object] = []
+    output_dir = tmp_path / "out"
+
+    monkeypatch.setattr(export_script, "prepare_runtime", lambda: None)
+    monkeypatch.setattr(
+        export_script,
+        "_run_daily_refresh",
+        lambda **_kwargs: (
+            {
+                "feature_snapshots": {
+                    "US": {
+                        "status": "quarantined",
+                        "reason": "group_rank_backfill_not_ready",
+                        "market": "US",
+                        "run_id": 77,
+                        "as_of_date": "2026-07-24",
+                        "warnings": [
+                            "Static export market US group-rank history backfill not "
+                            "ready for 2026-07-24: errored."
+                        ],
+                        "failure_diagnostics": {
+                            "group_rank_history_backfill": {
+                                "status": "errored",
+                                "market": "US",
+                                "as_of_date": "2026-07-24",
+                                "lookback_start_date": "2026-01-18",
+                                "error": "US current price coverage is 0.0%",
+                            }
+                        },
+                    }
+                }
+            },
+            [
+                "Static export market US group-rank history backfill not ready "
+                "for 2026-07-24: errored."
+            ],
+        ),
+    )
+
+    class ExportShouldNotRun:
+        def __init__(self, *_args, **_kwargs):
+            export_calls.append("constructed")
+
+        def export(self, *_args, **_kwargs):
+            raise AssertionError("market export should use fallback after backfill failure")
+
+    monkeypatch.setattr(export_script, "StaticSiteExportService", ExportShouldNotRun)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "export_static_site.py",
+            "--output-dir",
+            str(output_dir),
+            "--refresh-daily",
+            "--market",
+            "US",
+        ],
+    )
+
+    assert export_script.main() == export_script.STATIC_EXPORT_NO_CURRENT_ARTIFACT_EXIT_CODE
+
+    diagnostics_path = output_dir / "diagnostics" / "us" / "snapshot-failure.json"
+    assert diagnostics_path.exists()
+    payload = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+    assert payload["market"] == "US"
+    assert payload["status"] == "quarantined"
+    assert payload["reason"] == "group_rank_backfill_not_ready"
+    assert payload["run_id"] == 77
+    assert (
+        payload["failure_diagnostics"]["group_rank_history_backfill"]["error"]
+        == "US current price coverage is 0.0%"
+    )
+    captured = capsys.readouterr()
+    assert "group-rank history backfill was not ready" in captured.out
+    assert "fallback" in captured.out
+    assert export_calls == []
 
 
 def test_main_returns_no_current_artifact_code_for_quarantined_selected_market(

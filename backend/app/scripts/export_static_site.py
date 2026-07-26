@@ -276,6 +276,28 @@ def _snapshot_skipped_not_trading_day(snapshot: dict[str, Any] | None) -> bool:
     return snapshot.get("status") == "skipped" and snapshot.get("reason") == "not_trading_day"
 
 
+def _group_rank_backfill_failures(
+    refresh_results: dict[str, Any],
+    market: str | None,
+) -> dict[str, dict[str, Any]]:
+    feature_snapshots = refresh_results.get("feature_snapshots", {})
+    if not isinstance(feature_snapshots, dict):
+        return {}
+    selected_markets = (
+        (market.upper(),)
+        if market is not None
+        else tuple(str(snapshot_market).upper() for snapshot_market in feature_snapshots)
+    )
+    failures: dict[str, dict[str, Any]] = {}
+    for selected_market in selected_markets:
+        snapshot = feature_snapshots.get(selected_market)
+        if not isinstance(snapshot, dict):
+            continue
+        if snapshot.get("reason") == "group_rank_backfill_not_ready":
+            failures[selected_market] = snapshot
+    return failures
+
+
 def _write_market_diagnostics(output_dir: Path, market: str, snapshot: dict[str, Any]) -> Path:
     diagnostics_dir = output_dir / "diagnostics" / market.lower()
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
@@ -834,12 +856,10 @@ def _run_daily_refresh(
                     market=selected_market,
                     as_of_date=market_as_of,
                     lookback_start_date=market_as_of,
-                    error="market_rs_not_ready",
+                    reason="market_rs_not_ready",
                 )
                 group_rank_history[selected_market] = skipped
-                report = skipped.as_dict()
-                report["reason"] = "market_rs_not_ready"
-                group_rank_history_report[selected_market] = report
+                group_rank_history_report[selected_market] = skipped.as_dict()
                 continue
             snapshot = feature_snapshots.get(selected_market, {})
             if not _snapshot_publishable(snapshot):
@@ -865,6 +885,42 @@ def _run_daily_refresh(
             )
             group_rank_history[selected_market] = backfill
             group_rank_history_report[selected_market] = backfill.as_dict()
+            snapshot = feature_snapshots.get(selected_market, {})
+            metadata_refresh = (
+                snapshot.get("metadata_refresh") if isinstance(snapshot, dict) else None
+            )
+            if (
+                not backfill.ready_for_enrichment
+                and isinstance(snapshot, dict)
+                and snapshot.get("status") == "published"
+                and isinstance(metadata_refresh, dict)
+                and metadata_refresh.get("reason") == "deferred"
+            ):
+                warning = (
+                    f"Static export market {selected_market} group-rank history "
+                    f"backfill not ready for {market_as_of.isoformat()}: "
+                    f"{backfill.status.value}."
+                )
+                existing_diagnostics = snapshot.get("failure_diagnostics")
+                failure_diagnostics = (
+                    dict(existing_diagnostics) if isinstance(existing_diagnostics, dict) else {}
+                )
+                failure_diagnostics["group_rank_history_backfill"] = backfill.as_dict()
+                existing_warnings = snapshot.get("warnings")
+                snapshot_warnings = (
+                    list(existing_warnings) if isinstance(existing_warnings, list) else []
+                )
+                snapshot_warnings.append(warning)
+                feature_snapshots[selected_market] = {
+                    **snapshot,
+                    "status": "quarantined",
+                    "reason": "group_rank_backfill_not_ready",
+                    "market": selected_market,
+                    "as_of_date": market_as_of.isoformat(),
+                    "warnings": snapshot_warnings,
+                    "failure_diagnostics": failure_diagnostics,
+                }
+                warnings.append(warning)
         results["group_rank_history_backfill"] = group_rank_history_report
 
         # Re-enrich feature runs after the IBDGroupRank backfill above.
@@ -1114,6 +1170,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(
                     f"Static site export skipped for market {market_label}; "
                     "exposure was not stored, diagnostics were uploaded, "
+                    "and the combine job can use fallback artifacts."
+                )
+                return STATIC_EXPORT_NO_CURRENT_ARTIFACT_EXIT_CODE
+
+            group_rank_backfill_failures = _group_rank_backfill_failures(
+                refresh_results,
+                args.market,
+            )
+            if group_rank_backfill_failures:
+                for failed_market, snapshot_failure in group_rank_backfill_failures.items():
+                    _write_market_diagnostics(
+                        Path(args.output_dir),
+                        failed_market,
+                        snapshot_failure,
+                    )
+                failed_markets = ", ".join(group_rank_backfill_failures)
+                market_label = args.market or failed_markets
+                print(
+                    f"Static site export skipped for market {market_label}; "
+                    "group-rank history backfill was not ready, diagnostics were uploaded, "
                     "and the combine job can use fallback artifacts."
                 )
                 return STATIC_EXPORT_NO_CURRENT_ARTIFACT_EXIT_CODE
