@@ -30,8 +30,7 @@ import RankChangeCell from '../../components/shared/RankChangeCell';
 import TickerCell from '../../components/common/TickerCell';
 import { useStaticMarket } from '../StaticMarketContext';
 import {
-  GROUP_RANK_CHANGE_FIELDS,
-  GROUP_RS_FIELDS,
+  STATIC_GROUP_RANKING_COLUMNS,
   formatGroupRs,
 } from '../../features/groups/groupRankingFields';
 import { sortGroupRankings } from '../../features/groups/groupRankingSort';
@@ -46,6 +45,55 @@ function SortableTableCell({ field, label, align = 'left', orderBy, order, onSor
       >
         {label}
       </TableSortLabel>
+    </TableCell>
+  );
+}
+
+function StaticRankingCell({ row, column }) {
+  const align = column.staticAlign || column.align;
+
+  if (column.kind === 'rank') {
+    return (
+      <TableCell align={align} sx={{ fontFamily: 'monospace', fontWeight: 600 }}>
+        {row.rank}
+      </TableCell>
+    );
+  }
+
+  if (column.kind === 'group') {
+    return <TableCell>{row.industry_group}</TableCell>;
+  }
+
+  if (column.kind === 'rs') {
+    return (
+      <TableCell align={align} sx={{ fontFamily: 'monospace' }}>
+        {formatGroupRs(row[column.field])}
+      </TableCell>
+    );
+  }
+
+  if (column.kind === 'integer') {
+    return (
+      <TableCell align={align} sx={{ fontFamily: 'monospace' }}>
+        {row[column.field]}
+      </TableCell>
+    );
+  }
+
+  if (column.kind === 'rankChange') {
+    return (
+      <TableCell align={align}>
+        <RankChangeCell value={row[column.field]} />
+      </TableCell>
+    );
+  }
+
+  return (
+    <TableCell align={align} sx={{ fontSize: '12px' }}>
+      <TickerCell
+        symbol={row.top_symbol}
+        companyName={row.top_symbol_name}
+      />
     </TableCell>
   );
 }
@@ -115,58 +163,17 @@ function GroupsTableView({ movers, moversPeriod, rankings, onSelectGroup }) {
           <Table size="small" sx={{ minWidth: 860 }}>
             <TableHead>
               <TableRow>
-                <SortableTableCell
-                  field="rank"
-                  label="Rank"
-                  align="center"
-                  orderBy={orderBy}
-                  order={order}
-                  onSort={handleSort}
-                />
-                <SortableTableCell
-                  field="industry_group"
-                  label="Group"
-                  orderBy={orderBy}
-                  order={order}
-                  onSort={handleSort}
-                />
-                {GROUP_RS_FIELDS.map(({ field, staticLabel }) => (
+                {STATIC_GROUP_RANKING_COLUMNS.map((column) => (
                   <SortableTableCell
-                    key={field}
-                    field={field}
-                    label={staticLabel}
-                    align="center"
+                    key={column.field}
+                    field={column.field}
+                    label={column.staticLabel || column.label}
+                    align={column.staticAlign || column.align}
                     orderBy={orderBy}
                     order={order}
                     onSort={handleSort}
                   />
                 ))}
-                <SortableTableCell
-                  field="num_stocks"
-                  label="Stocks"
-                  align="center"
-                  orderBy={orderBy}
-                  order={order}
-                  onSort={handleSort}
-                />
-                {GROUP_RANK_CHANGE_FIELDS.map(({ field, staticLabel }) => (
-                  <SortableTableCell
-                    key={field}
-                    field={field}
-                    label={staticLabel}
-                    align="right"
-                    orderBy={orderBy}
-                    order={order}
-                    onSort={handleSort}
-                  />
-                ))}
-                <SortableTableCell
-                  field="top_symbol"
-                  label="Top Stock"
-                  orderBy={orderBy}
-                  order={order}
-                  onSort={handleSort}
-                />
               </TableRow>
             </TableHead>
             <TableBody>
@@ -184,22 +191,13 @@ function GroupsTableView({ movers, moversPeriod, rankings, onSelectGroup }) {
                   }}
                   sx={{ cursor: 'pointer' }}
                 >
-                  <TableCell align="center" sx={{ fontFamily: 'monospace', fontWeight: 600 }}>{row.rank}</TableCell>
-                  <TableCell>{row.industry_group}</TableCell>
-                  {GROUP_RS_FIELDS.map(({ field }) => (
-                    <TableCell key={field} align="center" sx={{ fontFamily: 'monospace' }}>
-                      {formatGroupRs(row[field])}
-                    </TableCell>
+                  {STATIC_GROUP_RANKING_COLUMNS.map((column) => (
+                    <StaticRankingCell
+                      key={column.field}
+                      row={row}
+                      column={column}
+                    />
                   ))}
-                  <TableCell align="center" sx={{ fontFamily: 'monospace' }}>{row.num_stocks}</TableCell>
-                  {GROUP_RANK_CHANGE_FIELDS.map(({ field }) => (
-                    <TableCell key={field} align="right">
-                      <RankChangeCell value={row[field]} />
-                    </TableCell>
-                  ))}
-                  <TableCell sx={{ fontSize: '12px' }}>
-                    <TickerCell symbol={row.top_symbol} companyName={row.top_symbol_name} />
-                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>

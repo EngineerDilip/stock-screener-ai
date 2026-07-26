@@ -8,13 +8,13 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from app.services.group_rank_history_backfill_service import (
-    DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS,
+    DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS,
     GroupRankHistoryBackfillService,
     GroupRankHistoryBackfillStatus,
 )
 from app.services.group_rank_history_policy import (
-    GROUP_RANK_CHANGE_CALENDAR_DAYS,
-    GROUP_RANK_HISTORICAL_LOOKUP_TOLERANCE_DAYS,
+    CALENDAR_DAY_GROUP_RANK_CHANGE_WINDOWS,
+    CALENDAR_DAY_GROUP_RANK_LOOKUP_TOLERANCE_DAYS,
 )
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
 from app.services.group_rank_snapshot_coordinator import (
@@ -25,9 +25,9 @@ from app.services.group_rank_snapshot_coordinator import (
 
 
 def test_default_lookback_is_derived_from_rank_change_windows():
-    assert DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS == (
-        max(GROUP_RANK_CHANGE_CALENDAR_DAYS.values())
-        + GROUP_RANK_HISTORICAL_LOOKUP_TOLERANCE_DAYS
+    assert DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS == (
+        max(CALENDAR_DAY_GROUP_RANK_CHANGE_WINDOWS.values())
+        + CALENDAR_DAY_GROUP_RANK_LOOKUP_TOLERANCE_DAYS
     )
 
 
@@ -108,7 +108,8 @@ def test_backfill_uses_canonical_market_session_range():
     assert range_calls == [
         (
             "HK",
-            date(2026, 4, 7) - timedelta(days=DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS),
+            date(2026, 4, 7)
+            - timedelta(days=DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS),
             date(2026, 4, 7),
         )
     ]

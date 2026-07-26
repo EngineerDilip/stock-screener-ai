@@ -13,7 +13,7 @@ from app.domain.relative_strength import LEGACY_RS_FORMULA_VERSION
 
 from ..models.industry import IBDGroupRank
 from .group_rank_history_policy import (
-    GROUP_RANK_HISTORICAL_LOOKUP_TOLERANCE_DAYS,
+    CALENDAR_DAY_GROUP_RANK_LOOKUP_TOLERANCE_DAYS,
 )
 from .group_rank_models import GroupRanking
 
@@ -223,7 +223,7 @@ class GroupRankingRepository:
 
         max_days = max(period_days.values())
         earliest_date = current_date - timedelta(
-            days=max_days + GROUP_RANK_HISTORICAL_LOOKUP_TOLERANCE_DAYS
+            days=max_days + CALENDAR_DAY_GROUP_RANK_LOOKUP_TOLERANCE_DAYS
         )
         all_records = (
             db.query(
@@ -264,7 +264,7 @@ class GroupRankingRepository:
                     for item_date, rank in history
                     if (
                         abs((item_date - target_date).days)
-                        <= GROUP_RANK_HISTORICAL_LOOKUP_TOLERANCE_DAYS
+                        <= CALENDAR_DAY_GROUP_RANK_LOOKUP_TOLERANCE_DAYS
                     )
                 ]
                 if not candidates:

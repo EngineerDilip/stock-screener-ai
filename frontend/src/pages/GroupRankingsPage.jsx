@@ -61,7 +61,7 @@ import RSSparkline from '../components/Scan/RSSparkline';
 import GroupChartsGrid from '../components/Charts/GroupChartsGrid';
 import { rrgScopesForMarket } from '../utils/rrgScopes';
 import LiveGroupRankingsTable from '../features/groups/LiveGroupRankingsTable';
-import { GROUP_RANK_CHANGE_FIELDS } from '../features/groups/groupRankingFields';
+import { getLiveGroupRankingSortValue } from '../features/groups/groupRankingFields';
 import { sortGroupRankings } from '../features/groups/groupRankingSort';
 
 const GROUP_RANKING_MARKET_FALLBACKS = ['US', 'HK', 'IN', 'JP', 'KR', 'TW', 'CN', 'CA'];
@@ -691,33 +691,18 @@ function GroupRankingsPage() {
     }
   };
 
-  // Helper to get sort value - when showing historical ranks, calculate actual rank instead of change
-  const getSortValue = (row, column) => {
-    if (
-      showHistoricalRanks
-      && GROUP_RANK_CHANGE_FIELDS.some(({ field }) => field === column)
-    ) {
-      // Historical rank = current rank + rank change
-      const change = row[column];
-      if (change === null || change === undefined) return null;
-      return row.rank + change;
-    }
-
-    if (column === 'pct_rs_above_80') {
-      if (row.pct_rs_above_80 !== null && row.pct_rs_above_80 !== undefined) {
-        return row.pct_rs_above_80;
-      }
-      if (!row.num_stocks) return null;
-      const count = row.num_stocks_rs_above_80 ?? 0;
-      return (count / row.num_stocks) * 100;
-    }
-
-    return row[column];
-  };
-
   // Sort rankings
   const sortedRankings = rankings?.rankings
-    ? sortGroupRankings(rankings.rankings, orderBy, order, getSortValue)
+    ? sortGroupRankings(
+        rankings.rankings,
+        orderBy,
+        order,
+        (row, column) => getLiveGroupRankingSortValue(
+          row,
+          column,
+          { showHistoricalRanks },
+        ),
+      )
     : [];
 
   if (!runtimeReady) {

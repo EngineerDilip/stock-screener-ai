@@ -13,7 +13,7 @@ from app.models.stock import StockPrice
 from app.models.stock_universe import StockUniverse
 from app.services.bulk_data_fetcher import BulkDataFetcher
 from app.services.group_rank_history_backfill_service import (
-    DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS,
+    DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS,
 )
 from app.services.market_calendar_service import MarketCalendarService
 from app.services.price_history_coverage import classify_price_history
@@ -247,7 +247,7 @@ class StaticDailyPriceRefreshService:
             ):
                 return None
             target_start = as_of_date - timedelta(
-                days=DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS
+                days=DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS
             )
             target_dates = self._calendar_service.trading_days(
                 normalized_market,

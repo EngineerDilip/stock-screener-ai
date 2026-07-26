@@ -1,24 +1,29 @@
-"""Shared group-rank history windows and lookup tolerance."""
+"""Calendar-day group-rank history windows.
+
+These windows drive ``rank_change_*`` lookups that target
+``current_date - N calendar days`` and accept a nearby stored snapshot. They
+are distinct from the FeatureRun offset policy in ``group_ranking_history``.
+"""
 
 from __future__ import annotations
 
-GROUP_RANK_CHANGE_CALENDAR_DAYS = {
+CALENDAR_DAY_GROUP_RANK_CHANGE_WINDOWS = {
     "1w": 7,
     "1m": 30,
     "3m": 90,
     "6m": 180,
 }
 
-GROUP_RANK_HISTORICAL_LOOKUP_TOLERANCE_DAYS = 7
+CALENDAR_DAY_GROUP_RANK_LOOKUP_TOLERANCE_DAYS = 7
 
-DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS = (
-    max(GROUP_RANK_CHANGE_CALENDAR_DAYS.values())
-    + GROUP_RANK_HISTORICAL_LOOKUP_TOLERANCE_DAYS
+DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS = (
+    max(CALENDAR_DAY_GROUP_RANK_CHANGE_WINDOWS.values())
+    + CALENDAR_DAY_GROUP_RANK_LOOKUP_TOLERANCE_DAYS
 )
 
 
 __all__ = [
-    "DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS",
-    "GROUP_RANK_CHANGE_CALENDAR_DAYS",
-    "GROUP_RANK_HISTORICAL_LOOKUP_TOLERANCE_DAYS",
+    "CALENDAR_DAY_GROUP_RANK_CHANGE_WINDOWS",
+    "CALENDAR_DAY_GROUP_RANK_LOOKUP_TOLERANCE_DAYS",
+    "DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS",
 ]
