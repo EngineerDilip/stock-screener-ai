@@ -1010,6 +1010,7 @@ def test_run_daily_refresh_bootstraps_universe_before_other_tasks(monkeypatch):
             "publish_pointer_key": f"latest_published_market:{market}",
             "ignore_runtime_market_gate": True,
             "rs_formula_version_override": BALANCED_RS_FORMULA_VERSION,
+            "skip_ibd_metadata_enrichment": True,
         }
     assert set(results["price_refresh"]) == set(expected_markets)
     assert results["default_market_pointer"] == {
@@ -1581,6 +1582,7 @@ def test_run_daily_refresh_limits_work_to_selected_market(monkeypatch):
                 "publish_pointer_key": "latest_published_market:HK",
                 "ignore_runtime_market_gate": True,
                 "rs_formula_version_override": BALANCED_RS_FORMULA_VERSION,
+                "skip_ibd_metadata_enrichment": True,
             },
         ),
     ]
@@ -1652,6 +1654,7 @@ def test_run_daily_refresh_uses_per_market_trading_date_for_in(monkeypatch):
             "publish_pointer_key": "latest_published_market:IN",
             "ignore_runtime_market_gate": True,
             "rs_formula_version_override": BALANCED_RS_FORMULA_VERSION,
+            "skip_ibd_metadata_enrichment": True,
         }
     ]
 
@@ -1699,6 +1702,7 @@ def test_run_daily_refresh_uses_static_daily_mode_and_group_rank_bypass(monkeypa
         "publish_pointer_key": "latest_published_market:US",
         "ignore_runtime_market_gate": True,
         "rs_formula_version_override": BALANCED_RS_FORMULA_VERSION,
+        "skip_ibd_metadata_enrichment": True,
     }
 
 

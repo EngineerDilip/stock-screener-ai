@@ -800,6 +800,55 @@ def test_build_daily_snapshot_creates_auto_scan_after_publish():
     )
 
 
+def test_build_daily_snapshot_can_defer_ibd_metadata_enrichment():
+    fake_use_case = _FakeUseCase()
+
+    with patch(
+        "app.interfaces.tasks.feature_store_tasks._is_market_trading_day",
+        return_value=True,
+    ), patch(
+        "app.wiring.bootstrap.get_build_daily_snapshot_use_case",
+        return_value=fake_use_case,
+    ), patch(
+        "app.database.SessionLocal"
+    ), patch(
+        "app.infra.db.uow.SqlUnitOfWork",
+        side_effect=lambda *_args, **_kwargs: _NonSkippingUoW(),
+    ), patch(
+        "app.infra.tasks.progress_sink.CeleryProgressSink",
+        return_value=object(),
+    ), patch(
+        "app.domain.scanning.ports.NeverCancelledToken",
+        return_value=object(),
+    ), patch(
+        "app.interfaces.tasks.feature_store_tasks._create_auto_scan_for_published_run",
+        return_value="auto-scan-001",
+    ) as mock_auto_scan, patch(
+        "app.interfaces.tasks.feature_store_tasks._enrich_feature_run_with_ibd_metadata",
+        side_effect=AssertionError("metadata enrichment should be deferred"),
+    ) as mock_enrich:
+        result = _TASK_BODY(
+            _FakeTask(),
+            as_of_date_str="2026-03-16",
+            skip_ibd_metadata_enrichment=True,
+        )
+
+    assert result["status"] == "published"
+    assert result["auto_scan_id"] == "auto-scan-001"
+    assert result["metadata_refresh"] == {
+        "status": "skipped",
+        "reason": "deferred",
+    }
+    mock_enrich.assert_not_called()
+    mock_auto_scan.assert_called_once_with(
+        feature_run_id=11,
+        universe_name=get_default_scan_profile("US")["universe"],
+        screeners=get_default_scan_profile("US")["screeners"],
+        criteria=get_default_scan_profile("US")["criteria"],
+        composite_method=get_default_scan_profile("US")["composite_method"],
+    )
+
+
 def test_build_daily_snapshot_static_daily_mode_requires_bulk_prefetch():
     fake_use_case = _FakeUseCase()
 

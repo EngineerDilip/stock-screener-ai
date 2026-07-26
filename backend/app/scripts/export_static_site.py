@@ -815,6 +815,7 @@ def _run_daily_refresh(
                 publish_pointer_key=_market_pointer_key(selected_market),
                 ignore_runtime_market_gate=True,
                 rs_formula_version_override=formula_by_market[selected_market],
+                skip_ibd_metadata_enrichment=True,
             )
             feature_snapshots[selected_market] = market_result
 
