@@ -16,20 +16,18 @@ from app.domain.relative_strength import (
     GroupSnapshotIdentity,
 )
 from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
-from app.services.canonical_group_ranking_service import CanonicalGroupRankingService
 from app.services.group_rank_snapshot_coordinator import (
     GroupBackfillReport,
     GroupRankSnapshotCoordinator,
     GroupSnapshotStatus,
 )
-from app.services.group_rank_snapshot_reader import GroupRankSnapshotReader
 from app.services.market_calendar_service import MarketCalendarService
-from app.services.market_rs_inputs import MarketRsInputLoader
-from app.services.market_rs_snapshot_service import MarketRsSnapshotService
 from app.services.rrg_service import MIN_TAIL_WEEKS
+from app.services.static_group_snapshot_coordinator import (
+    build_static_group_snapshot_coordinator,
+)
 from app.services.static_rrg_bootstrap_universe import (
     STATIC_RRG_BOOTSTRAP_UNIVERSE_POLICY,
-    StaticRRGBootstrapUniverse,
 )
 
 
@@ -83,11 +81,6 @@ DEFAULT_STATIC_RRG_BOOTSTRAP_LOOKBACK_DAYS = (
 ) * 7
 
 
-class _UnsupportedBootstrapLegacyGroupService:
-    def calculate_group_rankings(self, *_args, **_kwargs):
-        raise ValueError(_UNSUPPORTED_FORMULA_ERROR)
-
-
 class StaticRRGBootstrapBackfillService:
     """Seed minimum weekly RRG history for static first-run publication."""
 
@@ -101,23 +94,10 @@ class StaticRRGBootstrapBackfillService:
     ) -> None:
         self.calendar_service = calendar_service or MarketCalendarService()
         self.lookback_days = lookback_days
-        repository = market_rs_repository or MarketRsRunRepository()
         if group_snapshot_coordinator is None:
-            input_loader = MarketRsInputLoader(
-                point_in_time_universe=StaticRRGBootstrapUniverse(),
-                market_calendar=self.calendar_service,
-            )
-            market_rs_snapshot_service = MarketRsSnapshotService(
-                input_loader=input_loader,
-                repository=repository,
-            )
-            group_snapshot_coordinator = GroupRankSnapshotCoordinator(
-                reader=GroupRankSnapshotReader(),
-                market_rs_snapshot_service=market_rs_snapshot_service,
-                canonical_group_service=CanonicalGroupRankingService(
-                    repository=repository
-                ),
-                legacy_group_service=_UnsupportedBootstrapLegacyGroupService(),
+            group_snapshot_coordinator = build_static_group_snapshot_coordinator(
+                calendar_service=self.calendar_service,
+                market_rs_repository=market_rs_repository,
             )
         self.group_snapshot_coordinator = group_snapshot_coordinator
 
