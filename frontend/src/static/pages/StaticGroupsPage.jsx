@@ -12,6 +12,7 @@ import {
   TableContainer,
   TableHead,
   TableRow,
+  TableSortLabel,
   Typography,
 } from '@mui/material';
 import {
@@ -29,6 +30,66 @@ import RankChangeCell from '../../components/shared/RankChangeCell';
 import TickerCell from '../../components/common/TickerCell';
 import { useStaticMarket } from '../StaticMarketContext';
 import { GROUP_RS_FIELDS, formatGroupRs } from '../../features/groups/groupRankingFields';
+
+const GROUP_RANK_CHANGE_COLUMNS = [
+  { field: 'rank_change_1w', label: '1W' },
+  { field: 'rank_change_1m', label: '1M' },
+  { field: 'rank_change_3m', label: '3M' },
+  { field: 'rank_change_6m', label: '6M' },
+];
+
+function compareGroupRankingValues(aValue, bValue) {
+  const aMissing = aValue === null || aValue === undefined || aValue === '';
+  const bMissing = bValue === null || bValue === undefined || bValue === '';
+  if (aMissing && bMissing) return 0;
+  if (aMissing) return 1;
+  if (bMissing) return -1;
+
+  if (typeof aValue === 'string' || typeof bValue === 'string') {
+    return String(aValue).localeCompare(String(bValue), undefined, {
+      numeric: true,
+      sensitivity: 'base',
+    });
+  }
+
+  const aNumber = Number(aValue);
+  const bNumber = Number(bValue);
+  if (Number.isFinite(aNumber) && Number.isFinite(bNumber)) {
+    return aNumber < bNumber ? -1 : aNumber > bNumber ? 1 : 0;
+  }
+  return String(aValue).localeCompare(String(bValue), undefined, {
+    numeric: true,
+    sensitivity: 'base',
+  });
+}
+
+function sortGroupRankings(rows, orderBy, order) {
+  return [...rows].sort((a, b) => {
+    const valueComparison = compareGroupRankingValues(a[orderBy], b[orderBy]);
+    const directedComparison = order === 'asc' ? valueComparison : -valueComparison;
+    if (directedComparison !== 0) {
+      return directedComparison;
+    }
+    return (
+      compareGroupRankingValues(a.rank, b.rank)
+      || compareGroupRankingValues(a.industry_group, b.industry_group)
+    );
+  });
+}
+
+function SortableTableCell({ field, label, align = 'left', orderBy, order, onSort }) {
+  return (
+    <TableCell align={align}>
+      <TableSortLabel
+        active={orderBy === field}
+        direction={orderBy === field ? order : 'asc'}
+        onClick={() => onSort(field)}
+      >
+        {label}
+      </TableSortLabel>
+    </TableCell>
+  );
+}
 
 function MoversCard({ title, rows }) {
   return (
@@ -63,6 +124,19 @@ function MoversCard({ title, rows }) {
 }
 
 function GroupsTableView({ movers, moversPeriod, rankings, onSelectGroup }) {
+  const [orderBy, setOrderBy] = useState('rank');
+  const [order, setOrder] = useState('asc');
+  const sortedRankings = useMemo(
+    () => sortGroupRankings(rankings, orderBy, order),
+    [rankings, orderBy, order],
+  );
+
+  const handleSort = (field) => {
+    const isAsc = orderBy === field && order === 'asc';
+    setOrder(isAsc ? 'desc' : 'asc');
+    setOrderBy(field);
+  };
+
   return (
     <>
       <Grid container spacing={1.5} sx={{ mb: 2 }}>
@@ -82,21 +156,62 @@ function GroupsTableView({ movers, moversPeriod, rankings, onSelectGroup }) {
           <Table size="small" sx={{ minWidth: 860 }}>
             <TableHead>
               <TableRow>
-                <TableCell align="center">Rank</TableCell>
-                <TableCell>Group</TableCell>
+                <SortableTableCell
+                  field="rank"
+                  label="Rank"
+                  align="center"
+                  orderBy={orderBy}
+                  order={order}
+                  onSort={handleSort}
+                />
+                <SortableTableCell
+                  field="industry_group"
+                  label="Group"
+                  orderBy={orderBy}
+                  order={order}
+                  onSort={handleSort}
+                />
                 {GROUP_RS_FIELDS.map(({ field, staticLabel }) => (
-                  <TableCell key={field} align="center">{staticLabel}</TableCell>
+                  <SortableTableCell
+                    key={field}
+                    field={field}
+                    label={staticLabel}
+                    align="center"
+                    orderBy={orderBy}
+                    order={order}
+                    onSort={handleSort}
+                  />
                 ))}
-                <TableCell align="center">Stocks</TableCell>
-                <TableCell align="right">1W</TableCell>
-                <TableCell align="right">1M</TableCell>
-                <TableCell align="right">3M</TableCell>
-                <TableCell align="right">6M</TableCell>
-                <TableCell>Top Stock</TableCell>
+                <SortableTableCell
+                  field="num_stocks"
+                  label="Stocks"
+                  align="center"
+                  orderBy={orderBy}
+                  order={order}
+                  onSort={handleSort}
+                />
+                {GROUP_RANK_CHANGE_COLUMNS.map(({ field, label }) => (
+                  <SortableTableCell
+                    key={field}
+                    field={field}
+                    label={label}
+                    align="right"
+                    orderBy={orderBy}
+                    order={order}
+                    onSort={handleSort}
+                  />
+                ))}
+                <SortableTableCell
+                  field="top_symbol"
+                  label="Top Stock"
+                  orderBy={orderBy}
+                  order={order}
+                  onSort={handleSort}
+                />
               </TableRow>
             </TableHead>
             <TableBody>
-              {rankings.map((row) => (
+              {sortedRankings.map((row) => (
                 <TableRow
                   key={row.industry_group}
                   hover

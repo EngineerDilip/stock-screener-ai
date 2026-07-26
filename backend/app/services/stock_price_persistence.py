@@ -3,11 +3,22 @@
 from __future__ import annotations
 
 from datetime import date
+import math
 from typing import Any, Mapping, Sequence
 
 from sqlalchemy.orm import Session
 
 from ..models.stock import StockPrice
+
+
+def _valid_adjusted_close(value: object) -> bool:
+    if value is None:
+        return False
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(price) and price > 0
 
 
 def persist_stock_price_mappings(
@@ -41,11 +52,16 @@ def persist_stock_price_mappings(
     all_dates = [row_date for dates in symbol_dates.values() for row_date in dates]
     min_date = min(all_dates)
     max_date = max(all_dates)
-    existing_pairs: dict[tuple[str, date], int] = {}
+    existing_pairs: dict[tuple[str, date], tuple[int, object]] = {}
     for chunk_start in range(0, len(symbols), chunk_size):
         chunk_symbols = symbols[chunk_start:chunk_start + chunk_size]
         rows = (
-            db.query(StockPrice.id, StockPrice.symbol, StockPrice.date)
+            db.query(
+                StockPrice.id,
+                StockPrice.symbol,
+                StockPrice.date,
+                StockPrice.adj_close,
+            )
             .filter(
                 StockPrice.symbol.in_(chunk_symbols),
                 StockPrice.date >= min_date,
@@ -53,20 +69,26 @@ def persist_stock_price_mappings(
             )
             .all()
         )
-        for record_id, record_symbol, record_date in rows:
+        for record_id, record_symbol, record_date, adj_close in rows:
             target_dates = symbol_dates.get(record_symbol)
             if target_dates and record_date in target_dates:
-                existing_pairs[(record_symbol, record_date)] = record_id
+                existing_pairs[(record_symbol, record_date)] = (record_id, adj_close)
 
     rows_to_insert: list[dict[str, Any]] = []
     rows_to_update: list[dict[str, Any]] = []
     for symbol, price_rows in normalized_rows.items():
         for price_row in price_rows:
             row_date = price_row["date"]
-            existing_id = existing_pairs.get((symbol, row_date))
-            if existing_id is None:
+            existing = existing_pairs.get((symbol, row_date))
+            if existing is None:
                 rows_to_insert.append(price_row)
-            elif row_date == latest_dates.get(symbol):
+                continue
+
+            existing_id, existing_adj_close = existing
+            if (
+                row_date == latest_dates.get(symbol)
+                or not _valid_adjusted_close(existing_adj_close)
+            ):
                 price_row["id"] = existing_id
                 rows_to_update.append(price_row)
 

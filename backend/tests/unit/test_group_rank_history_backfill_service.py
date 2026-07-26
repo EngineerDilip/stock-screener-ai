@@ -112,6 +112,54 @@ def test_backfill_uses_canonical_market_session_range():
     assert result.missing_dates == 2
 
 
+def test_backfill_range_reaches_six_month_rank_change_window():
+    query = MagicMock()
+    query.filter.return_value = query
+    query.distinct.return_value = query
+    query.all.return_value = []
+    db = MagicMock()
+    db.query.return_value = query
+
+    @contextmanager
+    def session_factory():
+        yield db
+
+    range_calls = []
+    as_of_date = date(2026, 7, 24)
+
+    def resolve_trading_days(market, start, end):
+        range_calls.append((market, start, end))
+        return [end]
+
+    service = GroupRankHistoryBackfillService(
+        session_factory=session_factory,
+        calendar_service=SimpleNamespace(trading_days=resolve_trading_days),
+        group_snapshot_coordinator=SimpleNamespace(
+            backfill=lambda _db, *, identities, continue_on_error: GroupBackfillReport(
+                results=tuple(
+                    GroupSnapshotResult(
+                        identity=identity,
+                        status=GroupSnapshotStatus.PROCESSED,
+                        row_count=1,
+                        market_rs_run_id=42,
+                    )
+                    for identity in identities
+                )
+            )
+        ),
+    )
+
+    service.backfill(
+        as_of_date=as_of_date,
+        market="US",
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+    )
+
+    assert range_calls == [
+        ("US", date(2026, 1, 18), as_of_date)
+    ]
+
+
 def test_backfill_treats_returned_gap_fill_errors_as_errored():
     query = MagicMock()
     query.filter.return_value = query

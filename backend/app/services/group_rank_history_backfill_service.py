@@ -16,7 +16,9 @@ from app.domain.relative_strength import GroupSnapshotIdentity
 from app.services.group_rank_snapshot_coordinator import GroupSnapshotStatus
 
 
-DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS = 100
+# The 6M rank-change lookup targets current_date - 180 calendar days and allows
+# a +/- 7 day stored-snapshot window.
+DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS = 187
 
 
 class TradingDayRange(Protocol):

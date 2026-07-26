@@ -139,7 +139,7 @@ def test_bootstrap_backfill_materializes_min_tail_weekly_targets():
             "as_of_date": "2026-07-24",
             "formula_version": BALANCED_RS_FORMULA_VERSION,
             "policy": STATIC_RRG_BOOTSTRAP_UNIVERSE_POLICY,
-            "lookback_start_date": "2026-04-15",
+            "lookback_start_date": start.isoformat(),
             "target_dates": [day.isoformat() for day in expected_weekly_targets],
             "existing": 0,
             "processed": MIN_TAIL_WEEKS,
@@ -166,6 +166,8 @@ def test_weekly_targets_use_latest_day_per_week_without_sorted_input():
 
 def test_bootstrap_backfill_rejects_legacy_formula_before_snapshot_dispatch():
     engine, factory = _session_factory()
+    through_date = date(2026, 7, 24)
+    start = through_date - timedelta(days=DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS)
 
     class FakeCalendar:
         def trading_days(self, *_args, **_kwargs):
@@ -183,7 +185,7 @@ def test_bootstrap_backfill_rejects_legacy_formula_before_snapshot_dispatch():
             ).backfill(
                 db,
                 market="US",
-                through_date=date(2026, 7, 24),
+                through_date=through_date,
                 formula_version=LEGACY_RS_FORMULA_VERSION,
             )
 
@@ -194,7 +196,7 @@ def test_bootstrap_backfill_rejects_legacy_formula_before_snapshot_dispatch():
             "as_of_date": "2026-07-24",
             "formula_version": LEGACY_RS_FORMULA_VERSION,
             "policy": STATIC_RRG_BOOTSTRAP_UNIVERSE_POLICY,
-            "lookback_start_date": "2026-04-15",
+            "lookback_start_date": start.isoformat(),
             "target_dates": [],
             "existing": 0,
             "processed": 0,
