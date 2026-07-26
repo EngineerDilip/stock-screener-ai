@@ -10,7 +10,11 @@ import {
 } from '@mui/material';
 import TrendingUpIcon from '@mui/icons-material/TrendingUp';
 import TrendingDownIcon from '@mui/icons-material/TrendingDown';
-import { GROUP_RS_FIELDS, formatGroupRs } from './groupRankingFields';
+import {
+  GROUP_RANK_CHANGE_FIELDS,
+  GROUP_RS_FIELDS,
+  formatGroupRs,
+} from './groupRankingFields';
 
 const RankChangeCell = ({ value }) => {
   if (value === null || value === undefined) {
@@ -120,42 +124,17 @@ export default function LiveGroupRankingsTable({
                       </TableSortLabel>
                     </TableCell>
                     <TableCell align="right">Top</TableCell>
-                    <TableCell align="right">
-                      <TableSortLabel
-                        active={orderBy === 'rank_change_1w'}
-                        direction={orderBy === 'rank_change_1w' ? order : 'asc'}
-                        onClick={() => onSort('rank_change_1w')}
-                      >
-                        1W
-                      </TableSortLabel>
-                    </TableCell>
-                    <TableCell align="right">
-                      <TableSortLabel
-                        active={orderBy === 'rank_change_1m'}
-                        direction={orderBy === 'rank_change_1m' ? order : 'asc'}
-                        onClick={() => onSort('rank_change_1m')}
-                      >
-                        1M Δ
-                      </TableSortLabel>
-                    </TableCell>
-                    <TableCell align="right">
-                      <TableSortLabel
-                        active={orderBy === 'rank_change_3m'}
-                        direction={orderBy === 'rank_change_3m' ? order : 'asc'}
-                        onClick={() => onSort('rank_change_3m')}
-                      >
-                        3M Δ
-                      </TableSortLabel>
-                    </TableCell>
-                    <TableCell align="right">
-                      <TableSortLabel
-                        active={orderBy === 'rank_change_6m'}
-                        direction={orderBy === 'rank_change_6m' ? order : 'asc'}
-                        onClick={() => onSort('rank_change_6m')}
-                      >
-                        6M
-                      </TableSortLabel>
-                    </TableCell>
+                    {GROUP_RANK_CHANGE_FIELDS.map(({ field, label }) => (
+                      <TableCell key={field} align="right">
+                        <TableSortLabel
+                          active={orderBy === field}
+                          direction={orderBy === field ? order : 'asc'}
+                          onClick={() => onSort(field)}
+                        >
+                          {label}
+                        </TableSortLabel>
+                      </TableCell>
+                    ))}
                   </TableRow>
                 </TableHead>
                 <TableBody>
@@ -224,34 +203,15 @@ export default function LiveGroupRankingsTable({
                       <TableCell align="right" sx={{ color: 'text.secondary', fontWeight: 500 }}>
                         {row.top_symbol || '-'}
                       </TableCell>
-                      <TableCell align="right">
-                        {showHistoricalRanks ? (
-                          <HistoricalRankCell currentRank={row.rank} rankChange={row.rank_change_1w} />
-                        ) : (
-                          <RankChangeCell value={row.rank_change_1w} />
-                        )}
-                      </TableCell>
-                      <TableCell align="right">
-                        {showHistoricalRanks ? (
-                          <HistoricalRankCell currentRank={row.rank} rankChange={row.rank_change_1m} />
-                        ) : (
-                          <RankChangeCell value={row.rank_change_1m} />
-                        )}
-                      </TableCell>
-                      <TableCell align="right">
-                        {showHistoricalRanks ? (
-                          <HistoricalRankCell currentRank={row.rank} rankChange={row.rank_change_3m} />
-                        ) : (
-                          <RankChangeCell value={row.rank_change_3m} />
-                        )}
-                      </TableCell>
-                      <TableCell align="right">
-                        {showHistoricalRanks ? (
-                          <HistoricalRankCell currentRank={row.rank} rankChange={row.rank_change_6m} />
-                        ) : (
-                          <RankChangeCell value={row.rank_change_6m} />
-                        )}
-                      </TableCell>
+                      {GROUP_RANK_CHANGE_FIELDS.map(({ field }) => (
+                        <TableCell key={field} align="right">
+                          {showHistoricalRanks ? (
+                            <HistoricalRankCell currentRank={row.rank} rankChange={row[field]} />
+                          ) : (
+                            <RankChangeCell value={row[field]} />
+                          )}
+                        </TableCell>
+                      ))}
                     </TableRow>
                   ))}
                 </TableBody>

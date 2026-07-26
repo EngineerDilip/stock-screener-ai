@@ -12,9 +12,6 @@ from app.domain.relative_strength import (
 )
 from app.models.industry import IBDGroupRank
 from app.models.stock_universe import StockUniverse
-from app.services.group_rank_history_backfill_service import (
-    DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS,
-)
 from app.services.group_rank_snapshot_coordinator import (
     GroupBackfillReport,
     GroupSnapshotResult,
@@ -25,6 +22,7 @@ from app.services.point_in_time_universe_service import (
 )
 from app.services.rrg_service import MIN_TAIL_WEEKS
 from app.services.static_rrg_bootstrap_backfill_service import (
+    DEFAULT_STATIC_RRG_BOOTSTRAP_LOOKBACK_DAYS,
     STATIC_RRG_BOOTSTRAP_UNIVERSE_POLICY,
     StaticRRGBootstrapBackfillService,
     StaticRRGBootstrapBackfillStatus,
@@ -74,7 +72,7 @@ def test_bootstrap_universe_uses_current_active_market_rows_for_historical_date(
 def test_bootstrap_backfill_materializes_min_tail_weekly_targets():
     engine, factory = _session_factory()
     through_date = date(2026, 7, 24)
-    start = through_date - timedelta(days=DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS)
+    start = through_date - timedelta(days=DEFAULT_STATIC_RRG_BOOTSTRAP_LOOKBACK_DAYS)
     trading_days = [
         start + timedelta(days=offset)
         for offset in range((through_date - start).days + 1)
@@ -150,6 +148,55 @@ def test_bootstrap_backfill_materializes_min_tail_weekly_targets():
         engine.dispose()
 
 
+def test_default_bootstrap_lookback_is_scoped_to_minimum_rrg_tail():
+    engine, factory = _session_factory()
+    through_date = date(2026, 7, 24)
+    expected_start = through_date - timedelta(weeks=MIN_TAIL_WEEKS + 2)
+    trading_days = [
+        expected_start + timedelta(days=offset)
+        for offset in range((through_date - expected_start).days + 1)
+        if (expected_start + timedelta(days=offset)).weekday() < 5
+    ]
+    range_calls: list[tuple[date, date]] = []
+
+    class FakeCalendar:
+        def trading_days(self, market, range_start, range_end):
+            assert market == "US"
+            range_calls.append((range_start, range_end))
+            return trading_days
+
+    class FakeCoordinator:
+        def backfill(self, db, *, identities, continue_on_error):
+            return GroupBackfillReport(
+                results=tuple(
+                    GroupSnapshotResult(
+                        identity=identity,
+                        status=GroupSnapshotStatus.PROCESSED,
+                        row_count=1,
+                        market_rs_run_id=index,
+                    )
+                    for index, identity in enumerate(tuple(identities), start=1)
+                )
+            )
+
+    try:
+        with factory() as db:
+            result = StaticRRGBootstrapBackfillService(
+                calendar_service=FakeCalendar(),
+                group_snapshot_coordinator=FakeCoordinator(),
+            ).backfill(
+                db,
+                market="US",
+                through_date=through_date,
+                formula_version=BALANCED_RS_FORMULA_VERSION,
+            )
+
+        assert range_calls == [(expected_start, through_date)]
+        assert result.status is StaticRRGBootstrapBackfillStatus.COMPLETED
+    finally:
+        engine.dispose()
+
+
 def test_weekly_targets_use_latest_day_per_week_without_sorted_input():
     targets = StaticRRGBootstrapBackfillService._weekly_targets(
         [
@@ -167,7 +214,7 @@ def test_weekly_targets_use_latest_day_per_week_without_sorted_input():
 def test_bootstrap_backfill_rejects_legacy_formula_before_snapshot_dispatch():
     engine, factory = _session_factory()
     through_date = date(2026, 7, 24)
-    start = through_date - timedelta(days=DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS)
+    start = through_date - timedelta(days=DEFAULT_STATIC_RRG_BOOTSTRAP_LOOKBACK_DAYS)
 
     class FakeCalendar:
         def trading_days(self, *_args, **_kwargs):

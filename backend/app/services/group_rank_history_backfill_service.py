@@ -13,12 +13,10 @@ from sqlalchemy.orm import Session
 from app.domain.markets import get_market_catalog
 from app.models.industry import IBDGroupRank
 from app.domain.relative_strength import GroupSnapshotIdentity
+from app.services.group_rank_history_policy import (
+    DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS,
+)
 from app.services.group_rank_snapshot_coordinator import GroupSnapshotStatus
-
-
-# The 6M rank-change lookup targets current_date - 180 calendar days and allows
-# a +/- 7 day stored-snapshot window.
-DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS = 187
 
 
 class TradingDayRange(Protocol):

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
-import math
 from typing import Any, Callable
 
 from app.domain.markets import get_market_catalog
@@ -22,6 +21,7 @@ from app.services.price_refresh_planning import (
     NO_HISTORY_PRICE_BOOTSTRAP_PERIOD,
     STALE_PRICE_TOP_UP_PERIOD,
 )
+from app.services.price_value_policy import is_usable_adjusted_close
 
 
 STATIC_DAILY_PRICE_REFRESH_PERIOD = STALE_PRICE_TOP_UP_PERIOD
@@ -274,16 +274,6 @@ class StaticDailyPriceRefreshService:
             return None
         return frozenset(anchor_dates)
 
-    @staticmethod
-    def _valid_adjusted_close(value: object) -> bool:
-        if value is None:
-            return False
-        try:
-            price = float(value)
-        except (TypeError, ValueError):
-            return False
-        return math.isfinite(price) and price > 0
-
     def _symbols_with_short_rrg_history(
         self,
         db,
@@ -316,7 +306,7 @@ class StaticDailyPriceRefreshService:
             )
             available_by_symbol: dict[str, set[date]] = {}
             for symbol, row_date, adj_close in rows:
-                if row_date is None or not self._valid_adjusted_close(adj_close):
+                if row_date is None or not is_usable_adjusted_close(adj_close):
                     continue
                 available_by_symbol.setdefault(str(symbol).upper(), set()).add(row_date)
             available_anchor_counts.update(

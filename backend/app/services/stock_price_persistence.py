@@ -3,22 +3,12 @@
 from __future__ import annotations
 
 from datetime import date
-import math
 from typing import Any, Mapping, Sequence
 
 from sqlalchemy.orm import Session
 
-from ..models.stock import StockPrice
-
-
-def _valid_adjusted_close(value: object) -> bool:
-    if value is None:
-        return False
-    try:
-        price = float(value)
-    except (TypeError, ValueError):
-        return False
-    return math.isfinite(price) and price > 0
+from app.models.stock import StockPrice
+from app.services.price_value_policy import is_usable_adjusted_close
 
 
 def persist_stock_price_mappings(
@@ -87,7 +77,7 @@ def persist_stock_price_mappings(
             existing_id, existing_adj_close = existing
             if (
                 row_date == latest_dates.get(symbol)
-                or not _valid_adjusted_close(existing_adj_close)
+                or not is_usable_adjusted_close(existing_adj_close)
             ):
                 price_row["id"] = existing_id
                 rows_to_update.append(price_row)

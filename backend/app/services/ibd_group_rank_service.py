@@ -35,6 +35,7 @@ from .group_rank_input_loader import GroupRankInputLoader
 from .group_rank_historical_calculator import (
     GroupRankHistoricalCalculator,
 )
+from .group_rank_history_policy import GROUP_RANK_CHANGE_CALENDAR_DAYS
 from .group_rank_legacy_adapter import LegacyGroupRankPrefetchAdapter
 from .group_ranking_calculator import GroupRankingCalculator
 from .group_ranking_repository import GroupRankingRepository
@@ -46,12 +47,6 @@ from .benchmark_cache_service import BenchmarkCacheService
 from ..scanners.criteria.relative_strength import RelativeStrengthCalculator
 
 logger = logging.getLogger(__name__)
-GROUP_RANK_CHANGE_CALENDAR_DAYS = {
-    "1w": 7,
-    "1m": 30,
-    "3m": 90,
-    "6m": 180,
-}
 
 
 class IncompleteGroupRankingCacheError(RuntimeError):

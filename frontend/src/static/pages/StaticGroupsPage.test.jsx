@@ -159,6 +159,20 @@ describe('StaticGroupsPage', () => {
     expect(within(rows[2]).getAllByRole('cell')[1]).toHaveTextContent('Retail');
   });
 
+  it('keeps missing values below populated rank changes when sorting descending', async () => {
+    renderPage();
+
+    expect(await screen.findByRole('heading', { name: 'US Group Rankings' })).toBeInTheDocument();
+    const table = screen.getByRole('columnheader', { name: '6M' }).closest('table');
+
+    fireEvent.click(within(screen.getByRole('columnheader', { name: '6M' })).getByRole('button'));
+    fireEvent.click(within(screen.getByRole('columnheader', { name: '6M' })).getByRole('button'));
+
+    const rows = within(table).getAllByRole('row');
+    expect(within(rows[1]).getAllByRole('cell')[1]).toHaveTextContent('Retail');
+    expect(within(rows[2]).getAllByRole('cell')[1]).toHaveTextContent('Semiconductors');
+  });
+
   it('renders the RRG chart from the baked bundle when the toggle is selected', async () => {
     globalThis.fetch = vi.fn(async (url) => {
       const path = String(url).split('/static-data/')[1];

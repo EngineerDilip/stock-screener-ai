@@ -29,53 +29,12 @@ import { useRRGScopeSelection } from '../../components/Charts/useRRGScopeSelecti
 import RankChangeCell from '../../components/shared/RankChangeCell';
 import TickerCell from '../../components/common/TickerCell';
 import { useStaticMarket } from '../StaticMarketContext';
-import { GROUP_RS_FIELDS, formatGroupRs } from '../../features/groups/groupRankingFields';
-
-const GROUP_RANK_CHANGE_COLUMNS = [
-  { field: 'rank_change_1w', label: '1W' },
-  { field: 'rank_change_1m', label: '1M' },
-  { field: 'rank_change_3m', label: '3M' },
-  { field: 'rank_change_6m', label: '6M' },
-];
-
-function compareGroupRankingValues(aValue, bValue) {
-  const aMissing = aValue === null || aValue === undefined || aValue === '';
-  const bMissing = bValue === null || bValue === undefined || bValue === '';
-  if (aMissing && bMissing) return 0;
-  if (aMissing) return 1;
-  if (bMissing) return -1;
-
-  if (typeof aValue === 'string' || typeof bValue === 'string') {
-    return String(aValue).localeCompare(String(bValue), undefined, {
-      numeric: true,
-      sensitivity: 'base',
-    });
-  }
-
-  const aNumber = Number(aValue);
-  const bNumber = Number(bValue);
-  if (Number.isFinite(aNumber) && Number.isFinite(bNumber)) {
-    return aNumber < bNumber ? -1 : aNumber > bNumber ? 1 : 0;
-  }
-  return String(aValue).localeCompare(String(bValue), undefined, {
-    numeric: true,
-    sensitivity: 'base',
-  });
-}
-
-function sortGroupRankings(rows, orderBy, order) {
-  return [...rows].sort((a, b) => {
-    const valueComparison = compareGroupRankingValues(a[orderBy], b[orderBy]);
-    const directedComparison = order === 'asc' ? valueComparison : -valueComparison;
-    if (directedComparison !== 0) {
-      return directedComparison;
-    }
-    return (
-      compareGroupRankingValues(a.rank, b.rank)
-      || compareGroupRankingValues(a.industry_group, b.industry_group)
-    );
-  });
-}
+import {
+  GROUP_RANK_CHANGE_FIELDS,
+  GROUP_RS_FIELDS,
+  formatGroupRs,
+} from '../../features/groups/groupRankingFields';
+import { sortGroupRankings } from '../../features/groups/groupRankingSort';
 
 function SortableTableCell({ field, label, align = 'left', orderBy, order, onSort }) {
   return (
@@ -190,11 +149,11 @@ function GroupsTableView({ movers, moversPeriod, rankings, onSelectGroup }) {
                   order={order}
                   onSort={handleSort}
                 />
-                {GROUP_RANK_CHANGE_COLUMNS.map(({ field, label }) => (
+                {GROUP_RANK_CHANGE_FIELDS.map(({ field, staticLabel }) => (
                   <SortableTableCell
                     key={field}
                     field={field}
-                    label={label}
+                    label={staticLabel}
                     align="right"
                     orderBy={orderBy}
                     order={order}
@@ -233,10 +192,11 @@ function GroupsTableView({ movers, moversPeriod, rankings, onSelectGroup }) {
                     </TableCell>
                   ))}
                   <TableCell align="center" sx={{ fontFamily: 'monospace' }}>{row.num_stocks}</TableCell>
-                  <TableCell align="right"><RankChangeCell value={row.rank_change_1w} /></TableCell>
-                  <TableCell align="right"><RankChangeCell value={row.rank_change_1m} /></TableCell>
-                  <TableCell align="right"><RankChangeCell value={row.rank_change_3m} /></TableCell>
-                  <TableCell align="right"><RankChangeCell value={row.rank_change_6m} /></TableCell>
+                  {GROUP_RANK_CHANGE_FIELDS.map(({ field }) => (
+                    <TableCell key={field} align="right">
+                      <RankChangeCell value={row[field]} />
+                    </TableCell>
+                  ))}
                   <TableCell sx={{ fontSize: '12px' }}>
                     <TickerCell symbol={row.top_symbol} companyName={row.top_symbol_name} />
                   </TableCell>

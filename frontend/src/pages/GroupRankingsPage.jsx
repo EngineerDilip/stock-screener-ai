@@ -61,6 +61,8 @@ import RSSparkline from '../components/Scan/RSSparkline';
 import GroupChartsGrid from '../components/Charts/GroupChartsGrid';
 import { rrgScopesForMarket } from '../utils/rrgScopes';
 import LiveGroupRankingsTable from '../features/groups/LiveGroupRankingsTable';
+import { GROUP_RANK_CHANGE_FIELDS } from '../features/groups/groupRankingFields';
+import { sortGroupRankings } from '../features/groups/groupRankingSort';
 
 const GROUP_RANKING_MARKET_FALLBACKS = ['US', 'HK', 'IN', 'JP', 'KR', 'TW', 'CN', 'CA'];
 const EMPTY_AS_OF_ARGS = [];
@@ -691,9 +693,10 @@ function GroupRankingsPage() {
 
   // Helper to get sort value - when showing historical ranks, calculate actual rank instead of change
   const getSortValue = (row, column) => {
-    const rankChangeColumns = ['rank_change_1w', 'rank_change_1m', 'rank_change_3m', 'rank_change_6m'];
-
-    if (showHistoricalRanks && rankChangeColumns.includes(column)) {
+    if (
+      showHistoricalRanks
+      && GROUP_RANK_CHANGE_FIELDS.some(({ field }) => field === column)
+    ) {
       // Historical rank = current rank + rank change
       const change = row[column];
       if (change === null || change === undefined) return null;
@@ -714,19 +717,7 @@ function GroupRankingsPage() {
 
   // Sort rankings
   const sortedRankings = rankings?.rankings
-    ? [...rankings.rankings].sort((a, b) => {
-        let aVal = getSortValue(a, orderBy);
-        let bVal = getSortValue(b, orderBy);
-
-        // Handle null values
-        if (aVal === null || aVal === undefined) aVal = order === 'asc' ? Infinity : -Infinity;
-        if (bVal === null || bVal === undefined) bVal = order === 'asc' ? Infinity : -Infinity;
-
-        if (order === 'asc') {
-          return aVal < bVal ? -1 : aVal > bVal ? 1 : 0;
-        }
-        return aVal > bVal ? -1 : aVal < bVal ? 1 : 0;
-      })
+    ? sortGroupRankings(rankings.rankings, orderBy, order, getSortValue)
     : [];
 
   if (!runtimeReady) {

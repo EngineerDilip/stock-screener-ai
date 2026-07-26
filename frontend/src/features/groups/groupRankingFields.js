@@ -4,6 +4,13 @@ export const GROUP_RS_FIELDS = Object.freeze([
   Object.freeze({ field: 'avg_rs_rating_3m', label: '3M RS', staticLabel: '3M RS' }),
 ]);
 
+export const GROUP_RANK_CHANGE_FIELDS = Object.freeze([
+  Object.freeze({ field: 'rank_change_1w', label: '1W', staticLabel: '1W' }),
+  Object.freeze({ field: 'rank_change_1m', label: '1M Δ', staticLabel: '1M' }),
+  Object.freeze({ field: 'rank_change_3m', label: '3M Δ', staticLabel: '3M' }),
+  Object.freeze({ field: 'rank_change_6m', label: '6M', staticLabel: '6M' }),
+]);
+
 export const formatGroupRs = (value) => (
   Number.isFinite(value) ? value.toFixed(1) : '-'
 );

@@ -12,12 +12,23 @@ from app.services.group_rank_history_backfill_service import (
     GroupRankHistoryBackfillService,
     GroupRankHistoryBackfillStatus,
 )
+from app.services.group_rank_history_policy import (
+    GROUP_RANK_CHANGE_CALENDAR_DAYS,
+    GROUP_RANK_HISTORICAL_LOOKUP_TOLERANCE_DAYS,
+)
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
 from app.services.group_rank_snapshot_coordinator import (
     GroupBackfillReport,
     GroupSnapshotResult,
     GroupSnapshotStatus,
 )
+
+
+def test_default_lookback_is_derived_from_rank_change_windows():
+    assert DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS == (
+        max(GROUP_RANK_CHANGE_CALENDAR_DAYS.values())
+        + GROUP_RANK_HISTORICAL_LOOKUP_TOLERANCE_DAYS
+    )
 
 
 def test_backfill_skips_market_without_group_rankings():

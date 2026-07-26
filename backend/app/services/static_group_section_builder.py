@@ -13,7 +13,7 @@ from app.infra.db.models.feature_store import FeatureRun
 from app.services.group_detail_payloads import (
     constituent_stock_payloads_from_group_rows,
 )
-from app.services.ibd_group_rank_service import GROUP_RANK_CHANGE_CALENDAR_DAYS
+from app.services.group_rank_history_policy import GROUP_RANK_CHANGE_CALENDAR_DAYS
 from app.services.group_ranking_history import build_group_detail_payload_from_parts
 from app.services.group_ranking_payloads import group_snapshot_metadata
 from app.services.group_rank_snapshot_reader import GroupSnapshotIntegrityError
