@@ -74,6 +74,15 @@ const identityColumns = Object.freeze([
   }),
 ]);
 
+const stockCountColumn = Object.freeze({
+  field: 'num_stocks',
+  label: '#',
+  staticLabel: 'Stocks',
+  align: 'right',
+  staticAlign: 'center',
+  kind: 'integer',
+});
+
 const liveOnlyColumns = Object.freeze([
   Object.freeze({
     field: 'median_rs_rating',
@@ -93,14 +102,7 @@ const liveOnlyColumns = Object.freeze([
     align: 'right',
     kind: 'rating',
   }),
-  Object.freeze({
-    field: 'num_stocks',
-    label: '#',
-    staticLabel: 'Stocks',
-    align: 'right',
-    staticAlign: 'center',
-    kind: 'integer',
-  }),
+  stockCountColumn,
   Object.freeze({
     field: 'pct_rs_above_80',
     label: '80+%',
@@ -108,15 +110,6 @@ const liveOnlyColumns = Object.freeze([
     kind: 'pctAbove80',
   }),
 ]);
-
-const staticStockCountColumn = Object.freeze({
-  field: 'num_stocks',
-  label: '#',
-  staticLabel: 'Stocks',
-  align: 'right',
-  staticAlign: 'center',
-  kind: 'integer',
-});
 
 const topStockColumn = Object.freeze({
   field: 'top_symbol',
@@ -138,7 +131,7 @@ export const LIVE_GROUP_RANKING_COLUMNS = Object.freeze([
 export const STATIC_GROUP_RANKING_COLUMNS = Object.freeze([
   ...identityColumns,
   ...GROUP_RS_FIELDS,
-  staticStockCountColumn,
+  stockCountColumn,
   ...GROUP_RANK_CHANGE_FIELDS,
   topStockColumn,
 ]);
@@ -149,24 +142,33 @@ export const isGroupRankChangeField = (field) => (
   )
 );
 
+export const deriveHistoricalRank = (row, change) => {
+  if (change === null || change === undefined || row.rank === null || row.rank === undefined) {
+    return null;
+  }
+  return row.rank + change;
+};
+
+export const derivePctRsAbove80 = (row) => {
+  if (row.pct_rs_above_80 !== null && row.pct_rs_above_80 !== undefined) {
+    return row.pct_rs_above_80;
+  }
+  if (!row.num_stocks) return null;
+  const count = row.num_stocks_rs_above_80 ?? 0;
+  return (count / row.num_stocks) * 100;
+};
+
 export const getLiveGroupRankingSortValue = (
   row,
   column,
   { showHistoricalRanks = false } = {},
 ) => {
   if (showHistoricalRanks && isGroupRankChangeField(column)) {
-    const change = row[column];
-    if (change === null || change === undefined) return null;
-    return row.rank + change;
+    return deriveHistoricalRank(row, row[column]);
   }
 
   if (column === 'pct_rs_above_80') {
-    if (row.pct_rs_above_80 !== null && row.pct_rs_above_80 !== undefined) {
-      return row.pct_rs_above_80;
-    }
-    if (!row.num_stocks) return null;
-    const count = row.num_stocks_rs_above_80 ?? 0;
-    return (count / row.num_stocks) * 100;
+    return derivePctRsAbove80(row);
   }
 
   return row[column];

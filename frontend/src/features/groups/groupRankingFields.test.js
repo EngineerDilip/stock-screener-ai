@@ -4,6 +4,8 @@ import {
   GROUP_RS_FIELDS,
   LIVE_GROUP_RANKING_COLUMNS,
   STATIC_GROUP_RANKING_COLUMNS,
+  deriveHistoricalRank,
+  derivePctRsAbove80,
   formatGroupRs,
   getLiveGroupRankingSortValue,
 } from './groupRankingFields';
@@ -65,6 +67,17 @@ describe('groupRankingFields', () => {
       { num_stocks: 5, num_stocks_rs_above_80: 2, pct_rs_above_80: null },
       'pct_rs_above_80',
     )).toBe(40);
+  });
+
+  it('exports derived group ranking display values with missing-data guards', () => {
+    expect(deriveHistoricalRank({ rank: 3 }, 4)).toBe(7);
+    expect(deriveHistoricalRank({ rank: 3 }, null)).toBeNull();
+    expect(deriveHistoricalRank({ rank: null }, 4)).toBeNull();
+
+    expect(derivePctRsAbove80({ pct_rs_above_80: 57.14 })).toBe(57.14);
+    expect(derivePctRsAbove80({ num_stocks: 5, num_stocks_rs_above_80: 2 })).toBe(40);
+    expect(derivePctRsAbove80({ num_stocks: 0, num_stocks_rs_above_80: 2 })).toBeNull();
+    expect(derivePctRsAbove80({ num_stocks: null, num_stocks_rs_above_80: 2 })).toBeNull();
   });
 
   it('formats finite ratings and renders missing values safely', () => {

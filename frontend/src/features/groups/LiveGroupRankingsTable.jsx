@@ -12,6 +12,8 @@ import TrendingUpIcon from '@mui/icons-material/TrendingUp';
 import TrendingDownIcon from '@mui/icons-material/TrendingDown';
 import {
   LIVE_GROUP_RANKING_COLUMNS,
+  deriveHistoricalRank,
+  derivePctRsAbove80,
   formatGroupRs,
 } from './groupRankingFields';
 
@@ -32,13 +34,14 @@ const RankChangeCell = ({ value }) => {
   );
 };
 
-const HistoricalRankCell = ({ currentRank, rankChange }) => {
-  if (rankChange == null || currentRank == null) {
+const HistoricalRankCell = ({ row, rankChange }) => {
+  const historicalRank = deriveHistoricalRank(row, rankChange);
+  if (historicalRank == null) {
     return <Box sx={{ color: 'text.secondary', fontFamily: 'monospace', fontSize: '11px' }}>-</Box>;
   }
   return (
     <Box sx={{ fontFamily: 'monospace', fontSize: '11px', textAlign: 'right' }}>
-      {currentRank + rankChange}
+      {historicalRank}
     </Box>
   );
 };
@@ -93,7 +96,7 @@ const LiveRankingCell = ({ row, column, showHistoricalRanks }) => {
     return (
       <TableCell align={column.align}>
         {showHistoricalRanks ? (
-          <HistoricalRankCell currentRank={row.rank} rankChange={row[column.field]} />
+          <HistoricalRankCell row={row} rankChange={row[column.field]} />
         ) : (
           <RankChangeCell value={row[column.field]} />
         )}
@@ -102,13 +105,10 @@ const LiveRankingCell = ({ row, column, showHistoricalRanks }) => {
   }
 
   if (column.kind === 'pctAbove80') {
+    const pctRsAbove80 = derivePctRsAbove80(row);
     return (
       <TableCell align={column.align} sx={{ fontFamily: 'monospace' }}>
-        {row.pct_rs_above_80 != null
-          ? `${row.pct_rs_above_80.toFixed(1)}%`
-          : row.num_stocks
-            ? `${(((row.num_stocks_rs_above_80 ?? 0) / row.num_stocks) * 100).toFixed(1)}%`
-            : '-'}
+        {pctRsAbove80 != null ? `${pctRsAbove80.toFixed(1)}%` : '-'}
       </TableCell>
     );
   }
@@ -180,6 +180,13 @@ export default function LiveGroupRankingsTable({
               key={row.industry_group}
               hover
               onClick={() => onSelectGroup(row.industry_group)}
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  onSelectGroup(row.industry_group);
+                }
+              }}
               sx={{ cursor: 'pointer' }}
             >
               {LIVE_GROUP_RANKING_COLUMNS.map((column) => (
