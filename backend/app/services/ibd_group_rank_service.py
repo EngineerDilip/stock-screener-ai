@@ -35,9 +35,11 @@ from .group_rank_input_loader import GroupRankInputLoader
 from .group_rank_historical_calculator import (
     GroupRankHistoricalCalculator,
 )
+from .group_rank_history_policy import CALENDAR_DAY_GROUP_RANK_CHANGE_WINDOWS
 from .group_rank_legacy_adapter import LegacyGroupRankPrefetchAdapter
 from .group_ranking_calculator import GroupRankingCalculator
 from .group_ranking_repository import GroupRankingRepository
+from .group_ranking_history import apply_calendar_rank_changes
 from .group_ranking_payloads import rank_record_payload
 from .market_rs_snapshot_service import MarketRsSnapshotService
 from .derived_data_execution_policy import DerivedDataExecutionPolicy
@@ -46,12 +48,6 @@ from .benchmark_cache_service import BenchmarkCacheService
 from ..scanners.criteria.relative_strength import RelativeStrengthCalculator
 
 logger = logging.getLogger(__name__)
-GROUP_RANK_CHANGE_CALENDAR_DAYS = {
-    "1w": 7,
-    "1m": 30,
-    "3m": 90,
-    "6m": 180,
-}
 
 
 class IncompleteGroupRankingCacheError(RuntimeError):
@@ -353,7 +349,7 @@ class IBDGroupRankService:
         # Calendar-day target offsets for rank changes. The lookup below picks
         # the closest stored ranking within a small window; these are not exact
         # trading-session offsets.
-        period_days = dict(GROUP_RANK_CHANGE_CALENDAR_DAYS)
+        period_days = dict(CALENDAR_DAY_GROUP_RANK_CHANGE_WINDOWS)
 
         # Batch fetch all historical ranks in ONE query instead of 197*4=788 queries
         group_names = [r.industry_group for r in rankings]
@@ -366,7 +362,7 @@ class IBDGroupRankService:
             formula_version=resolved_formula,
         )
 
-        # Build result with rank changes
+        # Build result rows before attaching rank changes in the shared path.
         result = []
         for ranking in rankings:
             pct_above_80 = self.ranking_calculator._calculate_pct_above_80(
@@ -377,19 +373,13 @@ class IBDGroupRankService:
                 pct_rs_above_80=pct_above_80,
             )
 
-            # Get pre-computed historical ranks from batch lookup
-            for period_name in period_days.keys():
-                historical_rank = historical_ranks.get(
-                    (ranking.industry_group, period_name)
-                )
-                if historical_rank is not None:
-                    # Positive change means rank improved (moved up)
-                    item[f'rank_change_{period_name}'] = historical_rank - ranking.rank
-                else:
-                    item[f'rank_change_{period_name}'] = None
-
             result.append(item)
 
+        apply_calendar_rank_changes(
+            result,
+            historical_ranks=historical_ranks,
+            periods=period_days,
+        )
         self._annotate_top_symbol_names(db, result)
         return result
 
@@ -487,8 +477,7 @@ class IBDGroupRankService:
         current = records[0]
 
         # Get rank changes using calendar-day target offsets with closest-record matching.
-        period_days = dict(GROUP_RANK_CHANGE_CALENDAR_DAYS)
-        rank_changes = {}
+        period_days = dict(CALENDAR_DAY_GROUP_RANK_CHANGE_WINDOWS)
 
         historical_ranks = self.ranking_repository.historical_ranks_batch(
             db,
@@ -498,12 +487,15 @@ class IBDGroupRankService:
             market=normalized_market,
             formula_version=resolved_formula,
         )
-        for period_name in period_days:
-            historical_rank = historical_ranks.get((industry_group, period_name))
-            if historical_rank is not None:
-                rank_changes[f'rank_change_{period_name}'] = historical_rank - current.rank
-            else:
-                rank_changes[f'rank_change_{period_name}'] = None
+        rank_changes = {
+            "industry_group": industry_group,
+            "rank": current.rank,
+        }
+        apply_calendar_rank_changes(
+            [rank_changes],
+            historical_ranks=historical_ranks,
+            periods=period_days,
+        )
 
         # Build history data points
         history = [

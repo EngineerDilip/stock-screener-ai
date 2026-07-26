@@ -13,10 +13,10 @@ from sqlalchemy.orm import Session
 from app.domain.markets import get_market_catalog
 from app.models.industry import IBDGroupRank
 from app.domain.relative_strength import GroupSnapshotIdentity
+from app.services.group_rank_history_policy import (
+    DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS,
+)
 from app.services.group_rank_snapshot_coordinator import GroupSnapshotStatus
-
-
-DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS = 100
 
 
 class TradingDayRange(Protocol):
@@ -84,7 +84,7 @@ class GroupRankHistoryBackfillService:
     session_factory: SessionFactory
     calendar_service: TradingDayRange
     group_snapshot_coordinator: Any
-    lookback_days: int = DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS
+    lookback_days: int = DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS
 
     def backfill(
         self,
@@ -189,7 +189,7 @@ class GroupRankHistoryBackfillService:
 
 
 __all__ = [
-    "DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS",
+    "DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS",
     "GroupRankHistoryBackfillResult",
     "GroupRankHistoryBackfillService",
     "GroupRankHistoryBackfillStatus",

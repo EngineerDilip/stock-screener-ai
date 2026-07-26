@@ -473,6 +473,86 @@ def test_import_daily_price_bundle_streams_rows_without_full_payload_read(
     db.close()
 
 
+def test_import_daily_price_bundle_repairs_existing_historical_adjusted_closes(tmp_path):
+    session_factory = _make_session()
+    db = session_factory()
+    db.add(_stock_row("AAPL", "US", "NASDAQ", 1000.0))
+    db.add(
+        StockPrice(
+            symbol="AAPL",
+            date=date(2026, 4, 17),
+            open=90.0,
+            high=91.0,
+            low=89.0,
+            close=90.5,
+            adj_close=None,
+            volume=500_000,
+        )
+    )
+    db.commit()
+
+    service = DailyPriceBundleService()
+    bundle_path = tmp_path / "daily-price-us.json"
+    bundle_path.write_text(
+        json.dumps(
+            {
+                "schema_version": service.DAILY_PRICE_BUNDLE_SCHEMA_VERSION,
+                "market": "US",
+                "as_of_date": "2026-04-18",
+                "bar_period": service.DAILY_PRICE_BAR_PERIOD,
+                "source_revision": "daily_prices_us:20260418120000",
+                "symbol_count": 1,
+                "rows": [
+                    {
+                        "symbol": "AAPL",
+                        "prices": [
+                            {
+                                "date": "2026-04-17",
+                                "open": 100.0,
+                                "high": 101.0,
+                                "low": 99.0,
+                                "close": 100.5,
+                                "adj_close": 100.0,
+                                "volume": 1_000_000,
+                            },
+                            {
+                                "date": "2026-04-18",
+                                "open": 110.0,
+                                "high": 111.0,
+                                "low": 109.0,
+                                "close": 110.5,
+                                "adj_close": 110.0,
+                                "volume": 1_100_000,
+                            },
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = service.import_daily_price_bundle(
+        db,
+        input_path=bundle_path,
+        warm_redis_symbols=0,
+    )
+
+    historical = db.query(StockPrice).filter(
+        StockPrice.symbol == "AAPL",
+        StockPrice.date == date(2026, 4, 17),
+    ).one()
+    latest = db.query(StockPrice).filter(
+        StockPrice.symbol == "AAPL",
+        StockPrice.date == date(2026, 4, 18),
+    ).one()
+    assert result["imported_rows"] == 2
+    assert historical.adj_close == 100.0
+    assert latest.adj_close == 110.0
+    assert db.query(StockPrice).filter(StockPrice.symbol == "AAPL").count() == 2
+    db.close()
+
+
 def test_import_daily_price_bundle_flushes_streamed_rows_in_bounded_chunks(
     monkeypatch,
     tmp_path,

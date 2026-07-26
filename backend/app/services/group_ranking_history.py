@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, MutableMapping
 from datetime import date
 from typing import Any
 
@@ -110,6 +110,24 @@ def apply_group_rank_changes(
             ranking[key] = (
                 historical["rank"] - ranking["rank"]
                 if historical is not None
+                else None
+            )
+
+
+def apply_calendar_rank_changes(
+    rankings: Iterable[MutableMapping[str, Any]],
+    *,
+    historical_ranks: Mapping[tuple[str, str], int],
+    periods: Iterable[str],
+) -> None:
+    for ranking in rankings:
+        industry_group = str(ranking["industry_group"])
+        current_rank = ranking.get("rank")
+        for period_name in periods:
+            historical_rank = historical_ranks.get((industry_group, period_name))
+            ranking[f"rank_change_{period_name}"] = (
+                int(historical_rank) - int(current_rank)
+                if historical_rank is not None and current_rank is not None
                 else None
             )
 

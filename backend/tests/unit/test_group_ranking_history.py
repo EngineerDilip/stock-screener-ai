@@ -12,6 +12,7 @@ from app.infra.db.models.feature_store import FeatureRun
 from app.services import group_ranking_history as history_module
 from app.services.group_ranking_history import (
     GROUP_RANK_CHANGE_OFFSETS,
+    apply_calendar_rank_changes,
     apply_group_rank_changes,
     build_group_detail_payload,
     build_group_details,
@@ -145,6 +146,37 @@ def test_apply_group_rank_changes_only_uses_supplied_feature_run_history():
 
     assert rankings[0]["rank_change_1w"] == 4
     assert rankings[0]["rank_change_1m"] is None
+
+
+def test_apply_calendar_rank_changes_updates_rows_from_lookup_contract():
+    rankings = [
+        {"industry_group": "Semiconductors", "rank": 3},
+        {"industry_group": "Software", "rank": 8},
+    ]
+
+    apply_calendar_rank_changes(
+        rankings,
+        historical_ranks={
+            ("Semiconductors", "1w"): 7,
+            ("Software", "1m"): 4,
+        },
+        periods=("1w", "1m"),
+    )
+
+    assert rankings == [
+        {
+            "industry_group": "Semiconductors",
+            "rank": 3,
+            "rank_change_1w": 4,
+            "rank_change_1m": None,
+        },
+        {
+            "industry_group": "Software",
+            "rank": 8,
+            "rank_change_1w": None,
+            "rank_change_1m": -4,
+        },
+    ]
 
 
 def test_build_group_detail_payload_uses_shared_schema_history_and_stock_sorting():

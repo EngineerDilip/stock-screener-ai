@@ -254,6 +254,55 @@ describe('GroupRankingsPage', () => {
     expect(within(table).getAllByRole('row')[1]).toHaveTextContent('HK Internet Services');
   });
 
+  it('sorts live group rankings by top stock', async () => {
+    getCurrentRankings.mockResolvedValue({
+      date: '2026-04-18',
+      total_groups: 2,
+      market_scope: 'HK',
+      rankings: [
+        {
+          ...rankingRowFor('HK'),
+          industry_group: 'HK Semiconductors',
+          rank: 1,
+          top_symbol: '9988.HK',
+        },
+        {
+          ...rankingRowFor('HK'),
+          industry_group: 'HK Retail',
+          rank: 2,
+          top_symbol: '0005.HK',
+        },
+      ],
+    });
+
+    renderGroupRankingsPage();
+
+    const table = (await screen.findByRole('columnheader', { name: 'Top' })).closest('table');
+    const user = userEvent.setup();
+    await user.click(within(table).getByRole('button', { name: 'Top' }));
+
+    expect(within(table).getAllByRole('row')[1]).toHaveTextContent('HK Retail');
+  });
+
+  it.each([
+    { key: 'Enter', name: 'Enter' },
+    { key: ' ', name: 'Space' },
+  ])('opens live group detail from the focused row with $name', async ({ key }) => {
+    renderGroupRankingsPage();
+
+    const table = (await screen.findByRole('columnheader', { name: 'Industry Group' })).closest('table');
+    const row = within(table).getAllByRole('row')[1];
+    expect(row).toHaveAttribute('tabindex', '0');
+
+    row.focus();
+    fireEvent.keyDown(row, { key });
+
+    expect(await screen.findByRole('dialog')).toHaveTextContent('HK Internet Services');
+    await waitFor(() => {
+      expect(getGroupDetail).toHaveBeenCalledWith('HK Internet Services', 365, 'HK');
+    });
+  });
+
   it('keeps the market filter visible on non-US load errors and hides the US-only calculation action', async () => {
     runtimeState.features = { tasks: true };
     getCurrentRankings.mockImplementation(async (_limit, market = 'US') => {

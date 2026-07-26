@@ -10,7 +10,12 @@ import {
 } from '@mui/material';
 import TrendingUpIcon from '@mui/icons-material/TrendingUp';
 import TrendingDownIcon from '@mui/icons-material/TrendingDown';
-import { GROUP_RS_FIELDS, formatGroupRs } from './groupRankingFields';
+import {
+  LIVE_GROUP_RANKING_COLUMNS,
+  deriveHistoricalRank,
+  derivePctRsAbove80,
+  formatGroupRs,
+} from './groupRankingFields';
 
 const RankChangeCell = ({ value }) => {
   if (value === null || value === undefined) {
@@ -29,14 +34,119 @@ const RankChangeCell = ({ value }) => {
   );
 };
 
-const HistoricalRankCell = ({ currentRank, rankChange }) => {
-  if (rankChange == null || currentRank == null) {
+const HistoricalRankCell = ({ row, rankChange }) => {
+  const historicalRank = deriveHistoricalRank(row, rankChange);
+  if (historicalRank == null) {
     return <Box sx={{ color: 'text.secondary', fontFamily: 'monospace', fontSize: '11px' }}>-</Box>;
   }
   return (
     <Box sx={{ fontFamily: 'monospace', fontSize: '11px', textAlign: 'right' }}>
-      {currentRank + rankChange}
+      {historicalRank}
     </Box>
+  );
+};
+
+const SortableHeaderCell = ({ column, order, orderBy, onSort }) => (
+  <TableCell align={column.align}>
+    <TableSortLabel
+      active={orderBy === column.field}
+      direction={orderBy === column.field ? order : 'asc'}
+      onClick={() => onSort(column.field)}
+    >
+      {column.label}
+    </TableSortLabel>
+  </TableCell>
+);
+
+const RankBadge = ({ rank }) => (
+  <Box
+    component="span"
+    sx={{
+      backgroundColor: rank <= 20 ? 'success.main' : rank >= 177 ? 'error.main' : 'warning.main',
+      color: rank <= 20 || rank >= 177 ? 'white' : 'warning.contrastText',
+      padding: '1px 5px',
+      borderRadius: '2px',
+      fontSize: '10px',
+      fontWeight: 600,
+      fontFamily: 'monospace',
+    }}
+  >
+    {rank}
+  </Box>
+);
+
+const LiveRankingCell = ({ row, column, showHistoricalRanks }) => {
+  if (column.kind === 'rank') {
+    return (
+      <TableCell>
+        <RankBadge rank={row.rank} />
+      </TableCell>
+    );
+  }
+
+  if (column.kind === 'group') {
+    return (
+      <TableCell sx={{ maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {row.industry_group}
+      </TableCell>
+    );
+  }
+
+  if (column.kind === 'rankChange') {
+    return (
+      <TableCell align={column.align}>
+        {showHistoricalRanks ? (
+          <HistoricalRankCell row={row} rankChange={row[column.field]} />
+        ) : (
+          <RankChangeCell value={row[column.field]} />
+        )}
+      </TableCell>
+    );
+  }
+
+  if (column.kind === 'pctAbove80') {
+    const pctRsAbove80 = derivePctRsAbove80(row);
+    return (
+      <TableCell align={column.align} sx={{ fontFamily: 'monospace' }}>
+        {pctRsAbove80 != null ? `${pctRsAbove80.toFixed(1)}%` : '-'}
+      </TableCell>
+    );
+  }
+
+  if (column.kind === 'topStock') {
+    return (
+      <TableCell align={column.align} sx={{ color: 'text.secondary', fontWeight: 500 }}>
+        {row.top_symbol || '-'}
+      </TableCell>
+    );
+  }
+
+  if (column.kind === 'integer') {
+    return (
+      <TableCell align={column.align} sx={{ fontFamily: 'monospace' }}>
+        {row[column.field]}
+      </TableCell>
+    );
+  }
+
+  const value = row[column.field];
+  return (
+    <TableCell
+      align={column.align}
+      sx={{
+        fontFamily: 'monospace',
+        ...(column.field === 'avg_rs_rating' && {
+          fontWeight: 600,
+          color: value >= 70
+            ? 'success.main'
+            : value <= 30
+              ? 'error.main'
+              : 'text.primary',
+        }),
+      }}
+    >
+      {formatGroupRs(value)}
+    </TableCell>
   );
 };
 
@@ -49,213 +159,48 @@ export default function LiveGroupRankingsTable({
   showHistoricalRanks,
 }) {
   return (
-            <TableContainer sx={{ maxHeight: 'calc(100vh - 200px)', flexGrow: 1 }}>
-              <Table stickyHeader size="small">
-                <TableHead>
-                  <TableRow>
-                    <TableCell>
-                      <TableSortLabel
-                        active={orderBy === 'rank'}
-                        direction={orderBy === 'rank' ? order : 'asc'}
-                        onClick={() => onSort('rank')}
-                      >
-                        Rank
-                      </TableSortLabel>
-                    </TableCell>
-                    <TableCell>Industry Group</TableCell>
-                    {GROUP_RS_FIELDS.map(({ field, label }) => (
-                      <TableCell key={field} align="right">
-                        <TableSortLabel
-                          active={orderBy === field}
-                          direction={orderBy === field ? order : 'asc'}
-                          onClick={() => onSort(field)}
-                        >
-                          {label}
-                        </TableSortLabel>
-                      </TableCell>
-                    ))}
-                    <TableCell align="right">
-                      <TableSortLabel
-                        active={orderBy === 'median_rs_rating'}
-                        direction={orderBy === 'median_rs_rating' ? order : 'asc'}
-                        onClick={() => onSort('median_rs_rating')}
-                      >
-                        Med RS
-                      </TableSortLabel>
-                    </TableCell>
-                    <TableCell align="right">
-                      <TableSortLabel
-                        active={orderBy === 'weighted_avg_rs_rating'}
-                        direction={orderBy === 'weighted_avg_rs_rating' ? order : 'asc'}
-                        onClick={() => onSort('weighted_avg_rs_rating')}
-                      >
-                        Wtd RS
-                      </TableSortLabel>
-                    </TableCell>
-                    <TableCell align="right">
-                      <TableSortLabel
-                        active={orderBy === 'rs_std_dev'}
-                        direction={orderBy === 'rs_std_dev' ? order : 'asc'}
-                        onClick={() => onSort('rs_std_dev')}
-                      >
-                        Disp
-                      </TableSortLabel>
-                    </TableCell>
-                    <TableCell align="right">
-                      <TableSortLabel
-                        active={orderBy === 'num_stocks'}
-                        direction={orderBy === 'num_stocks' ? order : 'asc'}
-                        onClick={() => onSort('num_stocks')}
-                      >
-                        #
-                      </TableSortLabel>
-                    </TableCell>
-                    <TableCell align="right">
-                      <TableSortLabel
-                        active={orderBy === 'pct_rs_above_80'}
-                        direction={orderBy === 'pct_rs_above_80' ? order : 'asc'}
-                        onClick={() => onSort('pct_rs_above_80')}
-                      >
-                        80+%
-                      </TableSortLabel>
-                    </TableCell>
-                    <TableCell align="right">Top</TableCell>
-                    <TableCell align="right">
-                      <TableSortLabel
-                        active={orderBy === 'rank_change_1w'}
-                        direction={orderBy === 'rank_change_1w' ? order : 'asc'}
-                        onClick={() => onSort('rank_change_1w')}
-                      >
-                        1W
-                      </TableSortLabel>
-                    </TableCell>
-                    <TableCell align="right">
-                      <TableSortLabel
-                        active={orderBy === 'rank_change_1m'}
-                        direction={orderBy === 'rank_change_1m' ? order : 'asc'}
-                        onClick={() => onSort('rank_change_1m')}
-                      >
-                        1M Δ
-                      </TableSortLabel>
-                    </TableCell>
-                    <TableCell align="right">
-                      <TableSortLabel
-                        active={orderBy === 'rank_change_3m'}
-                        direction={orderBy === 'rank_change_3m' ? order : 'asc'}
-                        onClick={() => onSort('rank_change_3m')}
-                      >
-                        3M Δ
-                      </TableSortLabel>
-                    </TableCell>
-                    <TableCell align="right">
-                      <TableSortLabel
-                        active={orderBy === 'rank_change_6m'}
-                        direction={orderBy === 'rank_change_6m' ? order : 'asc'}
-                        onClick={() => onSort('rank_change_6m')}
-                      >
-                        6M
-                      </TableSortLabel>
-                    </TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {rankings.map((row) => (
-                    <TableRow
-                      key={row.industry_group}
-                      hover
-                      onClick={() => onSelectGroup(row.industry_group)}
-                      sx={{ cursor: 'pointer' }}
-                    >
-                      <TableCell>
-                        <Box
-                          component="span"
-                          sx={{
-                            backgroundColor: row.rank <= 20 ? 'success.main' : row.rank >= 177 ? 'error.main' : 'warning.main',
-                            color: row.rank <= 20 || row.rank >= 177 ? 'white' : 'warning.contrastText',
-                            padding: '1px 5px',
-                            borderRadius: '2px',
-                            fontSize: '10px',
-                            fontWeight: 600,
-                            fontFamily: 'monospace',
-                          }}
-                        >
-                          {row.rank}
-                        </Box>
-                      </TableCell>
-                      <TableCell sx={{ maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {row.industry_group}
-                      </TableCell>
-                      {GROUP_RS_FIELDS.map(({ field }) => (
-                        <TableCell
-                          key={field}
-                          align="right"
-                          sx={{
-                            fontFamily: 'monospace',
-                            ...(field === 'avg_rs_rating' && {
-                              fontWeight: 600,
-                              color: row[field] >= 70
-                                ? 'success.main'
-                                : row[field] <= 30
-                                  ? 'error.main'
-                                  : 'text.primary',
-                            }),
-                          }}
-                        >
-                          {formatGroupRs(row[field])}
-                        </TableCell>
-                      ))}
-                      <TableCell align="right" sx={{ fontFamily: 'monospace' }}>
-                        {row.median_rs_rating != null ? row.median_rs_rating.toFixed(1) : '-'}
-                      </TableCell>
-                      <TableCell align="right" sx={{ fontFamily: 'monospace' }}>
-                        {row.weighted_avg_rs_rating != null ? row.weighted_avg_rs_rating.toFixed(1) : '-'}
-                      </TableCell>
-                      <TableCell align="right" sx={{ fontFamily: 'monospace' }}>
-                        {row.rs_std_dev != null ? row.rs_std_dev.toFixed(1) : '-'}
-                      </TableCell>
-                      <TableCell align="right" sx={{ fontFamily: 'monospace' }}>{row.num_stocks}</TableCell>
-                      <TableCell align="right" sx={{ fontFamily: 'monospace' }}>
-                        {row.pct_rs_above_80 != null
-                          ? `${row.pct_rs_above_80.toFixed(1)}%`
-                          : row.num_stocks
-                            ? `${(((row.num_stocks_rs_above_80 ?? 0) / row.num_stocks) * 100).toFixed(1)}%`
-                            : '-'}
-                      </TableCell>
-                      <TableCell align="right" sx={{ color: 'text.secondary', fontWeight: 500 }}>
-                        {row.top_symbol || '-'}
-                      </TableCell>
-                      <TableCell align="right">
-                        {showHistoricalRanks ? (
-                          <HistoricalRankCell currentRank={row.rank} rankChange={row.rank_change_1w} />
-                        ) : (
-                          <RankChangeCell value={row.rank_change_1w} />
-                        )}
-                      </TableCell>
-                      <TableCell align="right">
-                        {showHistoricalRanks ? (
-                          <HistoricalRankCell currentRank={row.rank} rankChange={row.rank_change_1m} />
-                        ) : (
-                          <RankChangeCell value={row.rank_change_1m} />
-                        )}
-                      </TableCell>
-                      <TableCell align="right">
-                        {showHistoricalRanks ? (
-                          <HistoricalRankCell currentRank={row.rank} rankChange={row.rank_change_3m} />
-                        ) : (
-                          <RankChangeCell value={row.rank_change_3m} />
-                        )}
-                      </TableCell>
-                      <TableCell align="right">
-                        {showHistoricalRanks ? (
-                          <HistoricalRankCell currentRank={row.rank} rankChange={row.rank_change_6m} />
-                        ) : (
-                          <RankChangeCell value={row.rank_change_6m} />
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </TableContainer>
+    <TableContainer sx={{ maxHeight: 'calc(100vh - 200px)', flexGrow: 1 }}>
+      <Table stickyHeader size="small">
+        <TableHead>
+          <TableRow>
+            {LIVE_GROUP_RANKING_COLUMNS.map((column) => (
+              <SortableHeaderCell
+                key={column.field}
+                column={column}
+                order={order}
+                orderBy={orderBy}
+                onSort={onSort}
+              />
+            ))}
+          </TableRow>
+        </TableHead>
+        <TableBody>
+          {rankings.map((row) => (
+            <TableRow
+              key={row.industry_group}
+              hover
+              onClick={() => onSelectGroup(row.industry_group)}
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  onSelectGroup(row.industry_group);
+                }
+              }}
+              sx={{ cursor: 'pointer' }}
+            >
+              {LIVE_GROUP_RANKING_COLUMNS.map((column) => (
+                <LiveRankingCell
+                  key={column.field}
+                  row={row}
+                  column={column}
+                  showHistoricalRanks={showHistoricalRanks}
+                />
+              ))}
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </TableContainer>
   );
 }

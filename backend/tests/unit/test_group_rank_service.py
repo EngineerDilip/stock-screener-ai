@@ -367,7 +367,9 @@ def test_get_group_history_uses_calendar_rank_change_offsets(monkeypatch):
         )
         db_session.commit()
 
-        expected_period_days = dict(group_rank_module.GROUP_RANK_CHANGE_CALENDAR_DAYS)
+        expected_period_days = dict(
+            group_rank_module.CALENDAR_DAY_GROUP_RANK_CHANGE_WINDOWS
+        )
 
         def fake_historical_batch(  # noqa: ANN001
             db,
@@ -409,7 +411,9 @@ def test_get_current_rankings_uses_calendar_rank_change_offsets(monkeypatch):
         _add_rank(db_session, group, current_date, 4)
         db_session.commit()
 
-        expected_period_days = dict(group_rank_module.GROUP_RANK_CHANGE_CALENDAR_DAYS)
+        expected_period_days = dict(
+            group_rank_module.CALENDAR_DAY_GROUP_RANK_CHANGE_WINDOWS
+        )
 
         def fake_historical_batch(  # noqa: ANN001
             db,

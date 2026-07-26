@@ -23,7 +23,7 @@ from app.domain.relative_strength import (
 from app.domain.markets import market_registry
 from app.interfaces.tasks import feature_store_tasks
 from app.services.group_rank_history_backfill_service import (
-    DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS,
+    DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS,
     GroupRankHistoryBackfillResult,
     GroupRankHistoryBackfillStatus,
 )
@@ -41,7 +41,8 @@ def _backfill_result(
         market=market,
         as_of_date=as_of_date,
         lookback_start_date=(
-            as_of_date - timedelta(days=DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS)
+            as_of_date
+            - timedelta(days=DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS)
         ),
         errors=1 if status is GroupRankHistoryBackfillStatus.ERRORED else 0,
         error=error,

@@ -17,9 +17,6 @@ from app.domain.relative_strength import (
 )
 from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
 from app.services.canonical_group_ranking_service import CanonicalGroupRankingService
-from app.services.group_rank_history_backfill_service import (
-    DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS,
-)
 from app.services.group_rank_snapshot_coordinator import (
     GroupBackfillReport,
     GroupRankSnapshotCoordinator,
@@ -80,6 +77,10 @@ class StaticRRGBootstrapBackfillResult:
 
 
 _UNSUPPORTED_FORMULA_ERROR = "Static RRG bootstrap only supports canonical Market RS"
+STATIC_RRG_BOOTSTRAP_BUFFER_WEEKS = 2
+DEFAULT_STATIC_RRG_BOOTSTRAP_LOOKBACK_DAYS = (
+    MIN_TAIL_WEEKS + STATIC_RRG_BOOTSTRAP_BUFFER_WEEKS
+) * 7
 
 
 class _UnsupportedBootstrapLegacyGroupService:
@@ -96,7 +97,7 @@ class StaticRRGBootstrapBackfillService:
         calendar_service: MarketCalendarService | None = None,
         group_snapshot_coordinator: GroupRankSnapshotCoordinator | None = None,
         market_rs_repository: MarketRsRunRepository | None = None,
-        lookback_days: int = DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS,
+        lookback_days: int = DEFAULT_STATIC_RRG_BOOTSTRAP_LOOKBACK_DAYS,
     ) -> None:
         self.calendar_service = calendar_service or MarketCalendarService()
         self.lookback_days = lookback_days

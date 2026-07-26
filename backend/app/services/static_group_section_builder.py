@@ -13,8 +13,13 @@ from app.infra.db.models.feature_store import FeatureRun
 from app.services.group_detail_payloads import (
     constituent_stock_payloads_from_group_rows,
 )
-from app.services.ibd_group_rank_service import GROUP_RANK_CHANGE_CALENDAR_DAYS
-from app.services.group_ranking_history import build_group_detail_payload_from_parts
+from app.services.group_rank_history_policy import (
+    CALENDAR_DAY_GROUP_RANK_CHANGE_WINDOWS,
+)
+from app.services.group_ranking_history import (
+    apply_calendar_rank_changes,
+    build_group_detail_payload_from_parts,
+)
 from app.services.group_ranking_payloads import group_snapshot_metadata
 from app.services.group_rank_snapshot_reader import GroupSnapshotIntegrityError
 from app.services.feature_run_rs_identity import (
@@ -89,20 +94,15 @@ class StaticGroupSectionBuilder:
             db,
             [str(row["industry_group"]) for row in rankings],
             identity.as_of_date,
-            GROUP_RANK_CHANGE_CALENDAR_DAYS,
+            CALENDAR_DAY_GROUP_RANK_CHANGE_WINDOWS,
             market=identity.market,
             formula_version=identity.formula_version,
         )
-        for row in rankings:
-            for period_name in GROUP_RANK_CHANGE_CALENDAR_DAYS:
-                historical_rank = historical_ranks.get(
-                    (str(row["industry_group"]), period_name)
-                )
-                row[f"rank_change_{period_name}"] = (
-                    int(historical_rank) - int(row["rank"])
-                    if historical_rank is not None
-                    else None
-                )
+        apply_calendar_rank_changes(
+            rankings,
+            historical_ranks=historical_ranks,
+            periods=CALENDAR_DAY_GROUP_RANK_CHANGE_WINDOWS,
+        )
         historical = self._load_stored_group_history(db, identity=identity)
         details = self._build_stored_group_details(
             rankings=rankings,

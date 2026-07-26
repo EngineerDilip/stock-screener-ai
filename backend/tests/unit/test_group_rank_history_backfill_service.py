@@ -8,9 +8,13 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from app.services.group_rank_history_backfill_service import (
-    DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS,
+    DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS,
     GroupRankHistoryBackfillService,
     GroupRankHistoryBackfillStatus,
+)
+from app.services.group_rank_history_policy import (
+    CALENDAR_DAY_GROUP_RANK_CHANGE_WINDOWS,
+    CALENDAR_DAY_GROUP_RANK_LOOKUP_TOLERANCE_DAYS,
 )
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
 from app.services.group_rank_snapshot_coordinator import (
@@ -18,6 +22,13 @@ from app.services.group_rank_snapshot_coordinator import (
     GroupSnapshotResult,
     GroupSnapshotStatus,
 )
+
+
+def test_default_lookback_is_derived_from_rank_change_windows():
+    assert DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS == (
+        max(CALENDAR_DAY_GROUP_RANK_CHANGE_WINDOWS.values())
+        + CALENDAR_DAY_GROUP_RANK_LOOKUP_TOLERANCE_DAYS
+    )
 
 
 def test_backfill_skips_market_without_group_rankings():
@@ -97,7 +108,8 @@ def test_backfill_uses_canonical_market_session_range():
     assert range_calls == [
         (
             "HK",
-            date(2026, 4, 7) - timedelta(days=DEFAULT_GROUP_RANK_HISTORY_LOOKBACK_DAYS),
+            date(2026, 4, 7)
+            - timedelta(days=DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS),
             date(2026, 4, 7),
         )
     ]
@@ -110,6 +122,54 @@ def test_backfill_uses_canonical_market_session_range():
     assert result.status is GroupRankHistoryBackfillStatus.COMPLETED
     assert result.processed == 2
     assert result.missing_dates == 2
+
+
+def test_backfill_range_reaches_six_month_rank_change_window():
+    query = MagicMock()
+    query.filter.return_value = query
+    query.distinct.return_value = query
+    query.all.return_value = []
+    db = MagicMock()
+    db.query.return_value = query
+
+    @contextmanager
+    def session_factory():
+        yield db
+
+    range_calls = []
+    as_of_date = date(2026, 7, 24)
+
+    def resolve_trading_days(market, start, end):
+        range_calls.append((market, start, end))
+        return [end]
+
+    service = GroupRankHistoryBackfillService(
+        session_factory=session_factory,
+        calendar_service=SimpleNamespace(trading_days=resolve_trading_days),
+        group_snapshot_coordinator=SimpleNamespace(
+            backfill=lambda _db, *, identities, continue_on_error: GroupBackfillReport(
+                results=tuple(
+                    GroupSnapshotResult(
+                        identity=identity,
+                        status=GroupSnapshotStatus.PROCESSED,
+                        row_count=1,
+                        market_rs_run_id=42,
+                    )
+                    for identity in identities
+                )
+            )
+        ),
+    )
+
+    service.backfill(
+        as_of_date=as_of_date,
+        market="US",
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+    )
+
+    assert range_calls == [
+        ("US", date(2026, 1, 18), as_of_date)
+    ]
 
 
 def test_backfill_treats_returned_gap_fill_errors_as_errored():
