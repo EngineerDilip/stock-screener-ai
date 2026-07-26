@@ -42,6 +42,9 @@ from app.services.static_site_export_service import (
 from app.services.static_groups_rrg_export import (
     StaticGroupsRRGRollingHistoryExportSession,
 )
+from app.services.static_group_snapshot_coordinator import (
+    build_static_group_snapshot_coordinator,
+)
 from app.services.static_rrg_history_contract import StaticRRGHistoryBundleError
 from app.services.static_market_publish_policy import OPTIONAL_STATIC_MARKETS
 from app.tasks.data_fetch_lock import disable_serialized_data_fetch_lock
@@ -582,10 +585,18 @@ def _ensure_group_rank_history(
     formula_version: str,
 ) -> GroupRankHistoryBackfillResult:
     """Backfill recent group-rank history so 1W/1M/3M deltas can be rendered."""
+    calendar_service = get_market_calendar_service()
+    group_snapshot_coordinator = (
+        build_static_group_snapshot_coordinator(
+            calendar_service=calendar_service,
+        )
+        if formula_version == BALANCED_RS_FORMULA_VERSION
+        else get_group_rank_snapshot_coordinator()
+    )
     return GroupRankHistoryBackfillService(
         session_factory=SessionLocal,
-        calendar_service=get_market_calendar_service(),
-        group_snapshot_coordinator=get_group_rank_snapshot_coordinator(),
+        calendar_service=calendar_service,
+        group_snapshot_coordinator=group_snapshot_coordinator,
     ).backfill(
         as_of_date=as_of_date,
         market=market,
