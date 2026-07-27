@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 from typing import Any, Callable
 
-from app.domain.markets import get_market_catalog
 from app.domain.markets.key_markets import key_market_price_symbols
 from app.domain.providers.price_symbol_support import split_supported_price_symbols
-from app.domain.relative_strength import HORIZON_SESSIONS
-from app.models.stock import StockPrice
 from app.models.stock_universe import StockUniverse
 from app.services.bulk_data_fetcher import BulkDataFetcher
-from app.services.group_rank_history_backfill_service import (
-    DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS,
+from app.services.group_history_price_coverage import (
+    GroupHistoryPriceCoverageService,
 )
 from app.services.market_calendar_service import MarketCalendarService
 from app.services.price_history_coverage import classify_price_history
@@ -21,7 +18,6 @@ from app.services.price_refresh_planning import (
     NO_HISTORY_PRICE_BOOTSTRAP_PERIOD,
     STALE_PRICE_TOP_UP_PERIOD,
 )
-from app.services.price_value_policy import is_usable_adjusted_close
 
 
 STATIC_DAILY_PRICE_REFRESH_PERIOD = STALE_PRICE_TOP_UP_PERIOD
@@ -92,6 +88,9 @@ class StaticDailyPriceRefreshService:
         self._fetcher = fetcher
         self._batch_size_for_market = batch_size_for_market
         self._calendar_service = calendar_service or MarketCalendarService()
+        self._group_history_price_coverage = GroupHistoryPriceCoverageService(
+            calendar_service=self._calendar_service
+        )
         if sleep is None:
             import time
 
@@ -128,12 +127,17 @@ class StaticDailyPriceRefreshService:
                 as_of_date=as_of_date,
                 symbols_requiring_positive_volume=volume_required_symbols,
             )
-            history_incomplete_symbols = self._symbols_with_short_rrg_history(
-                db,
-                symbols=coverage.fresh + coverage.stale,
-                as_of_date=as_of_date,
-                market=market,
-                enabled=ensure_rrg_history,
+            history_incomplete_symbols = (
+                list(
+                    self._group_history_price_coverage.classify(
+                        db,
+                        market=market,
+                        through_date=as_of_date,
+                        symbols=coverage.fresh + coverage.stale,
+                    ).incomplete_symbols
+                )
+                if ensure_rrg_history and market is not None
+                else []
             )
 
         db_fresh_symbols = list(coverage.fresh)
@@ -229,98 +233,6 @@ class StaticDailyPriceRefreshService:
             "yahoo_failed_symbols": failed,
             "rate_limited_retry": retry_stats,
         }
-
-    def _rrg_required_anchor_dates(
-        self,
-        *,
-        as_of_date: date,
-        market: str | None,
-    ) -> frozenset[date] | None:
-        if market is None:
-            return None
-        normalized_market = str(market or "").strip().upper()
-        try:
-            if (
-                not get_market_catalog()
-                .get(normalized_market)
-                .capabilities.group_rankings
-            ):
-                return None
-            target_start = as_of_date - timedelta(
-                days=DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS
-            )
-            target_dates = self._calendar_service.trading_days(
-                normalized_market,
-                target_start,
-                as_of_date,
-            )
-            if not target_dates:
-                return None
-            anchor_dates: set[date] = set()
-            offsets = tuple(HORIZON_SESSIONS.values())
-            for target_date in target_dates:
-                anchors = self._calendar_service.session_anchors(
-                    normalized_market,
-                    target_date,
-                    offsets=offsets,
-                )
-                anchor_dates.update(anchors.values())
-        except Exception as exc:
-            print(
-                "[static-daily prices] Could not resolve RRG history anchors "
-                f"for market={normalized_market}: {exc}",
-                flush=True,
-            )
-            return None
-        return frozenset(anchor_dates)
-
-    def _symbols_with_short_rrg_history(
-        self,
-        db,
-        *,
-        symbols: tuple[str, ...],
-        as_of_date: date,
-        market: str | None,
-        enabled: bool,
-    ) -> list[str]:
-        if not enabled or not symbols:
-            return []
-        anchor_dates = self._rrg_required_anchor_dates(
-            as_of_date=as_of_date,
-            market=market,
-        )
-        if not anchor_dates:
-            return []
-
-        anchor_count = len(anchor_dates)
-        available_anchor_counts: dict[str, int] = {}
-        for chunk_start in range(0, len(symbols), 500):
-            chunk_symbols = symbols[chunk_start:chunk_start + 500]
-            rows = (
-                db.query(StockPrice.symbol, StockPrice.date, StockPrice.adj_close)
-                .filter(
-                    StockPrice.symbol.in_(chunk_symbols),
-                    StockPrice.date.in_(anchor_dates),
-                )
-                .all()
-            )
-            available_by_symbol: dict[str, set[date]] = {}
-            for symbol, row_date, adj_close in rows:
-                if row_date is None or not is_usable_adjusted_close(adj_close):
-                    continue
-                available_by_symbol.setdefault(str(symbol).upper(), set()).add(row_date)
-            available_anchor_counts.update(
-                {
-                    symbol: len(dates)
-                    for symbol, dates in available_by_symbol.items()
-                }
-            )
-
-        return [
-            symbol
-            for symbol in symbols
-            if available_anchor_counts.get(symbol, 0) < anchor_count
-        ]
 
     def _fetch_and_store(
         self,

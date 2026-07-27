@@ -9,7 +9,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from .price_history_coverage import classify_price_history
+from .price_history_coverage import PriceHistoryCoverage, classify_price_history
 from .price_refresh_planning import (
     GitHubSeedOutcome,
     LIVE_TOP_UP_MODES,
@@ -127,6 +127,8 @@ def build_price_refresh_planning_input(
     market_calendar_service,
     sync_github_seed: Callable[..., Mapping[str, Any]],
     recently_refreshed_filter: Callable[[Sequence[str]], Sequence[str]] | None = None,
+    ensure_group_history: bool = False,
+    group_history_price_coverage_service=None,
 ) -> PriceRefreshPlanningInput:
     parsed_mode = PriceRefreshMode.parse(mode)
     with log_runtime_stage(
@@ -176,6 +178,35 @@ def build_price_refresh_planning_input(
                 symbols=all_symbols,
                 as_of_date=target_as_of,
             )
+            if ensure_group_history:
+                if group_history_price_coverage_service is None:
+                    from .group_history_price_coverage import (
+                        GroupHistoryPriceCoverageService,
+                    )
+
+                    group_history_price_coverage_service = (
+                        GroupHistoryPriceCoverageService(
+                            calendar_service=market_calendar_service
+                        )
+                    )
+                history_coverage = group_history_price_coverage_service.classify(
+                    db,
+                    market=effective_market,
+                    through_date=target_as_of,
+                    symbols=all_symbols,
+                )
+                incomplete = set(history_coverage.incomplete_symbols)
+                coverage = PriceHistoryCoverage(
+                    fresh=tuple(
+                        symbol for symbol in coverage.fresh if symbol not in incomplete
+                    ),
+                    stale=tuple(
+                        symbol for symbol in coverage.stale if symbol not in incomplete
+                    ),
+                    no_history=tuple(
+                        dict.fromkeys((*coverage.no_history, *history_coverage.incomplete_symbols))
+                    ),
+                )
 
     auto_refresh_symbols = None
     if parsed_mode is PriceRefreshMode.AUTO and recently_refreshed_filter is not None:

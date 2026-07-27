@@ -172,13 +172,16 @@ def test_smart_refresh_cache_delegates_to_price_refresh_workflow(monkeypatch):
 
     delegated_calls = []
 
-    def _run_workflow(*, task, mode, market, activity_lifecycle):
+    def _run_workflow(
+        *, task, mode, market, activity_lifecycle, ensure_group_history
+    ):
         delegated_calls.append(
             {
                 "task": task,
                 "mode": mode,
                 "market": market,
                 "activity_lifecycle": activity_lifecycle,
+                "ensure_group_history": ensure_group_history,
             }
         )
         return {"status": "completed", "mode": mode, "market": market}
@@ -190,6 +193,7 @@ def test_smart_refresh_cache_delegates_to_price_refresh_workflow(monkeypatch):
         mode="bootstrap",
         market="HK",
         activity_lifecycle="bootstrap",
+        ensure_group_history=True,
     )
 
     assert result == {"status": "completed", "mode": "bootstrap", "market": "HK"}
@@ -199,6 +203,7 @@ def test_smart_refresh_cache_delegates_to_price_refresh_workflow(monkeypatch):
             "mode": "bootstrap",
             "market": "HK",
             "activity_lifecycle": "bootstrap",
+            "ensure_group_history": True,
         }
     ]
 
