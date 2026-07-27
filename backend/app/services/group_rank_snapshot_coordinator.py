@@ -119,6 +119,56 @@ class GroupRankSnapshotCoordinator:
         status = GroupSnapshotStatus.PROCESSED if rows else GroupSnapshotStatus.EMPTY
         return self._result(identity, status, rows)
 
+    def repair_snapshot(
+        self,
+        db: Session,
+        *,
+        identity: GroupSnapshotIdentity,
+    ) -> GroupSnapshotResult:
+        """Recalculate one integrity-invalid snapshot identity in place."""
+        if identity.formula_version == BALANCED_RS_FORMULA_VERSION:
+            run = self.market_rs_snapshot_service.calculate(
+                db,
+                market=identity.market,
+                as_of_date=identity.as_of_date,
+                formula_version=identity.formula_version,
+                rebuild_incompatible=True,
+            )
+            self.canonical_group_service.calculate_and_store(
+                db,
+                market=identity.market,
+                as_of_date=identity.as_of_date,
+                formula_version=identity.formula_version,
+            )
+            rows = self.reader.load_exact(
+                db,
+                identity=identity,
+                include_top_symbol_names=False,
+            )
+            if rows and {row.get("market_rs_run_id") for row in rows} != {run.id}:
+                raise RuntimeError(
+                    "Repaired Group snapshot does not reference the exact Market RS run"
+                )
+        elif identity.formula_version == LEGACY_RS_FORMULA_VERSION:
+            self.legacy_group_service.calculate_group_rankings(
+                db,
+                identity.as_of_date,
+                market=identity.market,
+                formula_version=LEGACY_RS_FORMULA_VERSION,
+            )
+            rows = self.reader.load_exact(
+                db,
+                identity=identity,
+                include_top_symbol_names=False,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported Group RS formula: {identity.formula_version}"
+            )
+
+        status = GroupSnapshotStatus.PROCESSED if rows else GroupSnapshotStatus.EMPTY
+        return self._result(identity, status, rows)
+
     def backfill(
         self,
         db: Session,

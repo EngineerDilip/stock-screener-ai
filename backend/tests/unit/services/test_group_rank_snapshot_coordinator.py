@@ -103,3 +103,56 @@ def test_backfill_rolls_back_failed_date_before_processing_next(db_session):
         call(db_session, identity=first),
         call(db_session, identity=second),
     ]
+
+
+def test_repair_snapshot_rebuilds_exact_balanced_identity(db_session):
+    identity = GroupSnapshotIdentity("US", AS_OF, BALANCED_RS_FORMULA_VERSION)
+    reader = Mock()
+    reader.load_exact.return_value = [
+        {"market_rs_run_id": 42, "industry_group": "Software"}
+    ]
+    stock = Mock()
+    stock.calculate.return_value.id = 42
+    canonical = Mock()
+
+    result = _coordinator(reader, stock, canonical, Mock()).repair_snapshot(
+        db_session,
+        identity=identity,
+    )
+
+    assert result.status is GroupSnapshotStatus.PROCESSED
+    stock.calculate.assert_called_once_with(
+        db_session,
+        market="US",
+        as_of_date=AS_OF,
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+        rebuild_incompatible=True,
+    )
+    canonical.calculate_and_store.assert_called_once_with(
+        db_session,
+        market="US",
+        as_of_date=AS_OF,
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+    )
+
+
+def test_repair_snapshot_uses_real_legacy_calculation_path(db_session):
+    identity = GroupSnapshotIdentity("US", AS_OF, LEGACY_RS_FORMULA_VERSION)
+    reader = Mock()
+    reader.load_exact.return_value = [
+        {"market_rs_run_id": None, "industry_group": "Software"}
+    ]
+    legacy = Mock()
+
+    result = _coordinator(reader, Mock(), Mock(), legacy).repair_snapshot(
+        db_session,
+        identity=identity,
+    )
+
+    assert result.status is GroupSnapshotStatus.PROCESSED
+    legacy.calculate_group_rankings.assert_called_once_with(
+        db_session,
+        AS_OF,
+        market="US",
+        formula_version=LEGACY_RS_FORMULA_VERSION,
+    )
