@@ -239,6 +239,14 @@ def calculate_daily_group_rankings(
                 'reason_code': GroupRankReasonCode.INVALID_DATE,
                 'timestamp': datetime.now().isoformat(),
             }
+    elif activity_lifecycle == "bootstrap":
+        calc_date = calendar_service.last_completed_trading_day(effective_market)
+        logger.info(
+            "Calculating bootstrap group rankings for last completed session "
+            "(%s): %s",
+            effective_market,
+            calc_date,
+        )
     else:
         calc_date = today_local
 

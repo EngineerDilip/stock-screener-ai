@@ -26,7 +26,9 @@ class BootstrapOperation(str, Enum):
     CALCULATE_DAILY_BREADTH_WITH_GAPFILL = "calculate_daily_breadth_with_gapfill"
     CALCULATE_MARKET_EXPOSURE = "calculate_market_exposure"
     CALCULATE_DAILY_GROUP_RANKINGS_WITH_GAPFILL = "calculate_daily_group_rankings_with_gapfill"
+    CALCULATE_DAILY_GROUP_RANKINGS = "calculate_daily_group_rankings"
     BUILD_DAILY_SNAPSHOT = "build_daily_snapshot"
+    ENSURE_GROUP_HISTORY = "ensure_group_history"
 
 
 @dataclass(frozen=True)
@@ -81,6 +83,9 @@ def _stage(
 
 
 def _build_market_plan(market: str) -> MarketBootstrapPlan:
+    supports_group_rankings = (
+        get_market_catalog().get(market).capabilities.group_rankings
+    )
     stages = [
         _stage(
             key="universe",
@@ -112,6 +117,7 @@ def _build_market_plan(market: str) -> MarketBootstrapPlan:
                 queue_kind=BootstrapQueueKind.DATA_FETCH,
                 market=market,
                 mode="bootstrap",
+                ensure_group_history=supports_group_rankings,
             ),
             _stage(
                 key="price_warmup",
@@ -146,7 +152,11 @@ def _build_market_plan(market: str) -> MarketBootstrapPlan:
             ),
             _stage(
                 key="groups",
-                operation=BootstrapOperation.CALCULATE_DAILY_GROUP_RANKINGS_WITH_GAPFILL,
+                operation=(
+                    BootstrapOperation.CALCULATE_DAILY_GROUP_RANKINGS
+                    if supports_group_rankings
+                    else BootstrapOperation.CALCULATE_DAILY_GROUP_RANKINGS_WITH_GAPFILL
+                ),
                 queue_kind=BootstrapQueueKind.MARKET_JOBS,
                 market=market,
                 execution_policy="refresh_guarded",
@@ -162,6 +172,17 @@ def _build_market_plan(market: str) -> MarketBootstrapPlan:
             ),
         ]
     )
+
+    if supports_group_rankings:
+        stages.append(
+            _stage(
+                key="group_history",
+                operation=BootstrapOperation.ENSURE_GROUP_HISTORY,
+                queue_kind=BootstrapQueueKind.MARKET_JOBS,
+                market=market,
+                strict=True,
+            )
+        )
 
     return MarketBootstrapPlan(market=market, stages=tuple(stages))
 

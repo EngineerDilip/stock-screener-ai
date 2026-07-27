@@ -386,6 +386,41 @@ def test_daily_group_rankings_run_for_non_us_market(monkeypatch):
     assert call_kwargs.get("market") == "HK"
 
 
+def test_bootstrap_current_only_group_task_targets_last_completed_session(monkeypatch):
+    import app.tasks.group_rank_tasks as module
+
+    fake_db = MagicMock()
+    monkeypatch.setattr(module, "SessionLocal", lambda: fake_db)
+    _patch_serialized_lock(monkeypatch)
+    calendar = _patch_calendar_service(
+        monkeypatch,
+        datetime(2026, 3, 22, 12, 0, 0),
+        is_trading_day=False,
+    )
+    calendar.last_completed_trading_day.return_value = date(2026, 3, 20)
+    monkeypatch.setattr(
+        "app.services.runtime_preferences_service.is_market_enabled_now",
+        lambda _market: True,
+    )
+    fake_service = MagicMock()
+    monkeypatch.setattr(module, "get_group_rank_service", lambda: fake_service)
+    captured = []
+
+    def fake_runner(db, request, dependencies):
+        captured.append(request)
+        return _runner_outcome(request.calculation_date)
+
+    monkeypatch.setattr(module, "run_daily_group_rankings", fake_runner)
+
+    result = module.calculate_daily_group_rankings.run(
+        market="US",
+        activity_lifecycle="bootstrap",
+    )
+
+    assert result["date"] == "2026-03-20"
+    assert captured[0].calculation_date == date(2026, 3, 20)
+
+
 def test_daily_group_rankings_fail_explicitly_when_ibd_mappings_missing(monkeypatch):
     import app.tasks.group_rank_tasks as module
 

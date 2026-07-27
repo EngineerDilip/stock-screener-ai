@@ -42,8 +42,9 @@ def test_bootstrap_plan_uses_semantic_operations_instead_of_task_name_strings():
         BootstrapOperation.CALCULATE_MARKET_RS_SNAPSHOT,
         BootstrapOperation.CALCULATE_DAILY_BREADTH_WITH_GAPFILL,
         BootstrapOperation.CALCULATE_MARKET_EXPOSURE,
-        BootstrapOperation.CALCULATE_DAILY_GROUP_RANKINGS_WITH_GAPFILL,
+        BootstrapOperation.CALCULATE_DAILY_GROUP_RANKINGS,
         BootstrapOperation.BUILD_DAILY_SNAPSHOT,
+        BootstrapOperation.ENSURE_GROUP_HISTORY,
     ]
     assert all(not hasattr(stage, "task_name") for stage in market_plan.stages)
 
@@ -100,7 +101,7 @@ def test_non_us_bootstrap_uses_market_feature_snapshot(monkeypatch):
     assert "app.interfaces.tasks.feature_store_tasks.build_daily_snapshot" in task_names
     assert "app.tasks.breadth_tasks.calculate_daily_breadth_with_gapfill" in task_names
     assert (
-        "app.tasks.group_rank_tasks.calculate_daily_group_rankings_with_gapfill"
+        "app.tasks.group_rank_tasks.calculate_daily_group_rankings"
         in task_names
     )
     breadth = next(
@@ -112,16 +113,17 @@ def test_non_us_bootstrap_uses_market_feature_snapshot(monkeypatch):
         signature
         for signature in signatures
         if signature.task
-        == "app.tasks.group_rank_tasks.calculate_daily_group_rankings_with_gapfill"
+        == "app.tasks.group_rank_tasks.calculate_daily_group_rankings"
     )
     assert breadth.kwargs["execution_policy"] == "refresh_guarded"
     assert groups.kwargs["execution_policy"] == "refresh_guarded"
-    snapshot = signatures[-1]
+    snapshot = signatures[-2]
     assert snapshot.kwargs["market"] == "HK"
     assert snapshot.kwargs["universe_name"] == "market:HK"
     assert snapshot.kwargs["publish_pointer_key"] == "latest_published_market:HK"
     assert snapshot.kwargs["bootstrap_cache_only_if_covered"] is True
-    assert [signature.kwargs.get("activity_lifecycle") for signature in signatures] == ["bootstrap"] * 9
+    assert [signature.kwargs.get("activity_lifecycle") for signature in signatures] == ["bootstrap"] * 10
+    assert signatures[-1].task == "app.tasks.group_history_tasks.ensure_group_history"
 
 
 def test_runtime_bootstrap_signatures_follow_bootstrap_plan(monkeypatch):
@@ -180,11 +182,12 @@ def test_runtime_bootstrap_signatures_follow_bootstrap_plan(monkeypatch):
         "app.tasks.market_rs_tasks.calculate_market_rs_snapshot",
         "app.tasks.breadth_tasks.calculate_daily_breadth_with_gapfill",
         "app.tasks.breadth_tasks.calculate_market_exposure",
-        "app.tasks.group_rank_tasks.calculate_daily_group_rankings_with_gapfill",
+        "app.tasks.group_rank_tasks.calculate_daily_group_rankings",
         "app.interfaces.tasks.feature_store_tasks.build_daily_snapshot",
+        "app.tasks.group_history_tasks.ensure_group_history",
     ]
     assert signatures[2].queue == "celery"
-    snapshot = signatures[-1]
+    snapshot = signatures[-2]
     assert snapshot.kwargs["publish_pointer_key"] == "latest_published_market:HK"
 
 
@@ -250,8 +253,9 @@ def test_us_primary_bootstrap_loads_ibd_mappings_before_prices(monkeypatch):
         "app.tasks.market_rs_tasks.calculate_market_rs_snapshot",
         "app.tasks.breadth_tasks.calculate_daily_breadth_with_gapfill",
         "app.tasks.breadth_tasks.calculate_market_exposure",
-        "app.tasks.group_rank_tasks.calculate_daily_group_rankings_with_gapfill",
+        "app.tasks.group_rank_tasks.calculate_daily_group_rankings",
         "app.interfaces.tasks.feature_store_tasks.build_daily_snapshot",
+        "app.tasks.group_history_tasks.ensure_group_history",
     ]
     assert signatures[1].kwargs == {
         "market": "US",
@@ -282,6 +286,11 @@ def test_bootstrap_includes_every_daily_pipeline_compute_step():
 
     plan = build_bootstrap_plan(primary_market="US", enabled_markets=["US"]).market_plans[0]
     bootstrap = {s.task for s in _build_market_bootstrap_signatures(plan)}
+
+    if "app.tasks.group_rank_tasks.calculate_daily_group_rankings" in bootstrap:
+        daily_compute.discard(
+            "app.tasks.group_rank_tasks.calculate_daily_group_rankings_with_gapfill"
+        )
 
     missing = daily_compute - bootstrap
     assert not missing, f"daily-pipeline compute steps missing from bootstrap: {missing}"

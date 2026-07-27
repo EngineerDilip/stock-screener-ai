@@ -180,7 +180,11 @@ def _build_market_bootstrap_signatures(market_plan: MarketBootstrapPlan) -> list
     )
     from app.tasks.cache_tasks import smart_refresh_cache
     from app.tasks.fundamentals_tasks import refresh_all_fundamentals
-    from app.tasks.group_rank_tasks import calculate_daily_group_rankings_with_gapfill
+    from app.tasks.group_history_tasks import ensure_group_history
+    from app.tasks.group_rank_tasks import (
+        calculate_daily_group_rankings,
+        calculate_daily_group_rankings_with_gapfill,
+    )
     from app.tasks.industry_tasks import load_tracked_ibd_industry_groups
     from app.tasks.market_rs_tasks import calculate_market_rs_snapshot
     from app.tasks.universe_tasks import (
@@ -203,7 +207,11 @@ def _build_market_bootstrap_signatures(market_plan: MarketBootstrapPlan) -> list
         BootstrapOperation.CALCULATE_DAILY_GROUP_RANKINGS_WITH_GAPFILL: (
             calculate_daily_group_rankings_with_gapfill
         ),
+        BootstrapOperation.CALCULATE_DAILY_GROUP_RANKINGS: (
+            calculate_daily_group_rankings
+        ),
         BootstrapOperation.BUILD_DAILY_SNAPSHOT: build_daily_snapshot,
+        BootstrapOperation.ENSURE_GROUP_HISTORY: ensure_group_history,
     }
     return [
         task_by_operation[stage.operation]
