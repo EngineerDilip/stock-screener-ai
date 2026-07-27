@@ -100,3 +100,36 @@ def test_strict_group_history_task_raises_when_readiness_remains_incomplete(
 
     module.mark_market_activity_failed.assert_called_once()
     db.close.assert_called_once()
+
+
+def test_strict_group_history_task_records_snapshot_publication_failure_once(
+    monkeypatch,
+):
+    from app.tasks import group_history_tasks as module
+
+    db = Mock()
+    service = Mock()
+    service.ensure.return_value = _result(ready=True)
+    monkeypatch.setattr(module, "SessionLocal", lambda: db)
+    monkeypatch.setattr(module, "_build_group_history_bootstrap_service", lambda: service)
+    monkeypatch.setattr(
+        module,
+        "get_market_calendar_service",
+        lambda: SimpleNamespace(
+            last_completed_trading_day=lambda _market: date(2026, 6, 30)
+        ),
+    )
+    monkeypatch.setattr(module, "bump_group_rankings_epoch", Mock())
+    monkeypatch.setattr(module, "safe_publish_groups_bootstrap", lambda: None)
+    monkeypatch.setattr(module, "mark_market_activity_started", Mock())
+    monkeypatch.setattr(module, "mark_market_activity_completed", Mock())
+    monkeypatch.setattr(module, "mark_market_activity_failed", Mock())
+
+    with pytest.raises(RuntimeError, match="snapshot publication failed"):
+        module.ensure_group_history.run.__wrapped__(
+            module.ensure_group_history,
+            market="US",
+            strict=True,
+        )
+
+    module.mark_market_activity_failed.assert_called_once()

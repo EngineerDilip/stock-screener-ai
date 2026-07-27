@@ -96,6 +96,20 @@ async def trigger_ui_snapshot_rebuild_on_startup() -> None:
     return None
 
 
+async def trigger_group_history_reconciliation_on_startup() -> dict[str, str]:
+    """Queue upgrade repair without blocking FastAPI startup."""
+    from .tasks.group_history_tasks import queue_group_history_reconciliation
+
+    try:
+        return await asyncio.to_thread(queue_group_history_reconciliation)
+    except Exception as exc:
+        logger.warning(
+            "Group history startup reconciliation failed",
+            exc_info=True,
+        )
+        return {"status": f"failed:{type(exc).__name__}"}
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -105,6 +119,9 @@ async def lifespan(app: FastAPI):
     initialize_runtime()
     runtime_services = initialize_process_runtime_services(session_factory=SessionLocal)
     app.state.runtime_services = runtime_services
+    app.state.group_history_reconciliation_task = asyncio.create_task(
+        trigger_group_history_reconciliation_on_startup()
+    )
     if settings.mcp_http_enabled:
         from .interfaces.mcp.http_transport import create_mcp_http_server
 
@@ -120,6 +137,15 @@ async def lifespan(app: FastAPI):
             delattr(app.state, "runtime_services")
         if hasattr(app.state, "mcp_server"):
             delattr(app.state, "mcp_server")
+        reconciliation_task = getattr(
+            app.state,
+            "group_history_reconciliation_task",
+            None,
+        )
+        if reconciliation_task is not None and not reconciliation_task.done():
+            reconciliation_task.cancel()
+        if hasattr(app.state, "group_history_reconciliation_task"):
+            delattr(app.state, "group_history_reconciliation_task")
         engine.dispose()
         logger.info("Database connections closed")
 
