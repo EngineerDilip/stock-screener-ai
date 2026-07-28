@@ -21,15 +21,13 @@ from app.services.point_in_time_universe_service import (
     PointInTimeUniverseService,
     PointInTimeUniverseUnavailable,
 )
+from app.services.market_rs_result_contract import (
+    MARKET_RS_REASON_BENCHMARK_ADJUSTED_ANCHOR_MISSING,
+    MARKET_RS_REASON_CURRENT_ADJUSTED_PRICE_COVERAGE_BELOW_THRESHOLD,
+)
 
 
 EMPTY_UNIVERSE_HASH = hashlib.sha256(b"").hexdigest()
-MARKET_RS_REASON_BENCHMARK_ADJUSTED_ANCHOR_MISSING = (
-    "benchmark_adjusted_anchor_missing"
-)
-MARKET_RS_REASON_CURRENT_ADJUSTED_PRICE_COVERAGE_BELOW_THRESHOLD = (
-    "current_adjusted_price_coverage_below_threshold"
-)
 
 
 @dataclass(frozen=True)

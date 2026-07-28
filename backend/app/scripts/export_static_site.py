@@ -46,13 +46,14 @@ from app.services.static_group_snapshot_coordinator import (
     build_static_group_snapshot_coordinator,
 )
 from app.services.static_rrg_history_contract import StaticRRGHistoryBundleError
-from app.services.market_rs_inputs import (
+from app.services.market_rs_result_contract import (
     MARKET_RS_REASON_BENCHMARK_ADJUSTED_ANCHOR_MISSING,
 )
 from app.services.static_market_publish_policy import (
     OPTIONAL_STATIC_MARKETS,
     StaticMarketRsArtifactState,
     classify_static_market_rs_artifact_result,
+    collect_static_no_current_artifact_failures,
 )
 from app.tasks.data_fetch_lock import disable_serialized_data_fetch_lock
 from app.tasks.workload_coordination import disable_serialized_market_workload
@@ -80,6 +81,11 @@ STATIC_RS_BENCHMARK_RESOLUTION_EXCEPTION = "benchmark_resolution_exception"
 SUPPORTED_RS_FORMULA_VERSIONS = frozenset(
     {BALANCED_RS_FORMULA_VERSION, LEGACY_RS_FORMULA_VERSION}
 )
+STATIC_NO_CURRENT_ARTIFACT_EXIT_MESSAGES = {
+    "group_rank_backfill_not_ready": "group-rank history backfill was not ready",
+    "market_exposure_not_ready": "exposure was not stored",
+    "market_rs_not_ready": "Market RS was not ready",
+}
 
 
 def _default_rs_formula_policy() -> dict[str, str]:
@@ -232,94 +238,13 @@ def _selected_market_non_publishable_snapshot(
     return None if _snapshot_publishable(snapshot) else snapshot
 
 
-def _market_exposure_failures(
-    refresh_results: dict[str, Any],
-    market: str | None,
-    warnings: list[str],
-) -> dict[str, dict[str, Any]]:
-    exposure_by_market = refresh_results.get("market_exposure", {})
-    if not isinstance(exposure_by_market, dict):
-        return {}
-
-    failures: dict[str, dict[str, Any]] = {}
-    selected_markets = (market.upper(),) if market is not None else tuple(exposure_by_market)
-    for selected_market in selected_markets:
-        exposure = exposure_by_market.get(selected_market)
-        if not isinstance(exposure, dict) or not exposure.get("error"):
-            continue
-
-        market_warnings = [
-            warning for warning in warnings if f"market {selected_market} exposure" in warning
-        ]
-        if not market_warnings:
-            market_warnings = [
-                f"Static export market {selected_market} exposure not stored "
-                f"for {exposure.get('date') or 'unknown date'}: {exposure['error']}."
-            ]
-        failures[selected_market] = {
-            "status": "errored",
-            "reason": "market_exposure_not_ready",
-            "market": selected_market,
-            "warnings": market_warnings,
-            "failure_diagnostics": {
-                "date": exposure.get("date"),
-                "error": exposure["error"],
-            },
-        }
-    return failures
-
-
 def _snapshot_skipped_not_trading_day(snapshot: dict[str, Any] | None) -> bool:
     if snapshot is None:
         return False
     return snapshot.get("status") == "skipped" and snapshot.get("reason") == "not_trading_day"
 
 
-def _group_rank_backfill_failures(
-    refresh_results: dict[str, Any],
-    market: str | None,
-) -> dict[str, dict[str, Any]]:
-    feature_snapshots = refresh_results.get("feature_snapshots", {})
-    if not isinstance(feature_snapshots, dict):
-        return {}
-    selected_markets = (
-        (market.upper(),)
-        if market is not None
-        else tuple(str(snapshot_market).upper() for snapshot_market in feature_snapshots)
-    )
-    failures: dict[str, dict[str, Any]] = {}
-    for selected_market in selected_markets:
-        snapshot = feature_snapshots.get(selected_market)
-        if not isinstance(snapshot, dict):
-            continue
-        if snapshot.get("reason") == "group_rank_backfill_not_ready":
-            failures[selected_market] = snapshot
-    return failures
-
-
-def _market_rs_not_ready_failures(
-    refresh_results: dict[str, Any],
-    market: str | None,
-) -> dict[str, dict[str, Any]]:
-    feature_snapshots = refresh_results.get("feature_snapshots", {})
-    if not isinstance(feature_snapshots, dict):
-        return {}
-    selected_markets = (
-        (market.upper(),)
-        if market is not None
-        else tuple(str(snapshot_market).upper() for snapshot_market in feature_snapshots)
-    )
-    failures: dict[str, dict[str, Any]] = {}
-    for selected_market in selected_markets:
-        snapshot = feature_snapshots.get(selected_market)
-        if not isinstance(snapshot, dict):
-            continue
-        if snapshot.get("reason") == "market_rs_not_ready":
-            failures[selected_market] = snapshot
-    return failures
-
-
-def _write_market_diagnostics(output_dir: Path, market: str, snapshot: dict[str, Any]) -> Path:
+def _write_market_diagnostics(output_dir: Path, market: str, snapshot: Mapping[str, Any]) -> Path:
     diagnostics_dir = output_dir / "diagnostics" / market.lower()
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
     diagnostics_path = diagnostics_dir / "snapshot-failure.json"
@@ -339,6 +264,25 @@ def _write_market_diagnostics(output_dir: Path, market: str, snapshot: dict[str,
         encoding="utf-8",
     )
     return diagnostics_path
+
+
+def _no_current_artifact_exit_message(
+    *,
+    market: str | None,
+    failed_markets: tuple[str, ...],
+    reasons: tuple[str, ...],
+) -> str:
+    market_label = market or ", ".join(failed_markets)
+    unique_reasons = set(reasons)
+    if len(unique_reasons) == 1:
+        detail = STATIC_NO_CURRENT_ARTIFACT_EXIT_MESSAGES[reasons[0]]
+    else:
+        detail = "one or more market artifacts were not current"
+    return (
+        f"Static site export skipped for market {market_label}; "
+        f"{detail}, diagnostics were uploaded, "
+        "and the combine job can use fallback artifacts."
+    )
 
 
 def _refresh_static_daily_prices(*, as_of_date: date, market: str | None = None) -> dict[str, Any]:
@@ -533,6 +477,12 @@ def _prepare_balanced_static_rs(*, market: str, as_of_date: date) -> dict[str, A
         formula_version=BALANCED_RS_FORMULA_VERSION,
     )
     if artifact_state is StaticMarketRsArtifactState.NO_CURRENT_ARTIFACT:
+        if not isinstance(result, Mapping):
+            raise RuntimeError(
+                f"Balanced Market RS preparation returned a non-mapping no-current "
+                f"artifact result for {normalized_market} on {as_of_date.isoformat()}: "
+                f"{result}"
+            )
         return {**result, "market_rs_run_id": None}
     if artifact_state is not StaticMarketRsArtifactState.READY:
         raise RuntimeError(
@@ -782,7 +732,20 @@ def _run_daily_refresh(
             )
             for selected_market in selected_markets
         }
-        market_rs_not_ready_warnings = {
+        hard_market_rs_failures = {
+            selected_market: market_rs_results.get(selected_market)
+            for selected_market in selected_markets
+            if market_rs_artifact_states[selected_market]
+            is StaticMarketRsArtifactState.HARD_FAILURE
+        }
+        if hard_market_rs_failures:
+            failed_market, failed_result = next(iter(hard_market_rs_failures.items()))
+            raise RuntimeError(
+                f"Static Market RS failed hard for {failed_market} "
+                f"on {as_of_by_market[failed_market].isoformat()}: {failed_result}"
+            )
+
+        market_rs_no_current_artifact_warnings = {
             selected_market: _market_rs_not_ready_warning(
                 market=selected_market,
                 as_of_date=as_of_by_market[selected_market],
@@ -790,14 +753,14 @@ def _run_daily_refresh(
             )
             for selected_market in selected_markets
             if market_rs_artifact_states[selected_market]
-            is not StaticMarketRsArtifactState.READY
+            is StaticMarketRsArtifactState.NO_CURRENT_ARTIFACT
         }
-        warnings.extend(market_rs_not_ready_warnings.values())
+        warnings.extend(market_rs_no_current_artifact_warnings.values())
 
         market_exposure: dict[str, Any] = {}
         for selected_market in selected_markets:
             market_as_of = as_of_by_market[selected_market]
-            if selected_market in market_rs_not_ready_warnings:
+            if selected_market in market_rs_no_current_artifact_warnings:
                 market_exposure[selected_market] = {
                     "status": "skipped",
                     "reason": "market_rs_not_ready",
@@ -837,7 +800,7 @@ def _run_daily_refresh(
         feature_snapshots: dict[str, Any] = {}
         for selected_market in selected_markets:
             market_as_of = as_of_by_market[selected_market]
-            market_rs_warning = market_rs_not_ready_warnings.get(selected_market)
+            market_rs_warning = market_rs_no_current_artifact_warnings.get(selected_market)
             if market_rs_warning is not None:
                 feature_snapshots[selected_market] = _market_rs_not_ready_snapshot(
                     market=selected_market,
@@ -885,7 +848,7 @@ def _run_daily_refresh(
         group_rank_history_report: dict[str, dict[str, Any]] = {}
         for selected_market in selected_markets:
             market_as_of = as_of_by_market[selected_market]
-            if selected_market in market_rs_not_ready_warnings:
+            if selected_market in market_rs_no_current_artifact_warnings:
                 skipped = GroupRankHistoryBackfillResult(
                     status=GroupRankHistoryBackfillStatus.SKIPPED,
                     market=selected_market,
@@ -1188,63 +1151,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"Static site export skipped for market {args.market} because it is not a trading day."
                 )
                 return STATIC_EXPORT_SKIPPED_EXIT_CODE
-            market_rs_not_ready_failures = _market_rs_not_ready_failures(
+            no_current_artifact_failures = collect_static_no_current_artifact_failures(
                 refresh_results,
-                args.market,
+                market=args.market,
             )
-            if market_rs_not_ready_failures:
-                for failed_market, snapshot_failure in market_rs_not_ready_failures.items():
+            if no_current_artifact_failures:
+                for failure in no_current_artifact_failures:
                     _write_market_diagnostics(
                         Path(args.output_dir),
-                        failed_market,
-                        snapshot_failure,
+                        failure.market,
+                        failure.snapshot,
                     )
-                failed_markets = ", ".join(market_rs_not_ready_failures)
-                market_label = args.market or failed_markets
                 print(
-                    f"Static site export skipped for market {market_label}; "
-                    "Market RS was not ready, diagnostics were uploaded, "
-                    "and the combine job can use fallback artifacts."
-                )
-                return STATIC_EXPORT_NO_CURRENT_ARTIFACT_EXIT_CODE
-            market_exposure_failures = _market_exposure_failures(
-                refresh_results,
-                args.market,
-                refresh_warnings,
-            )
-            if market_exposure_failures:
-                for failed_market, exposure_failure in market_exposure_failures.items():
-                    _write_market_diagnostics(
-                        Path(args.output_dir),
-                        failed_market,
-                        exposure_failure,
+                    _no_current_artifact_exit_message(
+                        market=args.market,
+                        failed_markets=tuple(
+                            failure.market for failure in no_current_artifact_failures
+                        ),
+                        reasons=tuple(
+                            failure.reason for failure in no_current_artifact_failures
+                        ),
                     )
-                failed_markets = ", ".join(market_exposure_failures)
-                market_label = args.market or failed_markets
-                print(
-                    f"Static site export skipped for market {market_label}; "
-                    "exposure was not stored, diagnostics were uploaded, "
-                    "and the combine job can use fallback artifacts."
-                )
-                return STATIC_EXPORT_NO_CURRENT_ARTIFACT_EXIT_CODE
-
-            group_rank_backfill_failures = _group_rank_backfill_failures(
-                refresh_results,
-                args.market,
-            )
-            if group_rank_backfill_failures:
-                for failed_market, snapshot_failure in group_rank_backfill_failures.items():
-                    _write_market_diagnostics(
-                        Path(args.output_dir),
-                        failed_market,
-                        snapshot_failure,
-                    )
-                failed_markets = ", ".join(group_rank_backfill_failures)
-                market_label = args.market or failed_markets
-                print(
-                    f"Static site export skipped for market {market_label}; "
-                    "group-rank history backfill was not ready, diagnostics were uploaded, "
-                    "and the combine job can use fallback artifacts."
                 )
                 return STATIC_EXPORT_NO_CURRENT_ARTIFACT_EXIT_CODE
 
