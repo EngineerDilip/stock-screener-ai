@@ -157,12 +157,14 @@ class GroupRankSnapshotCoordinator:
                 market=identity.market,
                 formula_version=LEGACY_RS_FORMULA_VERSION,
             )
-            self.legacy_group_service.calculate_group_rankings(
+            calculation = self.legacy_group_service.calculate_group_rankings(
                 db,
                 identity.as_of_date,
                 market=identity.market,
                 formula_version=LEGACY_RS_FORMULA_VERSION,
             )
+            if not calculation.rankings:
+                raise RuntimeError("Legacy Group repair produced no rankings")
             rows = self.reader.load_exact(
                 db,
                 identity=identity,

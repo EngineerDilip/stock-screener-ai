@@ -1,5 +1,8 @@
 from datetime import date
+from types import SimpleNamespace
 from unittest.mock import Mock, call
+
+import pytest
 
 from app.domain.relative_strength import (
     BALANCED_RS_FORMULA_VERSION,
@@ -164,3 +167,19 @@ def test_repair_snapshot_uses_real_legacy_calculation_path(db_session):
         market="US",
         formula_version=LEGACY_RS_FORMULA_VERSION,
     )
+
+
+def test_repair_snapshot_rejects_empty_legacy_replacement(db_session):
+    identity = GroupSnapshotIdentity("US", AS_OF, LEGACY_RS_FORMULA_VERSION)
+    reader = Mock()
+    legacy = Mock()
+    legacy.calculate_group_rankings.return_value = SimpleNamespace(rankings=())
+
+    with pytest.raises(RuntimeError, match="produced no rankings"):
+        _coordinator(reader, Mock(), Mock(), legacy).repair_snapshot(
+            db_session,
+            identity=identity,
+        )
+
+    legacy.ranking_repository.delete_range.assert_called_once()
+    reader.load_exact.assert_not_called()
