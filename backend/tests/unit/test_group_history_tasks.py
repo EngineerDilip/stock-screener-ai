@@ -248,6 +248,59 @@ def test_activity_completion_failure_does_not_reclassify_success():
     ]
 
 
+def test_skipped_reconciliation_reaches_terminal_ready_without_finalization():
+    from app.services.group_history_execution_service import (
+        GroupHistoryExecutionService,
+    )
+    from app.services.group_history_reconciliation import (
+        GroupHistoryReservation,
+        GroupHistoryReconciliationStatus,
+        GroupHistoryTarget,
+    )
+
+    repository = Mock()
+    repository.transition.return_value = True
+    repository.owns.return_value = True
+    bump = Mock()
+    publish = Mock()
+    completed = Mock()
+    bootstrap_result = SimpleNamespace(
+        status=GroupHistoryBootstrapStatus.SKIPPED,
+        as_dict=lambda: {"status": "skipped", "after": {"ready": False}},
+    )
+    service = GroupHistoryExecutionService(
+        bootstrap_service=Mock(ensure=Mock(return_value=bootstrap_result)),
+        reconciliation_repository=repository,
+        bump_epoch=bump,
+        publish_snapshot=publish,
+        mark_started=Mock(),
+        mark_completed=completed,
+        mark_failed=Mock(),
+    )
+    reservation = GroupHistoryReservation(
+        GroupHistoryTarget("US", "captured-v1", date(2026, 6, 30)),
+        "lease-1",
+    )
+
+    result = service.execute_reconciliation(
+        Mock(),
+        reservation=reservation,
+        task_name="repair_group_history_reconciliation",
+        task_id="task-1",
+    )
+
+    assert result["status"] == "skipped"
+    assert [
+        call.kwargs["status"].value for call in repository.transition.call_args_list
+    ] == ["repairing", "ready"]
+    assert repository.transition.call_args.kwargs["expected_statuses"] == {
+        GroupHistoryReconciliationStatus.REPAIRING
+    }
+    bump.assert_not_called()
+    publish.assert_not_called()
+    completed.assert_called_once()
+
+
 def test_superseded_reconciliation_does_not_repair_or_publish():
     from app.services.group_history_execution_service import (
         GroupHistoryExecutionService,

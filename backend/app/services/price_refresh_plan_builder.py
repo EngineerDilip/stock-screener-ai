@@ -9,6 +9,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from .benchmark_registry_service import benchmark_registry
 from .price_history_coverage import PriceHistoryCoverage, classify_price_history
 from .price_refresh_planning import (
     GitHubSeedOutcome,
@@ -149,7 +150,19 @@ def build_price_refresh_planning_input(
             normalize_market,
         )
     all_symbols = _normalize_symbols(universe.symbols)
-    group_history_symbols = _normalize_symbols(active_universe.symbols)
+    all_symbol_set = set(all_symbols)
+    benchmark_symbols = tuple(
+        symbol
+        for symbol in _normalize_symbols(
+            benchmark_registry.get_candidate_symbols(effective_market)
+        )
+        if symbol in all_symbol_set
+    )
+    group_history_symbols = tuple(
+        dict.fromkeys(
+            (*_normalize_symbols(active_universe.symbols), *benchmark_symbols)
+        )
+    )
     github_seed = None
     if parsed_mode in LIVE_TOP_UP_MODES and all_symbols and market is not None:
         with log_runtime_stage(
@@ -166,7 +179,9 @@ def build_price_refresh_planning_input(
     target_as_of = None
     coverage = None
     if parsed_mode in LIVE_TOP_UP_MODES and all_symbols:
-        target_as_of = market_calendar_service.last_completed_trading_day(effective_market)
+        target_as_of = market_calendar_service.last_completed_trading_day(
+            effective_market
+        )
         with log_runtime_stage(
             logger,
             "price_refresh.classify_coverage",
@@ -206,13 +221,17 @@ def build_price_refresh_planning_input(
                         symbol for symbol in coverage.stale if symbol not in incomplete
                     ),
                     no_history=tuple(
-                        dict.fromkeys((*coverage.no_history, *history_coverage.incomplete_symbols))
+                        dict.fromkeys(
+                            (*coverage.no_history, *history_coverage.incomplete_symbols)
+                        )
                     ),
                 )
 
     auto_refresh_symbols = None
     if parsed_mode is PriceRefreshMode.AUTO and recently_refreshed_filter is not None:
-        auto_refresh_symbols = _normalize_symbols(recently_refreshed_filter(all_symbols))
+        auto_refresh_symbols = _normalize_symbols(
+            recently_refreshed_filter(all_symbols)
+        )
 
     return PriceRefreshPlanningInput(
         all_symbols=all_symbols,

@@ -202,10 +202,15 @@ class GroupHistoryExecutionService:
                         return payload
 
             if reservation is not None:
+                expected_status = (
+                    GroupHistoryReconciliationStatus.FINALIZING
+                    if result.status is GroupHistoryBootstrapStatus.READY
+                    else GroupHistoryReconciliationStatus.REPAIRING
+                )
                 if not self._reconciliation_repository.transition(
                     db,
                     reservation=reservation,
-                    expected_statuses={GroupHistoryReconciliationStatus.FINALIZING},
+                    expected_statuses={expected_status},
                     status=GroupHistoryReconciliationStatus.READY,
                     counts=payload.get("after"),
                 ):

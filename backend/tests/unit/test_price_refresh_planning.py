@@ -414,12 +414,12 @@ def test_live_bootstrap_treats_fresh_but_group_history_incomplete_as_no_history(
             assert db is universe_session
             assert market == "US"
             assert through_date == date(2026, 6, 8)
-            assert symbols == ("AAA",)
+            assert symbols == ("AAA", "SPY")
             return GroupHistoryPriceCoverage(
-                complete_symbols=tuple(symbol for symbol in symbols if symbol != "AAA"),
-                incomplete_symbols=("AAA",),
+                complete_symbols=(),
+                incomplete_symbols=("AAA", "SPY"),
                 required_anchor_count=12,
-                available_anchor_counts={"AAA": 11},
+                available_anchor_counts={"AAA": 11, "SPY": 11},
             )
 
     plan = build_market_price_refresh_plan(
@@ -441,6 +441,7 @@ def test_live_bootstrap_treats_fresh_but_group_history_incomplete_as_no_history(
         job for job in plan.jobs if job.kind is PriceRefreshJobKind.NO_HISTORY
     )
     assert "AAA" in no_history.symbols
+    assert "SPY" in no_history.symbols
     assert no_history.period == "2y"
 
 
