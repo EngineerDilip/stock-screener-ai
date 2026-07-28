@@ -4,27 +4,22 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from enum import StrEnum
 from typing import Callable
 
 from sqlalchemy.orm import Session
 
+from app.domain.group_history import GroupHistoryTarget
 from app.services.group_history_bootstrap_service import (
     GroupHistoryBootstrapService,
     GroupHistoryBootstrapStatus,
 )
 from app.services.group_history_reconciliation import (
     GroupHistoryReconciliationRepository,
+    GroupHistoryReservation,
     GroupHistoryReconciliationStatus,
-    GroupHistoryTarget,
 )
 
 logger = logging.getLogger(__name__)
-
-
-class GroupHistoryCompletionPolicy(StrEnum):
-    BOOTSTRAP = "bootstrap"
-    RECONCILIATION = "group_history_reconciliation"
 
 
 class GroupHistoryExecutionService:
@@ -36,10 +31,11 @@ class GroupHistoryExecutionService:
         bootstrap_service: GroupHistoryBootstrapService,
         reconciliation_repository: GroupHistoryReconciliationRepository,
         bump_epoch: Callable[[str], None],
-        publish_snapshot: Callable[[], object | None],
+        publish_snapshot: Callable[[GroupHistoryTarget], object | None],
         mark_started: Callable[..., object],
         mark_completed: Callable[..., object],
         mark_failed: Callable[..., object],
+        resolve_current_target: Callable[..., GroupHistoryTarget] | None = None,
     ) -> None:
         self._bootstrap_service = bootstrap_service
         self._reconciliation_repository = reconciliation_repository
@@ -48,19 +44,57 @@ class GroupHistoryExecutionService:
         self._mark_started = mark_started
         self._mark_completed = mark_completed
         self._mark_failed = mark_failed
+        self._resolve_current_target = resolve_current_target
 
-    def execute(
+    def execute_bootstrap(
         self,
         db: Session,
         *,
         target: GroupHistoryTarget,
-        completion_policy: GroupHistoryCompletionPolicy,
         task_name: str,
         task_id: str | None,
-        raise_on_incomplete: bool = True,
+        strict: bool = True,
         activity_lifecycle: str | None = None,
     ) -> dict:
-        lifecycle = activity_lifecycle or completion_policy.value
+        return self._execute(
+            db,
+            target=target,
+            reservation=None,
+            task_name=task_name,
+            task_id=task_id,
+            strict=strict,
+            lifecycle=activity_lifecycle or "bootstrap",
+        )
+
+    def execute_reconciliation(
+        self,
+        db: Session,
+        *,
+        reservation: GroupHistoryReservation,
+        task_name: str,
+        task_id: str | None,
+    ) -> dict:
+        return self._execute(
+            db,
+            target=reservation.target,
+            reservation=reservation,
+            task_name=task_name,
+            task_id=task_id,
+            strict=False,
+            lifecycle="group_history_reconciliation",
+        )
+
+    def _execute(
+        self,
+        db: Session,
+        *,
+        target: GroupHistoryTarget,
+        reservation: GroupHistoryReservation | None,
+        task_name: str,
+        task_id: str | None,
+        strict: bool,
+        lifecycle: str,
+    ) -> dict:
         activity = {
             "market": target.market,
             "stage_key": "group_history",
@@ -70,11 +104,24 @@ class GroupHistoryExecutionService:
         }
         failure_recorded = False
         try:
-            if completion_policy is GroupHistoryCompletionPolicy.RECONCILIATION:
-                self._reconciliation_repository.mark(
+            if (
+                reservation is not None
+                and not self._reconciliation_repository.transition(
                     db,
-                    target=target,
+                    reservation=reservation,
+                    expected_statuses={GroupHistoryReconciliationStatus.QUEUED},
                     status=GroupHistoryReconciliationStatus.REPAIRING,
+                )
+            ):
+                return self._superseded_payload(reservation, "reservation_lost")
+            if reservation is not None and not self._reservation_is_current(
+                db,
+                reservation=reservation,
+            ):
+                return self._record_superseded(
+                    db,
+                    reservation=reservation,
+                    reason="target_changed_before_repair",
                 )
             self._mark_activity_safely(
                 db,
@@ -90,37 +137,59 @@ class GroupHistoryExecutionService:
 
             if result.status is GroupHistoryBootstrapStatus.INCOMPLETE:
                 message = f"Group history remains incomplete for {target.market}"
-                if completion_policy is GroupHistoryCompletionPolicy.RECONCILIATION:
+                if reservation is not None:
                     self._record_incomplete(
                         db,
-                        target=target,
+                        reservation=reservation,
                         payload=payload,
                         message=message,
                     )
                 self._mark_failure_safely(db, activity=activity, message=message)
                 failure_recorded = True
-                if raise_on_incomplete:
+                if strict:
                     raise RuntimeError(message)
                 return payload
 
             if result.status is GroupHistoryBootstrapStatus.READY:
+                if reservation is not None and not self._reservation_is_current(
+                    db,
+                    reservation=reservation,
+                ):
+                    return self._record_superseded(
+                        db,
+                        reservation=reservation,
+                        reason="target_changed_before_finalization",
+                    )
+                if (
+                    reservation is not None
+                    and not self._reconciliation_repository.transition(
+                        db,
+                        reservation=reservation,
+                        expected_statuses={GroupHistoryReconciliationStatus.REPAIRING},
+                        status=GroupHistoryReconciliationStatus.FINALIZING,
+                    )
+                ):
+                    return self._superseded_payload(
+                        reservation,
+                        "reservation_lost_before_finalization",
+                    )
                 self._bump_epoch(target.market)
                 payload["cache_invalidated"] = True
                 if target.market == "US":
-                    published = self._publish_snapshot()
+                    published = self._publish_snapshot(target)
                     payload["ui_snapshot_published"] = published is not None
                     if published is None:
                         message = "US Group bootstrap snapshot publication failed"
                         payload["status"] = "incomplete"
-                        if (
-                            completion_policy
-                            is GroupHistoryCompletionPolicy.RECONCILIATION
-                        ):
+                        if reservation is not None:
                             self._record_incomplete(
                                 db,
-                                target=target,
+                                reservation=reservation,
                                 payload=payload,
                                 message=message,
+                                expected_statuses={
+                                    GroupHistoryReconciliationStatus.FINALIZING
+                                },
                             )
                         self._mark_failure_safely(
                             db,
@@ -128,17 +197,22 @@ class GroupHistoryExecutionService:
                             message=message,
                         )
                         failure_recorded = True
-                        if raise_on_incomplete:
+                        if strict:
                             raise RuntimeError(message)
                         return payload
 
-            if completion_policy is GroupHistoryCompletionPolicy.RECONCILIATION:
-                self._reconciliation_repository.mark(
+            if reservation is not None:
+                if not self._reconciliation_repository.transition(
                     db,
-                    target=target,
+                    reservation=reservation,
+                    expected_statuses={GroupHistoryReconciliationStatus.FINALIZING},
                     status=GroupHistoryReconciliationStatus.READY,
                     counts=payload.get("after"),
-                )
+                ):
+                    return self._superseded_payload(
+                        reservation,
+                        "reservation_lost_after_finalization",
+                    )
             self._mark_activity_safely(
                 db,
                 callback=self._mark_completed,
@@ -148,10 +222,10 @@ class GroupHistoryExecutionService:
             return payload
         except Exception as exc:
             db.rollback()
-            if completion_policy is GroupHistoryCompletionPolicy.RECONCILIATION:
+            if reservation is not None:
                 self._mark_reconciliation_failed_safely(
                     db,
-                    target=target,
+                    reservation=reservation,
                     error=str(exc),
                 )
             if not failure_recorded:
@@ -166,13 +240,16 @@ class GroupHistoryExecutionService:
         self,
         db: Session,
         *,
-        target: GroupHistoryTarget,
+        reservation: GroupHistoryReservation,
         payload: dict,
         message: str,
+        expected_statuses: set[GroupHistoryReconciliationStatus] | None = None,
     ) -> None:
-        self._reconciliation_repository.mark(
+        self._reconciliation_repository.transition(
             db,
-            target=target,
+            reservation=reservation,
+            expected_statuses=expected_statuses
+            or {GroupHistoryReconciliationStatus.REPAIRING},
             status=GroupHistoryReconciliationStatus.INCOMPLETE,
             counts=payload.get("after"),
             error=message,
@@ -210,13 +287,17 @@ class GroupHistoryExecutionService:
         self,
         db: Session,
         *,
-        target: GroupHistoryTarget,
+        reservation: GroupHistoryReservation,
         error: str,
     ) -> None:
         try:
-            self._reconciliation_repository.mark(
+            self._reconciliation_repository.transition(
                 db,
-                target=target,
+                reservation=reservation,
+                expected_statuses={
+                    GroupHistoryReconciliationStatus.REPAIRING,
+                    GroupHistoryReconciliationStatus.FINALIZING,
+                },
                 status=GroupHistoryReconciliationStatus.FAILED,
                 error=error,
             )
@@ -227,8 +308,57 @@ class GroupHistoryExecutionService:
                 exc_info=True,
             )
 
+    def _reservation_is_current(
+        self,
+        db: Session,
+        *,
+        reservation: GroupHistoryReservation,
+    ) -> bool:
+        if not self._reconciliation_repository.owns(
+            db,
+            reservation=reservation,
+        ):
+            return False
+        if self._resolve_current_target is None:
+            return True
+        return (
+            self._resolve_current_target(
+                db,
+                market=reservation.target.market,
+            )
+            == reservation.target
+        )
+
+    def _record_superseded(
+        self,
+        db: Session,
+        *,
+        reservation: GroupHistoryReservation,
+        reason: str,
+    ) -> dict:
+        self._reconciliation_repository.transition(
+            db,
+            reservation=reservation,
+            expected_statuses={GroupHistoryReconciliationStatus.REPAIRING},
+            status=GroupHistoryReconciliationStatus.INCOMPLETE,
+            error=reason,
+        )
+        return self._superseded_payload(reservation, reason)
+
+    @staticmethod
+    def _superseded_payload(
+        reservation: GroupHistoryReservation,
+        reason: str,
+    ) -> dict:
+        return {
+            "status": "superseded",
+            "reason": reason,
+            "market": reservation.target.market,
+            "formula_version": reservation.target.formula_version,
+            "through_date": reservation.target.through_date.isoformat(),
+        }
+
 
 __all__ = [
-    "GroupHistoryCompletionPolicy",
     "GroupHistoryExecutionService",
 ]

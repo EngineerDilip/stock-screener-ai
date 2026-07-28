@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
@@ -37,6 +38,12 @@ class GroupSnapshotWindowIntegrityError(GroupSnapshotIntegrityError):
         self.errors = errors
         dates = ", ".join(item.isoformat() for item in errors)
         super().__init__(f"Group snapshot window contains invalid dates: {dates}")
+
+
+@dataclass(frozen=True)
+class GroupSnapshotWindowResult:
+    snapshots: dict[date, list[dict[str, Any]]]
+    errors: dict[date, str]
 
 
 class GroupSnapshotUnavailable(LookupError):
@@ -114,11 +121,34 @@ class GroupRankSnapshotReader:
         dates: tuple[date, ...] | list[date],
         include_top_symbol_names: bool = True,
     ) -> dict[date, list[dict[str, Any]]]:
+        result = self.inspect_window(
+            db,
+            market=market,
+            formula_version=formula_version,
+            dates=dates,
+            include_top_symbol_names=include_top_symbol_names,
+        )
+        if result.errors:
+            raise GroupSnapshotWindowIntegrityError(
+                snapshots=result.snapshots,
+                errors=result.errors,
+            )
+        return result.snapshots
+
+    def inspect_window(
+        self,
+        db: Session,
+        *,
+        market: str,
+        formula_version: str,
+        dates: tuple[date, ...] | list[date],
+        include_top_symbol_names: bool = True,
+    ) -> GroupSnapshotWindowResult:
         normalized_market = str(market or "").strip().upper()
         normalized_formula = str(formula_version or "").strip()
         selected_dates = tuple(sorted(dict.fromkeys(dates)))
         if not selected_dates:
-            return {}
+            return GroupSnapshotWindowResult(snapshots={}, errors={})
         records = (
             db.query(IBDGroupRank)
             .filter(
@@ -163,12 +193,7 @@ class GroupRankSnapshotReader:
                 db,
                 [row for snapshot in snapshots.values() for row in snapshot],
             )
-        if errors:
-            raise GroupSnapshotWindowIntegrityError(
-                snapshots=snapshots,
-                errors=errors,
-            )
-        return snapshots
+        return GroupSnapshotWindowResult(snapshots=snapshots, errors=errors)
 
     @staticmethod
     def _payload(records: list[IBDGroupRank]) -> list[dict[str, Any]]:
@@ -264,7 +289,9 @@ class GroupRankSnapshotReader:
             return
         run_ids = {record.market_rs_run_id for record in records}
         if None in run_ids or len(run_ids) != 1:
-            raise GroupSnapshotIntegrityError("Balanced Group rows mix Market RS run IDs")
+            raise GroupSnapshotIntegrityError(
+                "Balanced Group rows mix Market RS run IDs"
+            )
         run = runs_by_id.get(int(next(iter(run_ids))))
         if (
             run is None

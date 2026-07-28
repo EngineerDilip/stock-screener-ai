@@ -6,16 +6,18 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from enum import StrEnum
 import json
-from typing import Any
+from typing import Any, Collection
+from uuid import uuid4
 
 from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.app_settings import AppSetting
+from app.domain.group_history import GroupHistoryTarget
 
 
-GROUP_HISTORY_RECONCILIATION_SCHEMA_VERSION = 1
+GROUP_HISTORY_RECONCILIATION_SCHEMA_VERSION = 2
 GROUP_HISTORY_RECONCILIATION_CATEGORY = "group_history_reconciliation"
 GROUP_HISTORY_RECONCILIATION_KEY_PREFIX = (
     f"runtime.group_history.v{GROUP_HISTORY_RECONCILIATION_SCHEMA_VERSION}."
@@ -26,26 +28,16 @@ GROUP_HISTORY_RECONCILIATION_ACTIVE_TIMEOUT = timedelta(hours=6)
 class GroupHistoryReconciliationStatus(StrEnum):
     QUEUED = "queued"
     REPAIRING = "repairing"
+    FINALIZING = "finalizing"
     READY = "ready"
     INCOMPLETE = "incomplete"
     FAILED = "failed"
 
 
 @dataclass(frozen=True)
-class GroupHistoryTarget:
-    market: str
-    formula_version: str
-    through_date: date
-
-    def __post_init__(self) -> None:
-        market = str(self.market or "").strip().upper()
-        formula = str(self.formula_version or "").strip()
-        if not market:
-            raise ValueError("Group history target market is required")
-        if not formula:
-            raise ValueError("Group history target formula is required")
-        object.__setattr__(self, "market", market)
-        object.__setattr__(self, "formula_version", formula)
+class GroupHistoryReservation:
+    target: GroupHistoryTarget
+    reservation_id: str
 
 
 @dataclass(frozen=True)
@@ -54,6 +46,7 @@ class GroupHistoryReconciliationMarker:
     formula_version: str
     through_date: date
     status: GroupHistoryReconciliationStatus
+    reservation_id: str
     updated_at: str
     counts: dict[str, Any] | None = None
     error: str | None = None
@@ -73,6 +66,7 @@ class GroupHistoryReconciliationMarker:
             "formula_version": self.formula_version,
             "through_date": self.through_date.isoformat(),
             "status": self.status.value,
+            "reservation_id": self.reservation_id,
             "updated_at": self.updated_at,
             "counts": dict(self.counts or {}),
             "error": self.error,
@@ -108,6 +102,8 @@ class GroupHistoryReconciliationRepository:
             return None, None
         try:
             payload = json.loads(setting.value)
+            if not isinstance(payload, dict):
+                return None, setting.value
             if (
                 int(payload.get("schema_version"))
                 != GROUP_HISTORY_RECONCILIATION_SCHEMA_VERSION
@@ -118,6 +114,7 @@ class GroupHistoryReconciliationRepository:
                 formula_version=str(payload["formula_version"]),
                 through_date=date.fromisoformat(str(payload["through_date"])),
                 status=GroupHistoryReconciliationStatus(str(payload["status"])),
+                reservation_id=str(payload["reservation_id"]),
                 updated_at=str(payload["updated_at"]),
                 counts=(
                     dict(payload["counts"])
@@ -135,26 +132,35 @@ class GroupHistoryReconciliationRepository:
         db: Session,
         *,
         target: GroupHistoryTarget,
-    ) -> bool:
+    ) -> GroupHistoryReservation | None:
         existing, observed_value = self._load_record(
             db,
             market=target.market,
         )
         if (
             existing is not None
-            and existing.target == target
             and existing.status
             in {
                 GroupHistoryReconciliationStatus.QUEUED,
                 GroupHistoryReconciliationStatus.REPAIRING,
+                GroupHistoryReconciliationStatus.FINALIZING,
             }
             and not self._is_stale(existing)
+            and (
+                existing.target == target
+                or existing.status is GroupHistoryReconciliationStatus.FINALIZING
+            )
         ):
-            return False
+            return None
 
+        reservation = GroupHistoryReservation(
+            target=target,
+            reservation_id=str(uuid4()),
+        )
         marker = self._marker(
             target=target,
             status=GroupHistoryReconciliationStatus.QUEUED,
+            reservation_id=reservation.reservation_id,
         )
         encoded = json.dumps(marker.as_dict(), sort_keys=True)
         key = self.key(target.market)
@@ -172,9 +178,9 @@ class GroupHistoryReconciliationRepository:
             )
             if result.rowcount != 1:
                 db.rollback()
-                return False
+                return None
             db.commit()
-            return True
+            return reservation
 
         try:
             db.add(
@@ -188,8 +194,8 @@ class GroupHistoryReconciliationRepository:
             db.commit()
         except IntegrityError:
             db.rollback()
-            return False
-        return True
+            return None
+        return reservation
 
     @staticmethod
     def _is_stale(marker: GroupHistoryReconciliationMarker) -> bool:
@@ -204,44 +210,72 @@ class GroupHistoryReconciliationRepository:
             > GROUP_HISTORY_RECONCILIATION_ACTIVE_TIMEOUT
         )
 
-    def mark(
+    def owns(
         self,
         db: Session,
         *,
-        target: GroupHistoryTarget,
+        reservation: GroupHistoryReservation,
+    ) -> bool:
+        marker = self.load(db, market=reservation.target.market)
+        return bool(
+            marker is not None
+            and marker.target == reservation.target
+            and marker.reservation_id == reservation.reservation_id
+        )
+
+    def transition(
+        self,
+        db: Session,
+        *,
+        reservation: GroupHistoryReservation,
+        expected_statuses: Collection[GroupHistoryReconciliationStatus],
         status: GroupHistoryReconciliationStatus,
         counts: dict[str, Any] | None = None,
         error: str | None = None,
-    ) -> GroupHistoryReconciliationMarker:
+    ) -> bool:
+        current, observed_value = self._load_record(
+            db,
+            market=reservation.target.market,
+        )
+        if (
+            current is None
+            or observed_value is None
+            or current.target != reservation.target
+            or current.reservation_id != reservation.reservation_id
+            or current.status not in expected_statuses
+        ):
+            return False
         marker = self._marker(
-            target=target,
+            target=reservation.target,
             status=status,
+            reservation_id=reservation.reservation_id,
             counts=counts,
             error=error,
         )
-        key = self.key(target.market)
-        setting = db.query(AppSetting).filter(AppSetting.key == key).one_or_none()
         encoded = json.dumps(marker.as_dict(), sort_keys=True)
-        if setting is None:
-            db.add(
-                AppSetting(
-                    key=key,
-                    value=encoded,
-                    category=GROUP_HISTORY_RECONCILIATION_CATEGORY,
-                    description=f"Group history repair state for {target.market}",
-                )
+        result = db.execute(
+            update(AppSetting)
+            .where(
+                AppSetting.key == self.key(reservation.target.market),
+                AppSetting.value == observed_value,
             )
-        else:
-            setting.value = encoded
-            setting.category = GROUP_HISTORY_RECONCILIATION_CATEGORY
+            .values(
+                value=encoded,
+                category=GROUP_HISTORY_RECONCILIATION_CATEGORY,
+            )
+        )
+        if result.rowcount != 1:
+            db.rollback()
+            return False
         db.commit()
-        return marker
+        return True
 
     @staticmethod
     def _marker(
         *,
         target: GroupHistoryTarget,
         status: GroupHistoryReconciliationStatus,
+        reservation_id: str,
         counts: dict[str, Any] | None = None,
         error: str | None = None,
     ) -> GroupHistoryReconciliationMarker:
@@ -250,6 +284,7 @@ class GroupHistoryReconciliationRepository:
             formula_version=target.formula_version,
             through_date=target.through_date,
             status=status,
+            reservation_id=reservation_id,
             updated_at=datetime.now(timezone.utc).isoformat(),
             counts=counts,
             error=error,
@@ -259,7 +294,7 @@ class GroupHistoryReconciliationRepository:
 __all__ = [
     "GROUP_HISTORY_RECONCILIATION_SCHEMA_VERSION",
     "GROUP_HISTORY_RECONCILIATION_ACTIVE_TIMEOUT",
-    "GroupHistoryTarget",
+    "GroupHistoryReservation",
     "GroupHistoryReconciliationMarker",
     "GroupHistoryReconciliationRepository",
     "GroupHistoryReconciliationStatus",

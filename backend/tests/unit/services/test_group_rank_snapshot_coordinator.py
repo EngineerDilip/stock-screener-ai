@@ -143,6 +143,7 @@ def test_repair_snapshot_uses_real_legacy_calculation_path(db_session):
         {"market_rs_run_id": None, "industry_group": "Software"}
     ]
     legacy = Mock()
+    legacy.ranking_repository.delete_range.return_value = 1
 
     result = _coordinator(reader, Mock(), Mock(), legacy).repair_snapshot(
         db_session,
@@ -150,6 +151,13 @@ def test_repair_snapshot_uses_real_legacy_calculation_path(db_session):
     )
 
     assert result.status is GroupSnapshotStatus.PROCESSED
+    legacy.ranking_repository.delete_range.assert_called_once_with(
+        db_session,
+        start_date=AS_OF,
+        end_date=AS_OF,
+        market="US",
+        formula_version=LEGACY_RS_FORMULA_VERSION,
+    )
     legacy.calculate_group_rankings.assert_called_once_with(
         db_session,
         AS_OF,

@@ -150,6 +150,13 @@ class GroupRankSnapshotCoordinator:
                     "Repaired Group snapshot does not reference the exact Market RS run"
                 )
         elif identity.formula_version == LEGACY_RS_FORMULA_VERSION:
+            self.legacy_group_service.ranking_repository.delete_range(
+                db,
+                start_date=identity.as_of_date,
+                end_date=identity.as_of_date,
+                market=identity.market,
+                formula_version=LEGACY_RS_FORMULA_VERSION,
+            )
             self.legacy_group_service.calculate_group_rankings(
                 db,
                 identity.as_of_date,

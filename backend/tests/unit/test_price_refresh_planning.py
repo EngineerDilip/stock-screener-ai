@@ -414,7 +414,7 @@ def test_live_bootstrap_treats_fresh_but_group_history_incomplete_as_no_history(
             assert db is universe_session
             assert market == "US"
             assert through_date == date(2026, 6, 8)
-            assert "AAA" in symbols
+            assert symbols == ("AAA",)
             return GroupHistoryPriceCoverage(
                 complete_symbols=tuple(symbol for symbol in symbols if symbol != "AAA"),
                 incomplete_symbols=("AAA",),

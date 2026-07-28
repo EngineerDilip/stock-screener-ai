@@ -10,11 +10,11 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.domain.group_history import GroupHistoryTarget
 from app.domain.relative_strength import GroupSnapshotIdentity
 from app.services.group_history_readiness_service import (
     GroupHistoryReadinessReport,
 )
-from app.services.group_history_reconciliation import GroupHistoryTarget
 
 
 class GroupHistoryBootstrapStatus(StrEnum):
@@ -120,6 +120,7 @@ class GroupHistoryBootstrapService:
                         db,
                         identity=identity,
                     )
+                db.commit()
             except Exception as exc:
                 db.rollback()
                 failed.append(target_date)

@@ -491,6 +491,21 @@ def test_publish_groups_bootstrap_serializes_rankings_when_available():
     assert rankings_payload["rankings"][0]["avg_rs_rating_1m"] == 41.5
     assert rankings_payload["rankings"][0]["avg_rs_rating_3m"] == 63.2
 
+    assert (
+        service.publish_groups_bootstrap(
+            expected_formula_version=LEGACY_RS_FORMULA_VERSION,
+            expected_through_date=date(2026, 3, 28),
+        )
+        is None
+    )
+    assert (
+        service.publish_groups_bootstrap(
+            expected_formula_version=BALANCED_RS_FORMULA_VERSION,
+            expected_through_date=date(2026, 3, 27),
+        )
+        is None
+    )
+
 
 def test_ui_snapshot_publish_coerces_nested_dates_to_json_safe_strings():
     engine = create_engine("sqlite:///:memory:")

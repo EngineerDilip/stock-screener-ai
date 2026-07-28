@@ -9,8 +9,8 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.analysis.rrg_weekly import bucket_rrg_weekly
+from app.domain.group_history import GroupHistoryTarget
 from app.domain.markets import get_market_catalog
-from app.services.group_history_reconciliation import GroupHistoryTarget
 from app.services.group_rank_history_policy import (
     CALENDAR_DAY_GROUP_RANK_CHANGE_WINDOWS,
     CALENDAR_DAY_GROUP_RANK_LOOKUP_TOLERANCE_DAYS,
@@ -19,7 +19,6 @@ from app.services.group_rank_history_policy import (
 from app.services.group_rank_snapshot_reader import (
     GroupRankSnapshotReader,
     GroupSnapshotIntegrityError,
-    GroupSnapshotWindowIntegrityError,
 )
 from app.services.market_calendar_service import MarketCalendarService
 from app.services.rrg_service import (
@@ -116,18 +115,15 @@ class GroupHistoryReadinessService:
                 )
             )
         )
-        invalid_by_date: dict[date, str] = {}
-        try:
-            snapshots = self._snapshot_reader.load_window(
-                db,
-                market=target.market,
-                formula_version=target.formula_version,
-                dates=desired_dates,
-                include_top_symbol_names=False,
-            )
-        except GroupSnapshotWindowIntegrityError as exc:
-            snapshots = exc.snapshots
-            invalid_by_date = exc.errors
+        window = self._snapshot_reader.inspect_window(
+            db,
+            market=target.market,
+            formula_version=target.formula_version,
+            dates=desired_dates,
+            include_top_symbol_names=False,
+        )
+        snapshots = window.snapshots
+        invalid_by_date = window.errors
         valid = [item for item in desired_dates if item in snapshots]
         invalid = [item for item in desired_dates if item in invalid_by_date]
         missing = [

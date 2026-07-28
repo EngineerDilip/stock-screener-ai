@@ -96,12 +96,12 @@ async def trigger_ui_snapshot_rebuild_on_startup() -> None:
     return None
 
 
-def trigger_group_history_reconciliation_on_startup() -> dict[str, str | None]:
-    """Queue upgrade repair without blocking FastAPI startup."""
+async def trigger_group_history_reconciliation_on_startup() -> dict[str, str | None]:
+    """Queue upgrade repair without blocking the FastAPI event loop."""
     from .tasks.group_history_tasks import discover_group_history_reconciliation
 
     try:
-        result = discover_group_history_reconciliation.delay()
+        result = await asyncio.to_thread(discover_group_history_reconciliation.delay)
         return {"status": "queued", "task_id": result.id}
     except Exception as exc:
         logger.warning(
@@ -120,7 +120,7 @@ async def lifespan(app: FastAPI):
     initialize_runtime()
     runtime_services = initialize_process_runtime_services(session_factory=SessionLocal)
     app.state.runtime_services = runtime_services
-    trigger_group_history_reconciliation_on_startup()
+    await trigger_group_history_reconciliation_on_startup()
     if settings.mcp_http_enabled:
         from .interfaces.mcp.http_transport import create_mcp_http_server
 

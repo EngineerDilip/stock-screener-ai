@@ -34,7 +34,9 @@ def test_ensure_group_history_invalidates_cache_and_publishes_us_snapshot(
     service.ensure.return_value = _result(ready=True)
     bumped = []
     monkeypatch.setattr(module, "SessionLocal", lambda: db)
-    monkeypatch.setattr(module, "_build_group_history_bootstrap_service", lambda: service)
+    monkeypatch.setattr(
+        module, "_build_group_history_bootstrap_service", lambda: service
+    )
     target = GroupHistoryTarget(
         market="US",
         formula_version="balanced-v1",
@@ -49,7 +51,7 @@ def test_ensure_group_history_invalidates_cache_and_publishes_us_snapshot(
     monkeypatch.setattr(
         module,
         "safe_publish_groups_bootstrap",
-        lambda: {"snapshot_revision": "42"},
+        lambda **_kwargs: {"snapshot_revision": "42"},
     )
     monkeypatch.setattr(module, "mark_market_activity_started", Mock())
     monkeypatch.setattr(module, "mark_market_activity_completed", Mock())
@@ -80,7 +82,9 @@ def test_strict_group_history_task_raises_when_readiness_remains_incomplete(
     service = Mock()
     service.ensure.return_value = _result(ready=False)
     monkeypatch.setattr(module, "SessionLocal", lambda: db)
-    monkeypatch.setattr(module, "_build_group_history_bootstrap_service", lambda: service)
+    monkeypatch.setattr(
+        module, "_build_group_history_bootstrap_service", lambda: service
+    )
     monkeypatch.setattr(
         module,
         "_resolve_current_group_history_target",
@@ -115,7 +119,9 @@ def test_strict_group_history_task_records_snapshot_publication_failure_once(
     service = Mock()
     service.ensure.return_value = _result(ready=True)
     monkeypatch.setattr(module, "SessionLocal", lambda: db)
-    monkeypatch.setattr(module, "_build_group_history_bootstrap_service", lambda: service)
+    monkeypatch.setattr(
+        module, "_build_group_history_bootstrap_service", lambda: service
+    )
     monkeypatch.setattr(
         module,
         "_resolve_current_group_history_target",
@@ -126,7 +132,11 @@ def test_strict_group_history_task_records_snapshot_publication_failure_once(
         ),
     )
     monkeypatch.setattr(module, "bump_group_rankings_epoch", Mock())
-    monkeypatch.setattr(module, "safe_publish_groups_bootstrap", lambda: None)
+    monkeypatch.setattr(
+        module,
+        "safe_publish_groups_bootstrap",
+        lambda **_kwargs: None,
+    )
     monkeypatch.setattr(module, "mark_market_activity_started", Mock())
     monkeypatch.setattr(module, "mark_market_activity_completed", Mock())
     monkeypatch.setattr(module, "mark_market_activity_failed", Mock())
@@ -143,15 +153,19 @@ def test_strict_group_history_task_records_snapshot_publication_failure_once(
 
 def test_execution_service_finalizes_successful_us_reconciliation_once():
     from app.services.group_history_execution_service import (
-        GroupHistoryCompletionPolicy,
         GroupHistoryExecutionService,
     )
-    from app.services.group_history_reconciliation import GroupHistoryTarget
+    from app.services.group_history_reconciliation import (
+        GroupHistoryReservation,
+        GroupHistoryTarget,
+    )
 
     db = Mock()
     bootstrap = Mock()
     bootstrap.ensure.return_value = _result(ready=True)
     repository = Mock()
+    repository.transition.return_value = True
+    repository.owns.return_value = True
     bump = Mock()
     publish = Mock(return_value={"snapshot_revision": "42"})
     completed = Mock()
@@ -170,10 +184,10 @@ def test_execution_service_finalizes_successful_us_reconciliation_once():
         through_date=date(2026, 6, 30),
     )
 
-    result = service.execute(
+    reservation = GroupHistoryReservation(target=target, reservation_id="lease-1")
+    result = service.execute_reconciliation(
         db,
-        target=target,
-        completion_policy=GroupHistoryCompletionPolicy.RECONCILIATION,
+        reservation=reservation,
         task_name="repair_group_history_reconciliation",
         task_id="task-1",
     )
@@ -181,23 +195,27 @@ def test_execution_service_finalizes_successful_us_reconciliation_once():
     assert result["status"] == "ready"
     bootstrap.ensure.assert_called_once_with(db, target=target)
     bump.assert_called_once_with("US")
-    publish.assert_called_once_with()
-    assert repository.mark.call_args.kwargs["target"] == target
-    assert repository.mark.call_args.kwargs["status"].value == "ready"
+    publish.assert_called_once_with(target)
+    assert repository.transition.call_args.kwargs["reservation"] == reservation
+    assert repository.transition.call_args.kwargs["status"].value == "ready"
     completed.assert_called_once()
 
 
 def test_activity_completion_failure_does_not_reclassify_success():
     from app.services.group_history_execution_service import (
-        GroupHistoryCompletionPolicy,
         GroupHistoryExecutionService,
     )
-    from app.services.group_history_reconciliation import GroupHistoryTarget
+    from app.services.group_history_reconciliation import (
+        GroupHistoryReservation,
+        GroupHistoryTarget,
+    )
 
     db = Mock()
     bootstrap = Mock()
     bootstrap.ensure.return_value = _result(ready=True)
     repository = Mock()
+    repository.transition.return_value = True
+    repository.owns.return_value = True
     service = GroupHistoryExecutionService(
         bootstrap_service=bootstrap,
         reconciliation_repository=repository,
@@ -208,20 +226,109 @@ def test_activity_completion_failure_does_not_reclassify_success():
         mark_failed=Mock(),
     )
 
-    result = service.execute(
+    target = GroupHistoryTarget(
+        market="US",
+        formula_version="captured-v1",
+        through_date=date(2026, 6, 30),
+    )
+    result = service.execute_reconciliation(
         db,
-        target=GroupHistoryTarget(
-            market="US",
-            formula_version="captured-v1",
-            through_date=date(2026, 6, 30),
-        ),
-        completion_policy=GroupHistoryCompletionPolicy.RECONCILIATION,
+        reservation=GroupHistoryReservation(target=target, reservation_id="lease-1"),
         task_name="repair_group_history_reconciliation",
         task_id="task-1",
     )
 
     assert result["status"] == "ready"
-    assert [call.kwargs["status"].value for call in repository.mark.call_args_list] == [
+    assert [
+        call.kwargs["status"].value for call in repository.transition.call_args_list
+    ] == [
         "repairing",
+        "finalizing",
         "ready",
     ]
+
+
+def test_superseded_reconciliation_does_not_repair_or_publish():
+    from app.services.group_history_execution_service import (
+        GroupHistoryExecutionService,
+    )
+    from app.services.group_history_reconciliation import (
+        GroupHistoryReservation,
+        GroupHistoryTarget,
+    )
+
+    repository = Mock()
+    repository.transition.return_value = False
+    bootstrap = Mock()
+    bump = Mock()
+    publish = Mock()
+    service = GroupHistoryExecutionService(
+        bootstrap_service=bootstrap,
+        reconciliation_repository=repository,
+        bump_epoch=bump,
+        publish_snapshot=publish,
+        mark_started=Mock(),
+        mark_completed=Mock(),
+        mark_failed=Mock(),
+    )
+    reservation = GroupHistoryReservation(
+        target=GroupHistoryTarget(
+            market="US",
+            formula_version="old-v1",
+            through_date=date(2026, 6, 30),
+        ),
+        reservation_id="stale-lease",
+    )
+
+    result = service.execute_reconciliation(
+        Mock(),
+        reservation=reservation,
+        task_name="repair_group_history_reconciliation",
+        task_id="task-old",
+    )
+
+    assert result["status"] == "superseded"
+    bootstrap.ensure.assert_not_called()
+    bump.assert_not_called()
+    publish.assert_not_called()
+
+
+def test_target_drift_before_finalization_suppresses_cache_and_publication():
+    from app.services.group_history_execution_service import (
+        GroupHistoryExecutionService,
+    )
+    from app.services.group_history_reconciliation import (
+        GroupHistoryReservation,
+        GroupHistoryTarget,
+    )
+
+    target = GroupHistoryTarget("US", "captured-v1", date(2026, 6, 30))
+    replacement = GroupHistoryTarget("US", "captured-v2", date(2026, 6, 30))
+    repository = Mock()
+    repository.transition.return_value = True
+    repository.owns.return_value = True
+    current_targets = iter((target, replacement))
+    bump = Mock()
+    publish = Mock()
+    service = GroupHistoryExecutionService(
+        bootstrap_service=Mock(ensure=Mock(return_value=_result(ready=True))),
+        reconciliation_repository=repository,
+        bump_epoch=bump,
+        publish_snapshot=publish,
+        mark_started=Mock(),
+        mark_completed=Mock(),
+        mark_failed=Mock(),
+        resolve_current_target=lambda _db, *, market: next(current_targets),
+    )
+
+    result = service.execute_reconciliation(
+        Mock(),
+        reservation=GroupHistoryReservation(target, "lease-1"),
+        task_name="repair_group_history_reconciliation",
+        task_id="task-1",
+    )
+
+    assert result["status"] == "superseded"
+    bump.assert_not_called()
+    publish.assert_not_called()
+    assert repository.transition.call_args.kwargs["status"].value == "incomplete"

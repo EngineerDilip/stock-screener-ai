@@ -20,8 +20,8 @@ live Group API contracts or deleting persisted data.
 ## Reconciliation Ownership
 
 FastAPI startup will enqueue a lightweight Celery reconciliation-discovery task
-and retain no background thread or task handle. All database inspection and
-workflow dispatch move to Celery.
+from a worker thread so broker publication cannot block the async event loop.
+All database inspection and workflow dispatch remain in Celery.
 
 The discovery task resolves one immutable `GroupHistoryTarget` per enabled
 Group market:
@@ -51,9 +51,11 @@ compare-and-swap:
 5. For a missing row, insert and treat a unique-key conflict as a lost race.
 
 This is portable across PostgreSQL and SQLite and prevents four Uvicorn workers
-from dispatching duplicate chains. Reservation occurs before expensive
-readiness evaluation; the winning discovery task either marks the target ready
-or dispatches its repair chain.
+from dispatching duplicate chains. A successful reservation returns an opaque
+reservation ID. Every later state transition compares both the immutable target
+and that ID, so a stale worker or errback cannot overwrite a newer repair.
+Reservation occurs before expensive readiness evaluation; the winning discovery
+task either marks the target ready or dispatches its repair chain.
 
 ## Execution And Finalization
 
@@ -73,21 +75,30 @@ The executor owns the sequence:
 4. Publish the US Group UI snapshot once.
 5. Mark activity and reconciliation state from the final outcome.
 
+Before cache invalidation and publication, reconciliation atomically moves from
+`repairing` to `finalizing`. A fresh reservation cannot replace a non-stale
+finalizing owner. US publication also verifies that the active formula and
+latest Group date still match the repaired target before replacing the UI
+snapshot.
+
 The separate reconciliation completion task is removed. There is no paired
 optional formula/date contract and no duplicated publication.
 
 ## Batched Readiness
 
-`GroupRankSnapshotReader` gains a window read that fetches all Group rows for
-one market/formula/date set in one query and all referenced Market RS runs in a
-second query. It validates each grouped identity with the same invariants as
-`load_exact` and returns a date-keyed snapshot mapping.
+`GroupRankSnapshotReader` gains a window inspection that fetches all Group rows
+for one market/formula/date set in one query and all referenced Market RS runs
+in a second query. It validates each grouped identity with the same invariants
+as `load_exact` and returns an explicit typed result containing valid snapshots
+and per-date integrity errors. A separate strict loader raises when any date is
+invalid.
 
-`GroupHistoryReadinessService` classifies desired dates from this mapping.
-`StoredGroupRankHistoryProvider` uses the same window reader, reducing RRG input
-loading from one query per date to bounded batch queries. Readiness may perform
-one batch for classification and one through the provider, but no longer scales
-database round trips linearly with the number of dates.
+`GroupHistoryReadinessService` classifies desired dates from this result.
+`StoredGroupRankHistoryProvider` uses the valid portion of the same result,
+preventing an integrity-invalid snapshot outside the 187-day repair window from
+invalidating the entire 400-day RRG lookup. Readiness may perform one batch for
+classification and one through the provider, but database round trips no longer
+scale linearly with the number of dates.
 
 ## Acceptance Coverage
 

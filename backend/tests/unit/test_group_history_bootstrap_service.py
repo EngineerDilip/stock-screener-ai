@@ -78,9 +78,20 @@ class _Policies:
 class _DB:
     def __init__(self):
         self.rollbacks = 0
+        self.commits = 0
+
+    def commit(self):
+        self.commits += 1
 
     def rollback(self):
         self.rollbacks += 1
+
+
+class _CommitFailsOnceDB(_DB):
+    def commit(self):
+        super().commit()
+        if self.commits == 1:
+            raise RuntimeError("commit failed")
 
 
 def test_group_history_bootstrap_processes_only_missing_and_invalid_oldest_first():
@@ -101,7 +112,8 @@ def test_group_history_bootstrap_processes_only_missing_and_invalid_oldest_first
         universe_resolver=_Policies(),
     )
 
-    result = service.ensure(_DB(), target=_target())
+    db = _DB()
+    result = service.ensure(db, target=_target())
 
     assert result.status is GroupHistoryBootstrapStatus.READY
     assert [item.as_of_date for item in coordinator.repair_calls] == [invalid]
@@ -114,6 +126,7 @@ def test_group_history_bootstrap_processes_only_missing_and_invalid_oldest_first
         "current_active_fallback_v1": 1,
     }
     assert result.after.ready is True
+    assert db.commits == 2
 
 
 def test_group_history_bootstrap_rolls_back_failed_date_and_trusts_after_report():
@@ -140,6 +153,32 @@ def test_group_history_bootstrap_rolls_back_failed_date_and_trusts_after_report(
     assert result.errors == ((failed, "price anchor unavailable"),)
     assert db.rollbacks == 1
     assert result.after.ready is False
+
+
+def test_group_history_bootstrap_continues_after_per_date_commit_failure():
+    from app.services.group_history_bootstrap_service import (
+        GroupHistoryBootstrapService,
+    )
+
+    first = date(2026, 4, 1)
+    second = date(2026, 5, 2)
+    db = _CommitFailsOnceDB()
+    service = GroupHistoryBootstrapService(
+        readiness_service=_Readiness(
+            _report(ready=False, missing=(first, second)),
+            _report(ready=False, missing=(first,)),
+        ),
+        snapshot_coordinator=_Coordinator(),
+        universe_resolver=_Policies(),
+    )
+
+    result = service.ensure(db, target=_target())
+
+    assert result.processed_dates == (second,)
+    assert result.failed_dates == (first,)
+    assert result.errors == ((first, "commit failed"),)
+    assert db.commits == 2
+    assert db.rollbacks == 1
 
 
 def test_group_history_bootstrap_skips_unsupported_market():

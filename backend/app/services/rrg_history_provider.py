@@ -75,13 +75,20 @@ class StoredGroupRankHistoryProvider:
         latest_day = dates[-1]
         cutoff = latest_day - timedelta(days=days)
         selected_dates = tuple(item for item in dates if cutoff <= item <= latest_day)
-        snapshots_by_date = self._snapshot_reader.load_window(
+        window = self._snapshot_reader.inspect_window(
             db,
             market=normalized_market,
             formula_version=resolved_formula,
             dates=selected_dates,
             include_top_symbol_names=False,
         )
+        snapshots_by_date = window.snapshots
+        selected_dates = tuple(
+            item for item in selected_dates if item in snapshots_by_date
+        )
+        if not selected_dates:
+            return None, {}, {}
+        latest_day = selected_dates[-1]
         snapshots = [
             (snapshot_date, snapshots_by_date.get(snapshot_date, []))
             for snapshot_date in selected_dates

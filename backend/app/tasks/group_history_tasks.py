@@ -8,17 +8,17 @@ from celery import chain
 
 from app.celery_app import celery_app
 from app.database import SessionLocal
+from app.domain.group_history import GroupHistoryTarget
 from app.domain.markets import get_market_catalog
 from app.services.group_history_bootstrap_service import GroupHistoryBootstrapService
 from app.services.group_history_execution_service import (
-    GroupHistoryCompletionPolicy,
     GroupHistoryExecutionService,
 )
 from app.services.group_history_readiness_service import GroupHistoryReadinessService
 from app.services.group_history_reconciliation import (
     GroupHistoryReconciliationRepository,
+    GroupHistoryReservation,
     GroupHistoryReconciliationStatus,
-    GroupHistoryTarget,
 )
 from app.services.group_history_snapshot_coordinator import (
     build_group_history_snapshot_coordinator,
@@ -50,9 +50,7 @@ def _build_group_history_components():
     repository = MarketRsRunRepository()
     group_rank_service = get_group_rank_service()
     universe_resolver = GroupHistoryUniverseResolver(
-        point_in_time_universe=PointInTimeUniverseService(
-            market_calendar=calendar
-        )
+        point_in_time_universe=PointInTimeUniverseService(market_calendar=calendar)
     )
     coordinator = build_group_history_snapshot_coordinator(
         universe_resolver=universe_resolver,
@@ -86,10 +84,14 @@ def _build_group_history_execution_service() -> GroupHistoryExecutionService:
         bootstrap_service=_build_group_history_bootstrap_service(),
         reconciliation_repository=GroupHistoryReconciliationRepository(),
         bump_epoch=bump_group_rankings_epoch,
-        publish_snapshot=safe_publish_groups_bootstrap,
+        publish_snapshot=lambda target: safe_publish_groups_bootstrap(
+            expected_formula_version=target.formula_version,
+            expected_through_date=target.through_date,
+        ),
         mark_started=mark_market_activity_started,
         mark_completed=mark_market_activity_completed,
         mark_failed=mark_market_activity_failed,
+        resolve_current_target=_resolve_current_group_history_target,
     )
 
 
@@ -103,9 +105,7 @@ def _resolve_current_group_history_target(db, *, market: str) -> GroupHistoryTar
     )
     if not formula_version:
         raise RuntimeError(f"Active RS formula unavailable for {market_code}")
-    through_date = get_market_calendar_service().last_completed_trading_day(
-        market_code
-    )
+    through_date = get_market_calendar_service().last_completed_trading_day(market_code)
     return GroupHistoryTarget(
         market=market_code,
         formula_version=formula_version,
@@ -139,13 +139,12 @@ def ensure_group_history(
     db = SessionLocal()
     try:
         target = _resolve_current_group_history_target(db, market=market_code)
-        return _build_group_history_execution_service().execute(
+        return _build_group_history_execution_service().execute_bootstrap(
             db,
             target=target,
-            completion_policy=GroupHistoryCompletionPolicy.BOOTSTRAP,
             task_name=task_name,
             task_id=task_id,
-            raise_on_incomplete=strict,
+            strict=strict,
             activity_lifecycle=activity_lifecycle,
         )
     finally:
@@ -164,6 +163,7 @@ def repair_group_history_reconciliation(
     market: str,
     formula_version: str,
     through_date: str,
+    reservation_id: str,
 ) -> dict:
     target = GroupHistoryTarget(
         market=market,
@@ -174,13 +174,14 @@ def repair_group_history_reconciliation(
     task_id = getattr(getattr(self, "request", None), "id", None)
     db = SessionLocal()
     try:
-        return _build_group_history_execution_service().execute(
+        return _build_group_history_execution_service().execute_reconciliation(
             db,
-            target=target,
-            completion_policy=GroupHistoryCompletionPolicy.RECONCILIATION,
+            reservation=GroupHistoryReservation(
+                target=target,
+                reservation_id=reservation_id,
+            ),
             task_name=task_name,
             task_id=task_id,
-            raise_on_incomplete=False,
         )
     finally:
         db.close()
@@ -191,10 +192,10 @@ def _dispatch_group_history_reconciliation(
     market: str,
     formula_version: str,
     through_date: date,
+    reservation_id: str,
 ) -> str:
     from app.tasks.cache_tasks import smart_refresh_cache
 
-    through_iso = through_date.isoformat()
     workflow = chain(
         smart_refresh_cache.si(
             mode="bootstrap",
@@ -202,18 +203,77 @@ def _dispatch_group_history_reconciliation(
             activity_lifecycle="group_history_reconciliation",
             ensure_group_history=True,
         ).set(queue=data_fetch_queue_for_market(market)),
-        repair_group_history_reconciliation.si(
+        _group_history_repair_signature(
             market=market,
             formula_version=formula_version,
-            through_date=through_iso,
-        ).set(queue=market_jobs_queue_for_market(market)),
+            through_date=through_date,
+            reservation_id=reservation_id,
+        ),
     )
-    errback = fail_group_history_reconciliation.s(
+    return workflow.apply_async(
+        link_error=_group_history_failure_signature(
+            market=market,
+            formula_version=formula_version,
+            through_date=through_date,
+            reservation_id=reservation_id,
+        )
+    ).id
+
+
+def _dispatch_group_history_finalization(
+    *,
+    market: str,
+    formula_version: str,
+    through_date: date,
+    reservation_id: str,
+) -> str:
+    return (
+        _group_history_repair_signature(
+            market=market,
+            formula_version=formula_version,
+            through_date=through_date,
+            reservation_id=reservation_id,
+        )
+        .apply_async(
+            link_error=_group_history_failure_signature(
+                market=market,
+                formula_version=formula_version,
+                through_date=through_date,
+                reservation_id=reservation_id,
+            )
+        )
+        .id
+    )
+
+
+def _group_history_repair_signature(
+    *,
+    market: str,
+    formula_version: str,
+    through_date: date,
+    reservation_id: str,
+):
+    return repair_group_history_reconciliation.si(
         market=market,
         formula_version=formula_version,
-        through_date=through_iso,
+        through_date=through_date.isoformat(),
+        reservation_id=reservation_id,
+    ).set(queue=market_jobs_queue_for_market(market))
+
+
+def _group_history_failure_signature(
+    *,
+    market: str,
+    formula_version: str,
+    through_date: date,
+    reservation_id: str,
+):
+    return fail_group_history_reconciliation.s(
+        market=market,
+        formula_version=formula_version,
+        through_date=through_date.isoformat(),
+        reservation_id=reservation_id,
     ).set(queue="celery")
-    return workflow.apply_async(link_error=errback).id
 
 
 @celery_app.task(
@@ -227,17 +287,14 @@ def discover_group_history_reconciliation() -> dict[str, str]:
         preferences = get_runtime_preferences(db)
         if preferences.bootstrap_state == "running":
             return {
-                market: "bootstrap_running"
-                for market in preferences.enabled_markets
+                market: "bootstrap_running" for market in preferences.enabled_markets
             }
 
         repository = GroupHistoryReconciliationRepository()
         outcomes: dict[str, str] = {}
         for market in preferences.enabled_markets:
             market_code = normalize_market(market)
-            if not get_market_catalog().get(
-                market_code
-            ).capabilities.group_rankings:
+            if not get_market_catalog().get(market_code).capabilities.group_rankings:
                 outcomes[market_code] = "skipped"
                 continue
             try:
@@ -248,46 +305,48 @@ def discover_group_history_reconciliation() -> dict[str, str]:
             except Exception as exc:
                 outcomes[market_code] = f"target_failed:{type(exc).__name__}"
                 continue
-            if not repository.reserve(db, target=target):
+            reservation = repository.reserve(db, target=target)
+            if reservation is None:
                 outcomes[market_code] = "already_queued"
                 continue
             try:
                 readiness = _evaluate_group_history_readiness(db, target=target)
             except Exception as exc:
-                repository.mark(
+                repository.transition(
                     db,
-                    target=target,
+                    reservation=reservation,
+                    expected_statuses={GroupHistoryReconciliationStatus.QUEUED},
                     status=GroupHistoryReconciliationStatus.INCOMPLETE,
                     error=str(exc),
                 )
                 outcomes[market_code] = f"readiness_failed:{type(exc).__name__}"
                 continue
-            if readiness.ready:
-                repository.mark(
-                    db,
-                    target=target,
-                    status=GroupHistoryReconciliationStatus.READY,
-                    counts=readiness.as_dict(),
-                )
-                outcomes[market_code] = "ready"
-                continue
+            dispatch = (
+                _dispatch_group_history_finalization
+                if readiness.ready
+                else _dispatch_group_history_reconciliation
+            )
             try:
-                _dispatch_group_history_reconciliation(
+                dispatch(
                     market=target.market,
                     formula_version=target.formula_version,
                     through_date=target.through_date,
+                    reservation_id=reservation.reservation_id,
                 )
             except Exception as exc:
-                repository.mark(
+                repository.transition(
                     db,
-                    target=target,
+                    reservation=reservation,
+                    expected_statuses={GroupHistoryReconciliationStatus.QUEUED},
                     status=GroupHistoryReconciliationStatus.INCOMPLETE,
                     counts=readiness.as_dict(),
                     error=str(exc),
                 )
                 outcomes[market_code] = "dispatch_failed"
                 continue
-            outcomes[market_code] = "queued"
+            outcomes[market_code] = (
+                "finalization_queued" if readiness.ready else "queued"
+            )
         return outcomes
     finally:
         db.close()
@@ -302,6 +361,7 @@ def fail_group_history_reconciliation(
     market: str,
     formula_version: str,
     through_date: str,
+    reservation_id: str,
 ) -> dict:
     target = GroupHistoryTarget(
         market=market,
@@ -310,9 +370,18 @@ def fail_group_history_reconciliation(
     )
     db = SessionLocal()
     try:
-        GroupHistoryReconciliationRepository().mark(
-            db,
+        reservation = GroupHistoryReservation(
             target=target,
+            reservation_id=reservation_id,
+        )
+        GroupHistoryReconciliationRepository().transition(
+            db,
+            reservation=reservation,
+            expected_statuses={
+                GroupHistoryReconciliationStatus.QUEUED,
+                GroupHistoryReconciliationStatus.REPAIRING,
+                GroupHistoryReconciliationStatus.FINALIZING,
+            },
             status=GroupHistoryReconciliationStatus.FAILED,
             error="Group history reconciliation task failed",
         )

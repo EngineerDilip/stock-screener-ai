@@ -137,17 +137,19 @@ def build_price_refresh_planning_input(
         market=effective_market,
         mode=parsed_mode.value,
     ):
+        active_universe = load_active_price_refresh_universe(
+            db,
+            market=market,
+            effective_market=effective_market,
+            normalize_market=normalize_market,
+        )
         universe = extend_universe_with_key_market_symbols(
-            load_active_price_refresh_universe(
-                db,
-                market=market,
-                effective_market=effective_market,
-                normalize_market=normalize_market,
-            ),
+            active_universe,
             market,
             normalize_market,
         )
     all_symbols = _normalize_symbols(universe.symbols)
+    group_history_symbols = _normalize_symbols(active_universe.symbols)
     github_seed = None
     if parsed_mode in LIVE_TOP_UP_MODES and all_symbols and market is not None:
         with log_runtime_stage(
@@ -193,7 +195,7 @@ def build_price_refresh_planning_input(
                     db,
                     market=effective_market,
                     through_date=target_as_of,
-                    symbols=all_symbols,
+                    symbols=group_history_symbols,
                 )
                 incomplete = set(history_coverage.incomplete_symbols)
                 coverage = PriceHistoryCoverage(

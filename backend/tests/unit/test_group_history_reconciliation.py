@@ -27,17 +27,22 @@ def test_reconciliation_marker_reservation_is_idempotent_and_resumable(db_sessio
     repository = GroupHistoryReconciliationRepository()
     target = _target()
 
-    assert repository.reserve(db_session, target=target) is True
-    assert repository.reserve(db_session, target=target) is False
+    reservation = repository.reserve(db_session, target=target)
+    assert reservation is not None
+    assert repository.reserve(db_session, target=target) is None
 
-    repository.mark(
-        db_session,
-        target=target,
-        status=GroupHistoryReconciliationStatus.INCOMPLETE,
-        error="worker interrupted",
+    assert (
+        repository.transition(
+            db_session,
+            reservation=reservation,
+            expected_statuses={GroupHistoryReconciliationStatus.QUEUED},
+            status=GroupHistoryReconciliationStatus.INCOMPLETE,
+            error="worker interrupted",
+        )
+        is True
     )
 
-    assert repository.reserve(db_session, target=target) is True
+    assert repository.reserve(db_session, target=target) is not None
     marker = repository.load(db_session, market="US")
     assert marker.status is GroupHistoryReconciliationStatus.QUEUED
     assert marker.error is None
@@ -59,9 +64,12 @@ def test_existing_marker_compare_and_swap_allows_only_one_stale_reservation(
         formula_version="balanced-v1",
         through_date=date(2026, 6, 30),
     )
-    repository.mark(
+    reservation = repository.reserve(db_session, target=target)
+    assert reservation is not None
+    assert repository.transition(
         db_session,
-        target=target,
+        reservation=reservation,
+        expected_statuses={GroupHistoryReconciliationStatus.QUEUED},
         status=GroupHistoryReconciliationStatus.INCOMPLETE,
     )
     setting = (
@@ -86,8 +94,8 @@ def test_existing_marker_compare_and_swap_allows_only_one_stale_reservation(
     second = Session()
     try:
         contenders = _StaleObservationRepository()
-        assert contenders.reserve(first, target=target) is True
-        assert contenders.reserve(second, target=target) is False
+        assert contenders.reserve(first, target=target) is not None
+        assert contenders.reserve(second, target=target) is None
     finally:
         first.close()
         second.close()
@@ -114,7 +122,101 @@ def test_stale_active_marker_can_be_reserved_after_interrupted_worker(db_session
     setting.value = json.dumps(payload)
     db_session.commit()
 
-    assert repository.reserve(db_session, target=target) is True
+    assert repository.reserve(db_session, target=target) is not None
+
+
+def test_stale_reservation_cannot_overwrite_a_new_target(db_session):
+    from app.services.group_history_reconciliation import (
+        GroupHistoryReconciliationRepository,
+        GroupHistoryReconciliationStatus,
+        GroupHistoryTarget,
+    )
+
+    repository = GroupHistoryReconciliationRepository()
+    stale = repository.reserve(db_session, target=_target())
+    assert stale is not None
+    current_target = GroupHistoryTarget(
+        market="US",
+        formula_version="balanced-v2",
+        through_date=date(2026, 7, 1),
+    )
+    current = repository.reserve(db_session, target=current_target)
+    assert current is not None
+
+    assert (
+        repository.transition(
+            db_session,
+            reservation=stale,
+            expected_statuses={GroupHistoryReconciliationStatus.QUEUED},
+            status=GroupHistoryReconciliationStatus.FAILED,
+            error="late errback",
+        )
+        is False
+    )
+    marker = repository.load(db_session, market="US")
+    assert marker is not None
+    assert marker.target == current_target
+    assert marker.reservation_id == current.reservation_id
+    assert marker.status is GroupHistoryReconciliationStatus.QUEUED
+
+
+def test_finalizing_reservation_cannot_be_superseded(db_session):
+    from app.services.group_history_reconciliation import (
+        GroupHistoryReconciliationRepository,
+        GroupHistoryReconciliationStatus,
+        GroupHistoryTarget,
+    )
+
+    repository = GroupHistoryReconciliationRepository()
+    reservation = repository.reserve(db_session, target=_target())
+    assert reservation is not None
+    assert repository.transition(
+        db_session,
+        reservation=reservation,
+        expected_statuses={GroupHistoryReconciliationStatus.QUEUED},
+        status=GroupHistoryReconciliationStatus.REPAIRING,
+    )
+    assert repository.transition(
+        db_session,
+        reservation=reservation,
+        expected_statuses={GroupHistoryReconciliationStatus.REPAIRING},
+        status=GroupHistoryReconciliationStatus.FINALIZING,
+    )
+
+    replacement = repository.reserve(
+        db_session,
+        target=GroupHistoryTarget("US", "balanced-v2", date(2026, 7, 1)),
+    )
+
+    assert replacement is None
+    marker = repository.load(db_session, market="US")
+    assert marker is not None
+    assert marker.reservation_id == reservation.reservation_id
+    assert marker.status is GroupHistoryReconciliationStatus.FINALIZING
+
+
+def test_non_object_marker_json_is_replaced_by_a_new_reservation(db_session):
+    from app.models.app_settings import AppSetting
+    from app.services.group_history_reconciliation import (
+        GroupHistoryReconciliationRepository,
+    )
+
+    repository = GroupHistoryReconciliationRepository()
+    db_session.add(
+        AppSetting(
+            key=repository.key("US"),
+            value="null",
+            category="group_history_reconciliation",
+        )
+    )
+    db_session.commit()
+
+    reservation = repository.reserve(db_session, target=_target())
+
+    assert reservation is not None
+    marker = repository.load(db_session, market="US")
+    assert marker is not None
+    assert marker.reservation_id == reservation.reservation_id
 
 
 def _readiness(*, ready: bool, formula: str = "balanced-v1"):
@@ -132,12 +234,16 @@ def _readiness(*, ready: bool, formula: str = "balanced-v1"):
 
 def test_celery_discovery_queues_incomplete_enabled_group_market(monkeypatch):
     from app.tasks import group_history_tasks as module
-    from app.services.group_history_reconciliation import GroupHistoryTarget
+    from app.services.group_history_reconciliation import (
+        GroupHistoryReservation,
+        GroupHistoryTarget,
+    )
 
     db = Mock()
     db.close = Mock()
     repository = Mock()
-    repository.reserve.return_value = True
+    reservation = GroupHistoryReservation(_target(), "lease-1")
+    repository.reserve.return_value = reservation
     dispatched = []
     monkeypatch.setattr(module, "SessionLocal", lambda: db)
     monkeypatch.setattr(
@@ -191,6 +297,7 @@ def test_celery_discovery_queues_incomplete_enabled_group_market(monkeypatch):
             "market": "US",
             "formula_version": "balanced-v1",
             "through_date": date(2026, 6, 30),
+            "reservation_id": "lease-1",
         }
     ]
     db.close.assert_called_once()
@@ -220,12 +327,16 @@ def test_startup_reconciliation_skips_while_runtime_bootstrap_is_running(
     dispatch.assert_not_called()
 
 
-def test_startup_reconciliation_database_ready_is_verified_noop(monkeypatch):
+def test_startup_reconciliation_database_ready_queues_finalization(monkeypatch):
     from app.tasks import group_history_tasks as module
-    from app.services.group_history_reconciliation import GroupHistoryTarget
+    from app.services.group_history_reconciliation import (
+        GroupHistoryReservation,
+        GroupHistoryTarget,
+    )
 
     db = Mock()
     repository = Mock()
+    repository.reserve.return_value = GroupHistoryReservation(_target(), "lease-1")
     monkeypatch.setattr(module, "SessionLocal", lambda: db)
     monkeypatch.setattr(
         module,
@@ -264,21 +375,42 @@ def test_startup_reconciliation_database_ready_is_verified_noop(monkeypatch):
         "GroupHistoryReconciliationRepository",
         lambda: repository,
     )
-    dispatch = Mock()
-    monkeypatch.setattr(module, "_dispatch_group_history_reconciliation", dispatch)
+    repair_dispatch = Mock()
+    finalization_dispatch = Mock(return_value="finalize-us-1")
+    monkeypatch.setattr(
+        module,
+        "_dispatch_group_history_reconciliation",
+        repair_dispatch,
+    )
+    monkeypatch.setattr(
+        module,
+        "_dispatch_group_history_finalization",
+        finalization_dispatch,
+    )
 
-    assert module.discover_group_history_reconciliation.run() == {"US": "ready"}
-    dispatch.assert_not_called()
-    assert repository.mark.call_args.kwargs["status"].value == "ready"
+    assert module.discover_group_history_reconciliation.run() == {
+        "US": "finalization_queued"
+    }
+    repair_dispatch.assert_not_called()
+    finalization_dispatch.assert_called_once_with(
+        market="US",
+        formula_version="balanced-v1",
+        through_date=date(2026, 6, 30),
+        reservation_id="lease-1",
+    )
+    repository.transition.assert_not_called()
 
 
 def test_dispatch_failure_returns_marker_to_incomplete(monkeypatch):
     from app.tasks import group_history_tasks as module
-    from app.services.group_history_reconciliation import GroupHistoryTarget
+    from app.services.group_history_reconciliation import (
+        GroupHistoryReservation,
+        GroupHistoryTarget,
+    )
 
     db = Mock()
     repository = Mock()
-    repository.reserve.return_value = True
+    repository.reserve.return_value = GroupHistoryReservation(_target(), "lease-1")
     monkeypatch.setattr(module, "SessionLocal", lambda: db)
     monkeypatch.setattr(
         module,
@@ -326,8 +458,8 @@ def test_dispatch_failure_returns_marker_to_incomplete(monkeypatch):
     assert module.discover_group_history_reconciliation.run() == {
         "US": "dispatch_failed"
     }
-    assert repository.mark.call_args.kwargs["status"].value == "incomplete"
-    assert repository.mark.call_args.kwargs["error"] == "broker unavailable"
+    assert repository.transition.call_args.kwargs["status"].value == "incomplete"
+    assert repository.transition.call_args.kwargs["error"] == "broker unavailable"
 
 
 def test_reconciliation_dispatches_price_repair_and_verification_to_expected_queues(
@@ -356,6 +488,7 @@ def test_reconciliation_dispatches_price_repair_and_verification_to_expected_que
         market="US",
         formula_version="balanced-v1",
         through_date=date(2026, 6, 30),
+        reservation_id="lease-1",
     )
 
     assert task_id == "repair-us-1"
@@ -373,12 +506,44 @@ def test_reconciliation_dispatches_price_repair_and_verification_to_expected_que
         "market": "US",
         "formula_version": "balanced-v1",
         "through_date": "2026-06-30",
+        "reservation_id": "lease-1",
     }
     errback = captured["apply_kwargs"]["link_error"]
     assert errback.task == (
         "app.tasks.group_history_tasks.fail_group_history_reconciliation"
     )
     assert errback.options["queue"] == "celery"
+    assert errback.kwargs["reservation_id"] == "lease-1"
+
+
+def test_ready_reconciliation_dispatches_only_fenced_finalization(monkeypatch):
+    from app.tasks import group_history_tasks as module
+
+    repair_signature = Mock()
+    repair_signature.apply_async.return_value = SimpleNamespace(id="finalize-us-1")
+    failure_signature = Mock()
+    repair_builder = Mock(return_value=repair_signature)
+    failure_builder = Mock(return_value=failure_signature)
+    monkeypatch.setattr(module, "_group_history_repair_signature", repair_builder)
+    monkeypatch.setattr(module, "_group_history_failure_signature", failure_builder)
+
+    task_id = module._dispatch_group_history_finalization(
+        market="US",
+        formula_version="balanced-v1",
+        through_date=date(2026, 6, 30),
+        reservation_id="lease-1",
+    )
+
+    assert task_id == "finalize-us-1"
+    repair_builder.assert_called_once_with(
+        market="US",
+        formula_version="balanced-v1",
+        through_date=date(2026, 6, 30),
+        reservation_id="lease-1",
+    )
+    repair_signature.apply_async.assert_called_once_with(
+        link_error=failure_signature
+    )
 
 
 def test_reconciliation_repair_executes_the_captured_target(monkeypatch):
@@ -387,21 +552,26 @@ def test_reconciliation_repair_executes_the_captured_target(monkeypatch):
 
     db = Mock()
     executor = Mock()
-    executor.execute.return_value = {"status": "ready"}
+    executor.execute_reconciliation.return_value = {"status": "ready"}
     monkeypatch.setattr(module, "SessionLocal", lambda: db)
-    monkeypatch.setattr(module, "_build_group_history_execution_service", lambda: executor)
+    monkeypatch.setattr(
+        module, "_build_group_history_execution_service", lambda: executor
+    )
 
     result = module.repair_group_history_reconciliation.run.__wrapped__(
         module.repair_group_history_reconciliation,
         market="us",
         formula_version="captured-v1",
         through_date="2026-06-30",
+        reservation_id="lease-1",
     )
 
     assert result == {"status": "ready"}
-    assert executor.execute.call_args.kwargs["target"] == GroupHistoryTarget(
+    reservation = executor.execute_reconciliation.call_args.kwargs["reservation"]
+    assert reservation.target == GroupHistoryTarget(
         market="US",
         formula_version="captured-v1",
         through_date=date(2026, 6, 30),
     )
+    assert reservation.reservation_id == "lease-1"
     db.close.assert_called_once_with()

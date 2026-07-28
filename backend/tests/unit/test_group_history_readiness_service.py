@@ -48,7 +48,7 @@ class _Reader:
             }
         ]
 
-    def load_window(
+    def inspect_window(
         self,
         db,
         *,
@@ -57,9 +57,7 @@ class _Reader:
         dates,
         **kwargs,
     ):
-        from app.services.group_rank_snapshot_reader import (
-            GroupSnapshotWindowIntegrityError,
-        )
+        from app.services.group_rank_snapshot_reader import GroupSnapshotWindowResult
 
         snapshots = {}
         errors = {}
@@ -79,12 +77,7 @@ class _Reader:
                 continue
             if rows:
                 snapshots[target_date] = rows
-        if errors:
-            raise GroupSnapshotWindowIntegrityError(
-                snapshots=snapshots,
-                errors=errors,
-            )
-        return snapshots
+        return GroupSnapshotWindowResult(snapshots=snapshots, errors=errors)
 
 
 class _RRGProvider:
@@ -109,9 +102,7 @@ class _RRGProvider:
             (as_of_date - timedelta(days=7 * offset), 50.0 + offset, 10)
             for offset in reversed(range(self.weekly_points))
         ]
-        return as_of_date.isoformat(), {"Software": {"rank": 1}}, {
-            "Software": points
-        }
+        return as_of_date.isoformat(), {"Software": {"rank": 1}}, {"Software": points}
 
 
 def _reference_days(current: date) -> tuple[date, ...]:
@@ -228,6 +219,7 @@ def test_readiness_preserves_supplied_target_identity() -> None:
     from app.services.group_history_readiness_service import (
         GroupHistoryReadinessService,
     )
+
     current = date(2026, 6, 30)
 
     service = GroupHistoryReadinessService(

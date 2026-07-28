@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import json
 import logging
 from threading import Lock
@@ -195,10 +195,21 @@ class UISnapshotService:
             )
         )
 
-    def publish_groups_bootstrap(self) -> SnapshotResult | None:
+    def publish_groups_bootstrap(
+        self,
+        *,
+        expected_formula_version: str | None = None,
+        expected_through_date: date | None = None,
+    ) -> SnapshotResult | None:
         self._ensure_schema()
         try:
-            return self._run_with_storage_recovery(self._publish_groups_bootstrap_with_db)
+            return self._run_with_storage_recovery(
+                lambda db: self._publish_groups_bootstrap_with_db(
+                    db,
+                    expected_formula_version=expected_formula_version,
+                    expected_through_date=expected_through_date,
+                )
+            )
         except GroupsBootstrapUnavailableError:
             return None
 
@@ -661,7 +672,42 @@ class UISnapshotService:
                 **market_scope_tag(normalized_market),
             }
 
-    def _publish_groups_bootstrap_with_db(self, db: Session) -> SnapshotResult:
+    def _publish_groups_bootstrap_with_db(
+        self,
+        db: Session,
+        *,
+        expected_formula_version: str | None = None,
+        expected_through_date: date | None = None,
+    ) -> SnapshotResult:
+        formula_version = expected_formula_version
+        if formula_version is not None:
+            pointer = db.get(MarketRsFormulaPointer, "US")
+            if pointer is None or str(pointer.formula_version) != formula_version:
+                raise GroupsBootstrapUnavailableError(
+                    "Active Group formula changed before publication"
+                )
+
+        if expected_through_date is not None:
+            if formula_version is None:
+                pointer = db.get(MarketRsFormulaPointer, "US")
+                if pointer is None:
+                    raise GroupsBootstrapUnavailableError(
+                        "No active Group formula is available for publication"
+                    )
+                formula_version = str(pointer.formula_version)
+            latest_date = (
+                db.query(func.max(IBDGroupRank.date))
+                .filter(
+                    IBDGroupRank.market == "US",
+                    IBDGroupRank.rs_formula_version == formula_version,
+                )
+                .scalar()
+            )
+            if latest_date != expected_through_date:
+                raise GroupsBootstrapUnavailableError(
+                    "Group ranking date changed before publication"
+                )
+
         return self._publish(
             db=db,
             view_key=GROUPS_VIEW_KEY,
@@ -987,14 +1033,21 @@ def safe_publish_breadth_bootstrap(market: str | None = "US") -> dict[str, Any] 
     )
 
 
-def safe_publish_groups_bootstrap() -> dict[str, Any] | None:
+def safe_publish_groups_bootstrap(
+    *,
+    expected_formula_version: str | None = None,
+    expected_through_date: date | None = None,
+) -> dict[str, Any] | None:
     from app.wiring.bootstrap import get_ui_snapshot_service
 
     return _safe_publish(
         "publish_groups_bootstrap",
         view_key=GROUPS_VIEW_KEY,
         variant_key="default",
-        fn=get_ui_snapshot_service().publish_groups_bootstrap,
+        fn=lambda: get_ui_snapshot_service().publish_groups_bootstrap(
+            expected_formula_version=expected_formula_version,
+            expected_through_date=expected_through_date,
+        ),
     )
 
 
