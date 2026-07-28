@@ -147,8 +147,9 @@ def _readiness(*, ready: bool, formula: str = "balanced-v1"):
     )
 
 
-def test_startup_reconciliation_queues_incomplete_enabled_group_market(monkeypatch):
+def test_celery_discovery_queues_incomplete_enabled_group_market(monkeypatch):
     from app.tasks import group_history_tasks as module
+    from app.services.group_history_reconciliation import GroupHistoryTarget
 
     db = Mock()
     db.close = Mock()
@@ -166,8 +167,20 @@ def test_startup_reconciliation_queues_incomplete_enabled_group_market(monkeypat
     )
     monkeypatch.setattr(
         module,
+        "_resolve_current_group_history_target",
+        lambda _db, *, market: GroupHistoryTarget(
+            market=market,
+            formula_version="balanced-v1",
+            through_date=date(2026, 6, 30),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
         "_evaluate_group_history_readiness",
-        lambda _db, *, market, through_date: _readiness(ready=False),
+        lambda _db, *, target: _readiness(
+            ready=False,
+            formula=target.formula_version,
+        ),
     )
     monkeypatch.setattr(
         module,
@@ -187,7 +200,7 @@ def test_startup_reconciliation_queues_incomplete_enabled_group_market(monkeypat
         lambda **kwargs: dispatched.append(kwargs) or "repair-us-1",
     )
 
-    result = module.queue_group_history_reconciliation()
+    result = module.discover_group_history_reconciliation.run()
 
     assert result == {"US": "queued", "SG": "skipped"}
     assert dispatched == [
@@ -218,7 +231,7 @@ def test_startup_reconciliation_skips_while_runtime_bootstrap_is_running(
     dispatch = Mock()
     monkeypatch.setattr(module, "_dispatch_group_history_reconciliation", dispatch)
 
-    assert module.queue_group_history_reconciliation() == {
+    assert module.discover_group_history_reconciliation.run() == {
         "US": "bootstrap_running"
     }
     dispatch.assert_not_called()
@@ -226,6 +239,7 @@ def test_startup_reconciliation_skips_while_runtime_bootstrap_is_running(
 
 def test_startup_reconciliation_database_ready_is_verified_noop(monkeypatch):
     from app.tasks import group_history_tasks as module
+    from app.services.group_history_reconciliation import GroupHistoryTarget
 
     db = Mock()
     repository = Mock()
@@ -247,8 +261,20 @@ def test_startup_reconciliation_database_ready_is_verified_noop(monkeypatch):
     )
     monkeypatch.setattr(
         module,
+        "_resolve_current_group_history_target",
+        lambda _db, *, market: GroupHistoryTarget(
+            market=market,
+            formula_version="balanced-v1",
+            through_date=date(2026, 6, 30),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
         "_evaluate_group_history_readiness",
-        lambda *_args, **_kwargs: _readiness(ready=True),
+        lambda _db, *, target: _readiness(
+            ready=True,
+            formula=target.formula_version,
+        ),
     )
     monkeypatch.setattr(
         module,
@@ -258,13 +284,14 @@ def test_startup_reconciliation_database_ready_is_verified_noop(monkeypatch):
     dispatch = Mock()
     monkeypatch.setattr(module, "_dispatch_group_history_reconciliation", dispatch)
 
-    assert module.queue_group_history_reconciliation() == {"US": "ready"}
+    assert module.discover_group_history_reconciliation.run() == {"US": "ready"}
     dispatch.assert_not_called()
     assert repository.mark.call_args.kwargs["status"].value == "ready"
 
 
 def test_dispatch_failure_returns_marker_to_incomplete(monkeypatch):
     from app.tasks import group_history_tasks as module
+    from app.services.group_history_reconciliation import GroupHistoryTarget
 
     db = Mock()
     repository = Mock()
@@ -287,8 +314,20 @@ def test_dispatch_failure_returns_marker_to_incomplete(monkeypatch):
     )
     monkeypatch.setattr(
         module,
+        "_resolve_current_group_history_target",
+        lambda _db, *, market: GroupHistoryTarget(
+            market=market,
+            formula_version="balanced-v1",
+            through_date=date(2026, 6, 30),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
         "_evaluate_group_history_readiness",
-        lambda *_args, **_kwargs: _readiness(ready=False),
+        lambda _db, *, target: _readiness(
+            ready=False,
+            formula=target.formula_version,
+        ),
     )
     monkeypatch.setattr(
         module,
@@ -301,7 +340,7 @@ def test_dispatch_failure_returns_marker_to_incomplete(monkeypatch):
         Mock(side_effect=RuntimeError("broker unavailable")),
     )
 
-    assert module.queue_group_history_reconciliation() == {
+    assert module.discover_group_history_reconciliation.run() == {
         "US": "dispatch_failed"
     }
     assert repository.mark.call_args.kwargs["status"].value == "incomplete"
@@ -340,18 +379,46 @@ def test_reconciliation_dispatches_price_repair_and_verification_to_expected_que
     signatures = captured["signatures"]
     assert [signature.task for signature in signatures] == [
         "app.tasks.cache_tasks.smart_refresh_cache",
-        "app.tasks.group_history_tasks.ensure_group_history",
-        "app.tasks.group_history_tasks.complete_group_history_reconciliation",
+        "app.tasks.group_history_tasks.repair_group_history_reconciliation",
     ]
     assert [signature.options["queue"] for signature in signatures] == [
         data_fetch_queue_for_market("US"),
         market_jobs_queue_for_market("US"),
-        "celery",
     ]
     assert signatures[0].kwargs["ensure_group_history"] is True
-    assert signatures[1].kwargs["strict"] is False
+    assert signatures[1].kwargs == {
+        "market": "US",
+        "formula_version": "balanced-v1",
+        "through_date": "2026-06-30",
+    }
     errback = captured["apply_kwargs"]["link_error"]
     assert errback.task == (
         "app.tasks.group_history_tasks.fail_group_history_reconciliation"
     )
     assert errback.options["queue"] == "celery"
+
+
+def test_reconciliation_repair_executes_the_captured_target(monkeypatch):
+    from app.services.group_history_reconciliation import GroupHistoryTarget
+    from app.tasks import group_history_tasks as module
+
+    db = Mock()
+    executor = Mock()
+    executor.execute.return_value = {"status": "ready"}
+    monkeypatch.setattr(module, "SessionLocal", lambda: db)
+    monkeypatch.setattr(module, "_build_group_history_execution_service", lambda: executor)
+
+    result = module.repair_group_history_reconciliation.run.__wrapped__(
+        module.repair_group_history_reconciliation,
+        market="us",
+        formula_version="captured-v1",
+        through_date="2026-06-30",
+    )
+
+    assert result == {"status": "ready"}
+    assert executor.execute.call_args.kwargs["target"] == GroupHistoryTarget(
+        market="US",
+        formula_version="captured-v1",
+        through_date=date(2026, 6, 30),
+    )
+    db.close.assert_called_once_with()
