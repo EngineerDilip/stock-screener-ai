@@ -33,6 +33,12 @@ def test_reconciliation_marker_reservation_is_idempotent_and_resumable(db_sessio
     assert reservation is not None
     assert repository.reserve(db_session, target=target) is None
 
+    assert repository.transition(
+        db_session,
+        reservation=reservation,
+        expected_statuses={GroupHistoryReconciliationStatus.DISPATCHING},
+        status=GroupHistoryReconciliationStatus.QUEUED,
+    )
     assert (
         repository.transition(
             db_session,
@@ -46,7 +52,7 @@ def test_reconciliation_marker_reservation_is_idempotent_and_resumable(db_sessio
 
     assert repository.reserve(db_session, target=target) is not None
     marker = repository.load(db_session, market="US")
-    assert marker.status is GroupHistoryReconciliationStatus.QUEUED
+    assert marker.status is GroupHistoryReconciliationStatus.DISPATCHING
     assert marker.error is None
 
 
@@ -60,6 +66,12 @@ def test_fresh_finalization_adopts_same_target_queued_reservation(db_session):
     target = _target()
     queued = repository.reserve(db_session, target=target)
     assert queued is not None
+    assert repository.transition(
+        db_session,
+        reservation=queued,
+        expected_statuses={GroupHistoryReconciliationStatus.DISPATCHING},
+        status=GroupHistoryReconciliationStatus.QUEUED,
+    )
 
     finalization = repository.reserve_finalization(db_session, target=target)
 
@@ -102,7 +114,7 @@ def test_existing_marker_compare_and_swap_allows_only_one_stale_reservation(
     assert repository.transition(
         db_session,
         reservation=reservation,
-        expected_statuses={GroupHistoryReconciliationStatus.QUEUED},
+        expected_statuses={GroupHistoryReconciliationStatus.DISPATCHING},
         status=GroupHistoryReconciliationStatus.INCOMPLETE,
     )
     setting = (
@@ -134,7 +146,9 @@ def test_existing_marker_compare_and_swap_allows_only_one_stale_reservation(
         second.close()
 
 
-def test_stale_active_marker_can_be_reserved_after_interrupted_worker(db_session):
+def test_stale_dispatching_marker_can_be_reserved_after_interrupted_dispatch(
+    db_session,
+):
     from app.models.app_settings import AppSetting
     from app.services.group_history_reconciliation import (
         GroupHistoryReconciliationRepository,
@@ -143,6 +157,9 @@ def test_stale_active_marker_can_be_reserved_after_interrupted_worker(db_session
     repository = GroupHistoryReconciliationRepository()
     target = _target()
     assert repository.reserve(db_session, target=target)
+    marker = repository.load(db_session, market="US")
+    assert marker is not None
+    assert marker.status.value == "dispatching"
     setting = (
         db_session.query(AppSetting)
         .filter(AppSetting.key == repository.key("US"))
@@ -156,6 +173,36 @@ def test_stale_active_marker_can_be_reserved_after_interrupted_worker(db_session
     db_session.commit()
 
     assert repository.reserve(db_session, target=target) is not None
+
+
+def test_stale_queued_marker_remains_owned_while_workflow_waits(db_session):
+    from app.models.app_settings import AppSetting
+    from app.services.group_history_reconciliation import (
+        GroupHistoryReconciliationRepository,
+    )
+
+    repository = GroupHistoryReconciliationRepository()
+    target = _target()
+    reservation = repository.reserve(db_session, target=target)
+    assert reservation is not None
+    setting = (
+        db_session.query(AppSetting)
+        .filter(AppSetting.key == repository.key("US"))
+        .one()
+    )
+    payload = json.loads(setting.value)
+    payload["status"] = "queued"
+    payload["updated_at"] = (
+        datetime.now(timezone.utc) - timedelta(days=7)
+    ).isoformat()
+    setting.value = json.dumps(payload)
+    db_session.commit()
+
+    assert repository.reserve(db_session, target=target) is None
+    marker = repository.load(db_session, market="US")
+    assert marker is not None
+    assert marker.reservation_id == reservation.reservation_id
+    assert marker.status.value == "queued"
 
 
 def test_stale_reservation_cannot_overwrite_a_new_target(db_session):
@@ -180,7 +227,7 @@ def test_stale_reservation_cannot_overwrite_a_new_target(db_session):
         repository.transition(
             db_session,
             reservation=stale,
-            expected_statuses={GroupHistoryReconciliationStatus.QUEUED},
+            expected_statuses={GroupHistoryReconciliationStatus.DISPATCHING},
             status=GroupHistoryReconciliationStatus.FAILED,
             error="late errback",
         )
@@ -190,7 +237,7 @@ def test_stale_reservation_cannot_overwrite_a_new_target(db_session):
     assert marker is not None
     assert marker.target == current_target
     assert marker.reservation_id == current.reservation_id
-    assert marker.status is GroupHistoryReconciliationStatus.QUEUED
+    assert marker.status is GroupHistoryReconciliationStatus.DISPATCHING
 
 
 def test_finalizing_reservation_cannot_be_superseded(db_session):
@@ -206,7 +253,7 @@ def test_finalizing_reservation_cannot_be_superseded(db_session):
     assert repository.transition(
         db_session,
         reservation=reservation,
-        expected_statuses={GroupHistoryReconciliationStatus.QUEUED},
+        expected_statuses={GroupHistoryReconciliationStatus.DISPATCHING},
         status=GroupHistoryReconciliationStatus.REPAIRING,
     )
     assert repository.transition(
@@ -333,6 +380,11 @@ def test_celery_discovery_queues_incomplete_enabled_group_market(monkeypatch):
             "reservation_id": "lease-1",
         }
     ]
+    queued_transition = repository.transition.call_args.kwargs
+    assert {
+        status.value for status in queued_transition["expected_statuses"]
+    } == {"dispatching"}
+    assert queued_transition["status"].value == "queued"
     db.close.assert_called_once()
 
 
@@ -364,6 +416,7 @@ def test_startup_reconciliation_database_ready_queues_finalization(monkeypatch):
     from app.tasks import group_history_tasks as module
     from app.services.group_history_reconciliation import (
         GroupHistoryReservation,
+        GroupHistoryReconciliationStatus,
         GroupHistoryTarget,
     )
 
@@ -432,7 +485,12 @@ def test_startup_reconciliation_database_ready_queues_finalization(monkeypatch):
         through_date=date(2026, 6, 30),
         reservation_id="lease-1",
     )
-    repository.transition.assert_not_called()
+    queued_transition = repository.transition.call_args.kwargs
+    assert queued_transition["reservation"].reservation_id == "lease-1"
+    assert queued_transition["expected_statuses"] == {
+        GroupHistoryReconciliationStatus.DISPATCHING
+    }
+    assert queued_transition["status"] is GroupHistoryReconciliationStatus.QUEUED
 
 
 def test_startup_reconciliation_ready_marker_is_verified_noop(monkeypatch):
@@ -630,6 +688,10 @@ def test_dispatch_failure_returns_marker_to_incomplete(monkeypatch):
     assert module.discover_group_history_reconciliation.run() == {
         "US": "dispatch_failed"
     }
+    assert {
+        status.value
+        for status in repository.transition.call_args.kwargs["expected_statuses"]
+    } == {"dispatching"}
     assert repository.transition.call_args.kwargs["status"].value == "incomplete"
     assert repository.transition.call_args.kwargs["error"] == "broker unavailable"
 

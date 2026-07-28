@@ -360,7 +360,9 @@ def discover_group_history_reconciliation() -> dict[str, str]:
                     repository.transition(
                         db,
                         reservation=reservation,
-                        expected_statuses={GroupHistoryReconciliationStatus.QUEUED},
+                        expected_statuses={
+                            GroupHistoryReconciliationStatus.DISPATCHING
+                        },
                         status=GroupHistoryReconciliationStatus.INCOMPLETE,
                         error=str(exc),
                     )
@@ -386,12 +388,31 @@ def discover_group_history_reconciliation() -> dict[str, str]:
                 repository.transition(
                     db,
                     reservation=reservation,
-                    expected_statuses={GroupHistoryReconciliationStatus.QUEUED},
+                    expected_statuses={
+                        GroupHistoryReconciliationStatus.DISPATCHING
+                    },
                     status=GroupHistoryReconciliationStatus.INCOMPLETE,
                     counts=readiness.as_dict(),
                     error=str(exc),
                 )
                 outcomes[market_code] = "dispatch_failed"
+                continue
+            try:
+                # Repair may claim DISPATCHING before this promotion CAS runs.
+                repository.transition(
+                    db,
+                    reservation=reservation,
+                    expected_statuses={
+                        GroupHistoryReconciliationStatus.DISPATCHING
+                    },
+                    status=GroupHistoryReconciliationStatus.QUEUED,
+                )
+            except SoftTimeLimitExceeded:
+                db.rollback()
+                raise
+            except Exception:
+                db.rollback()
+                outcomes[market_code] = "queued_unconfirmed"
                 continue
             outcomes[market_code] = (
                 "finalization_queued" if readiness.ready else "queued"
@@ -427,6 +448,7 @@ def fail_group_history_reconciliation(
             db,
             reservation=reservation,
             expected_statuses={
+                GroupHistoryReconciliationStatus.DISPATCHING,
                 GroupHistoryReconciliationStatus.QUEUED,
                 GroupHistoryReconciliationStatus.REPAIRING,
                 GroupHistoryReconciliationStatus.FINALIZING,

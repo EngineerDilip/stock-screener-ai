@@ -110,7 +110,10 @@ class GroupHistoryExecutionService:
                 and not self._reconciliation_repository.transition(
                     db,
                     reservation=reservation,
-                    expected_statuses={GroupHistoryReconciliationStatus.QUEUED},
+                    expected_statuses={
+                        GroupHistoryReconciliationStatus.DISPATCHING,
+                        GroupHistoryReconciliationStatus.QUEUED,
+                    },
                     status=GroupHistoryReconciliationStatus.REPAIRING,
                 )
             ):

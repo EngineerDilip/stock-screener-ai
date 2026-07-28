@@ -225,6 +225,11 @@ def test_execution_service_finalizes_successful_us_reconciliation_once():
     bootstrap.ensure.assert_called_once_with(db, target=target)
     bump.assert_called_once_with("US")
     publish.assert_called_once_with(target)
+    claim_transition = repository.transition.call_args_list[0].kwargs
+    assert {
+        status.value for status in claim_transition["expected_statuses"]
+    } == {"dispatching", "queued"}
+    assert claim_transition["status"].value == "repairing"
     assert repository.transition.call_args.kwargs["reservation"] == reservation
     assert repository.transition.call_args.kwargs["status"].value == "ready"
     completed.assert_called_once()
@@ -351,7 +356,7 @@ def test_execution_service_records_successful_fresh_bootstrap_as_ready(db_sessio
     assert marker.counts == {"ready": True}
 
 
-def test_fresh_bootstrap_adopts_queued_reconciliation_for_same_target(db_session):
+def test_fresh_bootstrap_adopts_pending_reconciliation_for_same_target(db_session):
     from app.services.group_history_execution_service import (
         GroupHistoryExecutionService,
     )
@@ -363,8 +368,8 @@ def test_fresh_bootstrap_adopts_queued_reconciliation_for_same_target(db_session
 
     target = GroupHistoryTarget("US", "captured-v1", date(2026, 6, 30))
     repository = GroupHistoryReconciliationRepository()
-    queued = repository.reserve(db_session, target=target)
-    assert queued is not None
+    pending = repository.reserve(db_session, target=target)
+    assert pending is not None
     bump = Mock()
     publish = Mock(return_value={"snapshot_revision": "42"})
     service = GroupHistoryExecutionService(

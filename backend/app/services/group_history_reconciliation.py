@@ -26,6 +26,7 @@ GROUP_HISTORY_RECONCILIATION_ACTIVE_TIMEOUT = timedelta(hours=6)
 
 
 class GroupHistoryReconciliationStatus(StrEnum):
+    DISPATCHING = "dispatching"
     QUEUED = "queued"
     REPAIRING = "repairing"
     FINALIZING = "finalizing"
@@ -136,7 +137,7 @@ class GroupHistoryReconciliationRepository:
         return self._reserve(
             db,
             target=target,
-            status=GroupHistoryReconciliationStatus.QUEUED,
+            status=GroupHistoryReconciliationStatus.DISPATCHING,
         )
 
     def reserve_finalization(
@@ -145,7 +146,7 @@ class GroupHistoryReconciliationRepository:
         *,
         target: GroupHistoryTarget,
     ) -> GroupHistoryReservation | None:
-        """Fence finalization, adopting an undispatched same-target queue."""
+        """Fence finalization, adopting a same-target pending dispatch."""
         for _attempt in range(2):
             reservation = self._reserve(
                 db,
@@ -158,7 +159,11 @@ class GroupHistoryReconciliationRepository:
             if not (
                 current is not None
                 and current.target == target
-                and current.status is GroupHistoryReconciliationStatus.QUEUED
+                and current.status
+                in {
+                    GroupHistoryReconciliationStatus.DISPATCHING,
+                    GroupHistoryReconciliationStatus.QUEUED,
+                }
             ):
                 return None
         return None
@@ -178,12 +183,17 @@ class GroupHistoryReconciliationRepository:
             status is GroupHistoryReconciliationStatus.FINALIZING
             and existing is not None
             and existing.target == target
-            and existing.status is GroupHistoryReconciliationStatus.QUEUED
+            and existing.status
+            in {
+                GroupHistoryReconciliationStatus.DISPATCHING,
+                GroupHistoryReconciliationStatus.QUEUED,
+            }
         )
         if (
             existing is not None
             and existing.status
             in {
+                GroupHistoryReconciliationStatus.DISPATCHING,
                 GroupHistoryReconciliationStatus.QUEUED,
                 GroupHistoryReconciliationStatus.REPAIRING,
                 GroupHistoryReconciliationStatus.FINALIZING,
@@ -243,6 +253,8 @@ class GroupHistoryReconciliationRepository:
 
     @staticmethod
     def _is_stale(marker: GroupHistoryReconciliationMarker) -> bool:
+        if marker.status is GroupHistoryReconciliationStatus.QUEUED:
+            return False
         try:
             updated_at = datetime.fromisoformat(marker.updated_at)
         except ValueError:
