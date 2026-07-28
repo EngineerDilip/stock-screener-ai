@@ -130,6 +130,7 @@ def build_price_refresh_planning_input(
     recently_refreshed_filter: Callable[[Sequence[str]], Sequence[str]] | None = None,
     ensure_group_history: bool = False,
     group_history_price_coverage_service=None,
+    group_history_price_universe_service=None,
 ) -> PriceRefreshPlanningInput:
     parsed_mode = PriceRefreshMode.parse(mode)
     with log_runtime_stage(
@@ -149,6 +150,41 @@ def build_price_refresh_planning_input(
             market,
             normalize_market,
         )
+    target_as_of = (
+        market_calendar_service.last_completed_trading_day(effective_market)
+        if parsed_mode in LIVE_TOP_UP_MODES and universe.symbols
+        else None
+    )
+    group_history_universe_symbols: tuple[str, ...] = ()
+    if ensure_group_history and market is not None and target_as_of is not None:
+        if group_history_price_universe_service is None:
+            from .group_history_price_universe import (
+                GroupHistoryPriceUniverseService,
+            )
+
+            group_history_price_universe_service = GroupHistoryPriceUniverseService(
+                calendar_service=market_calendar_service
+            )
+        group_history_universe_symbols = _normalize_symbols(
+            group_history_price_universe_service.symbols(
+                db,
+                market=effective_market,
+                through_date=target_as_of,
+            )
+        )
+        historical_extras = tuple(
+            symbol
+            for symbol in group_history_universe_symbols
+            if symbol not in universe.symbol_markets
+        )
+        if historical_extras:
+            universe = PriceRefreshUniverse(
+                symbols=universe.symbols + historical_extras,
+                symbol_markets={
+                    **universe.symbol_markets,
+                    **{symbol: effective_market for symbol in historical_extras},
+                },
+            )
     all_symbols = _normalize_symbols(universe.symbols)
     all_symbol_set = set(all_symbols)
     benchmark_symbols = tuple(
@@ -160,7 +196,11 @@ def build_price_refresh_planning_input(
     )
     group_history_symbols = tuple(
         dict.fromkeys(
-            (*_normalize_symbols(active_universe.symbols), *benchmark_symbols)
+            (
+                *_normalize_symbols(active_universe.symbols),
+                *group_history_universe_symbols,
+                *benchmark_symbols,
+            )
         )
     )
     github_seed = None
@@ -176,12 +216,8 @@ def build_price_refresh_planning_input(
                 sync_github_seed(db, market=effective_market, allow_stale=True)
             )
 
-    target_as_of = None
     coverage = None
     if parsed_mode in LIVE_TOP_UP_MODES and all_symbols:
-        target_as_of = market_calendar_service.last_completed_trading_day(
-            effective_market
-        )
         with log_runtime_stage(
             logger,
             "price_refresh.classify_coverage",

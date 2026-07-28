@@ -183,3 +183,20 @@ def test_repair_snapshot_rejects_empty_legacy_replacement(db_session):
 
     legacy.ranking_repository.delete_range.assert_called_once()
     reader.load_exact.assert_not_called()
+
+
+def test_repair_snapshot_rejects_empty_balanced_replacement(db_session):
+    identity = GroupSnapshotIdentity("US", AS_OF, BALANCED_RS_FORMULA_VERSION)
+    reader = Mock()
+    stock = Mock()
+    stock.calculate.return_value.id = 42
+    canonical = Mock()
+    canonical.calculate_and_store.return_value = []
+
+    with pytest.raises(RuntimeError, match="produced no rankings"):
+        _coordinator(reader, stock, canonical, Mock()).repair_snapshot(
+            db_session,
+            identity=identity,
+        )
+
+    reader.load_exact.assert_not_called()

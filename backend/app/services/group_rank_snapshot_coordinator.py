@@ -84,12 +84,14 @@ class GroupRankSnapshotCoordinator:
                 as_of_date=identity.as_of_date,
                 formula_version=identity.formula_version,
             )
-            self.canonical_group_service.calculate_and_store(
+            rankings = self.canonical_group_service.calculate_and_store(
                 db,
                 market=identity.market,
                 as_of_date=identity.as_of_date,
                 formula_version=identity.formula_version,
             )
+            if not rankings:
+                raise RuntimeError("Balanced Group calculation produced no rankings")
             rows = self.reader.load_exact(
                 db,
                 identity=identity,
@@ -134,12 +136,14 @@ class GroupRankSnapshotCoordinator:
                 formula_version=identity.formula_version,
                 rebuild_incompatible=True,
             )
-            self.canonical_group_service.calculate_and_store(
+            rankings = self.canonical_group_service.calculate_and_store(
                 db,
                 market=identity.market,
                 as_of_date=identity.as_of_date,
                 formula_version=identity.formula_version,
             )
+            if not rankings:
+                raise RuntimeError("Balanced Group repair produced no rankings")
             rows = self.reader.load_exact(
                 db,
                 identity=identity,

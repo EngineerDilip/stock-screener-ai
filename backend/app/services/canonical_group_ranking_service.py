@@ -127,6 +127,12 @@ class CanonicalGroupRankingService:
                 }
             )
 
+        if not metrics_by_group:
+            raise CanonicalGroupRankingUnavailable(
+                f"Canonical Group calculation produced no rankings for "
+                f"{normalized_market} on {as_of_date.isoformat()} ({formula_version})"
+            )
+
         metrics_by_group.sort(
             key=lambda row: (
                 -row["_unrounded_avg_rs"],
