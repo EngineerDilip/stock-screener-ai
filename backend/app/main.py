@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import threading
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -96,6 +97,34 @@ async def trigger_ui_snapshot_rebuild_on_startup() -> None:
     return None
 
 
+def _publish_group_history_reconciliation() -> None:
+    """Publish from a daemon thread that cannot delay process shutdown."""
+    from .tasks.group_history_tasks import discover_group_history_reconciliation
+
+    try:
+        result = discover_group_history_reconciliation.delay()
+        logger.info(
+            "Group history startup reconciliation queued",
+            extra={"task_id": result.id},
+        )
+    except Exception:
+        logger.warning(
+            "Group history startup reconciliation failed",
+            exc_info=True,
+        )
+
+
+def trigger_group_history_reconciliation_on_startup() -> dict[str, str]:
+    """Launch best-effort broker publication outside loop-owned executors."""
+    publisher = threading.Thread(
+        target=_publish_group_history_reconciliation,
+        name="group-history-startup-publisher",
+        daemon=True,
+    )
+    publisher.start()
+    return {"status": "dispatching"}
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -105,6 +134,7 @@ async def lifespan(app: FastAPI):
     initialize_runtime()
     runtime_services = initialize_process_runtime_services(session_factory=SessionLocal)
     app.state.runtime_services = runtime_services
+    trigger_group_history_reconciliation_on_startup()
     if settings.mcp_http_enabled:
         from .interfaces.mcp.http_transport import create_mcp_http_server
 

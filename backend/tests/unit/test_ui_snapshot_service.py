@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 import json
 import sqlite3
+from unittest.mock import Mock
 
 from sqlalchemy import create_engine, func, text
 from sqlalchemy.orm import sessionmaker
@@ -23,7 +24,43 @@ from app.models.scan_result import Scan, ScanResult
 from app.models.stock_universe import StockUniverse
 from app.models.theme import ThemeAlert, ThemeCluster, ThemeMergeSuggestion, ThemeMetrics, ThemePipelineRun
 from app.models.ui_view_snapshot import UIViewSnapshot
-from app.services.ui_snapshot_service import UISnapshotService, _force_forget_snapshot_tables
+from app.services.ui_snapshot_service import (
+    GROUPS_VIEW_KEY,
+    UISnapshotService,
+    _force_forget_snapshot_tables,
+)
+
+
+def test_groups_publication_locks_formula_pointer_through_snapshot_write():
+    service = UISnapshotService(Mock())
+    db = Mock()
+    pointer = MarketRsFormulaPointer(
+        market="US",
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+    )
+    pointer_query = db.query.return_value
+    pointer_query.filter.return_value = pointer_query
+    pointer_query.with_for_update.return_value = pointer_query
+    pointer_query.one_or_none.return_value = pointer
+    service._resolve_groups_source_revision = Mock(return_value="groups-rev")
+    service._build_groups_payload = Mock(return_value={"rankings": []})
+    expected = Mock()
+    service._publish = Mock(return_value=expected)
+
+    result = service._publish_groups_bootstrap_with_db(
+        db,
+        expected_formula_version=BALANCED_RS_FORMULA_VERSION,
+    )
+
+    assert result is expected
+    pointer_query.with_for_update.assert_called_once_with()
+    service._publish.assert_called_once_with(
+        db=db,
+        view_key=GROUPS_VIEW_KEY,
+        variant_key="default",
+        source_revision="groups-rev",
+        payload={"rankings": []},
+    )
 
 
 def test_ui_snapshot_service_marks_outdated_pointer_reads_as_stale_and_prunes_old_revisions():
@@ -490,6 +527,21 @@ def test_publish_groups_bootstrap_serializes_rankings_when_available():
     assert rankings_payload["rankings"][0]["industry_group"] == "Software"
     assert rankings_payload["rankings"][0]["avg_rs_rating_1m"] == 41.5
     assert rankings_payload["rankings"][0]["avg_rs_rating_3m"] == 63.2
+
+    assert (
+        service.publish_groups_bootstrap(
+            expected_formula_version=LEGACY_RS_FORMULA_VERSION,
+            expected_through_date=date(2026, 3, 28),
+        )
+        is None
+    )
+    assert (
+        service.publish_groups_bootstrap(
+            expected_formula_version=BALANCED_RS_FORMULA_VERSION,
+            expected_through_date=date(2026, 3, 27),
+        )
+        is None
+    )
 
 
 def test_ui_snapshot_publish_coerces_nested_dates_to_json_safe_strings():

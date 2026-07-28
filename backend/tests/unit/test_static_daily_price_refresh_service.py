@@ -570,6 +570,80 @@ def test_static_daily_price_refresh_hydrates_sparse_old_rows_for_rrg_startup() -
     assert result["history_incomplete_symbols"] == 1
 
 
+def test_static_daily_price_refresh_continues_when_rrg_calendar_lookup_fails() -> None:
+    session_factory = _sqlite_session_factory()
+
+    with session_factory() as db:
+        db.add(
+            StockUniverse(symbol="OLD.NS", market="IN", is_active=True, market_cap=100.0)
+        )
+        db.add(
+            StockPrice(
+                symbol="OLD.NS",
+                date=date(2026, 6, 4),
+                open=1.0,
+                high=1.0,
+                low=1.0,
+                close=1.0,
+                volume=1000,
+            )
+        )
+        db.commit()
+
+    fetch_calls: list[dict] = []
+
+    class _FailingCalendar:
+        @staticmethod
+        def trading_days(_market, _start, _end):
+            raise RuntimeError("calendar unavailable")
+
+    class _FakeFetcher:
+        def fetch_prices_in_batches(
+            self, symbols, period="2y", start_batch_size=None, market=None
+        ):
+            fetch_calls.append(
+                {
+                    "symbols": list(symbols),
+                    "period": period,
+                    "start_batch_size": start_batch_size,
+                    "market": market,
+                }
+            )
+            return {
+                symbol: {"price_data": SimpleNamespace(empty=False), "has_error": False}
+                for symbol in symbols
+            }
+
+    service = StaticDailyPriceRefreshService(
+        session_factory=session_factory,
+        price_cache=SimpleNamespace(store_batch_in_cache=lambda *_args, **_kwargs: None),
+        fetcher=_FakeFetcher(),
+        batch_size_for_market=lambda _market: 25,
+        calendar_service=_FailingCalendar(),
+        sleep=lambda _seconds: None,
+    )
+
+    result = service.refresh(
+        as_of_date=date(2026, 6, 4),
+        market="IN",
+        ensure_rrg_history=True,
+    )
+
+    assert fetch_calls == [
+        {
+            "symbols": IN_KEY_MARKET_PRICE_SYMBOLS,
+            "period": STATIC_DAILY_PRICE_BOOTSTRAP_PERIOD,
+            "start_batch_size": 25,
+            "market": "IN",
+        }
+    ]
+    assert result["db_fresh_symbols"] == 1
+    assert result["history_incomplete_symbols"] == 0
+    assert result["rrg_history_coverage_status"] == "unverified"
+    assert result["rrg_history_coverage_error"] == "calendar unavailable"
+    assert result["yahoo_fetched_symbols"] == len(IN_KEY_MARKET_PRICE_SYMBOLS)
+
+
 def test_static_daily_price_refresh_uses_date_only_freshness_for_key_market_symbols() -> None:
     session_factory = _sqlite_session_factory()
 

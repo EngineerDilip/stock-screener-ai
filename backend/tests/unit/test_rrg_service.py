@@ -29,6 +29,7 @@ from app.services.rrg_history_provider import (
     StoredGroupRankHistoryProvider,
     USGroupRankHistoryProvider,
 )
+from app.services.group_rank_snapshot_reader import GroupSnapshotWindowResult
 from app.services.rrg_service import RRGService
 from app.services.static_rrg_history_bundle import (
     StaticRRGHistoryBundleService,
@@ -224,6 +225,15 @@ def test_stored_rrg_history_provider_isolates_the_active_formula():
     )
     assert [point[1] for point in legacy_series["Internet Services"]] == [
         10.0 + index for index in range(14)
+    ]
+    _latest, _meta, captured_series = provider.get_all_groups_history(
+        session,
+        market="HK",
+        days=365,
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+    )
+    assert [point[1] for point in captured_series["Internet Services"]] == [
+        70.0 + index for index in range(14)
     ]
 
 
@@ -537,6 +547,53 @@ def test_get_rrg_as_of_date_caps_us_history_series():
     assert payload["date"] == expected_latest.isoformat()
     assert alpha["current"]["date"] != future_week
     assert all(point["date"] != future_week for point in alpha["tail"])
+
+
+def test_stored_history_provider_ignores_invalid_dates_outside_repair_window():
+    dates = _weekly_fridays(13, start=date(2025, 12, 5))
+    invalid_old_date = date(2025, 7, 1)
+    snapshots = {
+        item: [
+            {
+                "industry_group": "Software",
+                "date": item.isoformat(),
+                "rank": 1,
+                "avg_rs_rating": 60.0 + index,
+                "num_stocks": 10,
+            }
+        ]
+        for index, item in enumerate(dates)
+    }
+
+    class _Reader:
+        @staticmethod
+        def available_dates(*_args, **_kwargs):
+            return (invalid_old_date, *dates)
+
+        @staticmethod
+        def inspect_window(*_args, **_kwargs):
+            return GroupSnapshotWindowResult(
+                snapshots=snapshots,
+                errors={invalid_old_date: "wrong Market RS run"},
+            )
+
+    provider = StoredGroupRankHistoryProvider(
+        group_rank_service=object(),
+        market_rs_repository=object(),
+        snapshot_reader=_Reader(),
+    )
+
+    latest, meta, series = provider.get_all_groups_history(
+        object(),
+        market="US",
+        days=400,
+        as_of_date=dates[-1],
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+    )
+
+    assert latest == dates[-1].isoformat()
+    assert meta["Software"]["rank"] == 1
+    assert len(series["Software"]) == 13
 
 
 def test_get_rrg_rejects_unknown_scope_at_service_boundary():

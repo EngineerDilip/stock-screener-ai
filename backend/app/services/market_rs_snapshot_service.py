@@ -39,6 +39,43 @@ class MarketRsSnapshotService:
         formula_version: str = BALANCED_RS_FORMULA_VERSION,
         rebuild_incompatible: bool = False,
     ) -> MarketRsRun:
+        return self._calculate(
+            db,
+            market=market,
+            as_of_date=as_of_date,
+            formula_version=formula_version,
+            rebuild_incompatible=rebuild_incompatible,
+            commit=True,
+        )
+
+    def rebuild_incompatible_staged(
+        self,
+        db: Session,
+        *,
+        market: str,
+        as_of_date: date,
+        formula_version: str = BALANCED_RS_FORMULA_VERSION,
+    ) -> MarketRsRun:
+        """Stage a replacement so a caller can commit related projections atomically."""
+        return self._calculate(
+            db,
+            market=market,
+            as_of_date=as_of_date,
+            formula_version=formula_version,
+            rebuild_incompatible=True,
+            commit=False,
+        )
+
+    def _calculate(
+        self,
+        db: Session,
+        *,
+        market: str,
+        as_of_date: date,
+        formula_version: str,
+        rebuild_incompatible: bool,
+        commit: bool,
+    ) -> MarketRsRun:
         if formula_version != BALANCED_RS_FORMULA_VERSION:
             raise ValueError(
                 "Unsupported Market RS formula for snapshot calculation: "
@@ -65,6 +102,8 @@ class MarketRsSnapshotService:
                 as_of_date=as_of_date,
             )
         except MarketRsInputUnavailable as exc:
+            if not commit:
+                raise
             db.rollback()
             failed = self.repository.start_or_restart(
                 db,
@@ -112,10 +151,15 @@ class MarketRsSnapshotService:
                     "price_basis": BALANCED_RS_PRICE_BASIS,
                 },
             )
-            db.commit()
-            db.refresh(run)
+            if commit:
+                db.commit()
+                db.refresh(run)
+            else:
+                db.flush()
             return run
         except Exception as exc:
+            if not commit:
+                raise
             db.rollback()
             failed = self.repository.start_or_restart(
                 db,

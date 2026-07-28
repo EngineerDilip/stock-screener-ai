@@ -1646,13 +1646,22 @@ def run_smart_price_refresh(
     mode: str,
     market: str | None,
     activity_lifecycle: str | None,
+    ensure_group_history: bool = False,
 ) -> dict:
     from ..services.bulk_data_fetcher import BulkDataFetcher
     from ..services.runtime_preferences_service import is_market_enabled_now
     from ..wiring.bootstrap import get_data_fetch_lock, get_price_cache
     from .market_queues import log_extra, market_tag, normalize_market
 
-    def build_refresh_plan(db, *, mode, market, effective_market, recently_refreshed_filter):
+    def build_refresh_plan(
+        db,
+        *,
+        mode,
+        market,
+        effective_market,
+        recently_refreshed_filter,
+        ensure_group_history,
+    ):
         return build_market_price_refresh_plan(
             db,
             mode=mode,
@@ -1668,6 +1677,7 @@ def run_smart_price_refresh(
                 )
             ),
             recently_refreshed_filter=recently_refreshed_filter,
+            ensure_group_history=ensure_group_history,
         )
 
     activity_reporter = PriceRefreshActivityReporter(
@@ -1716,6 +1726,7 @@ def run_smart_price_refresh(
         mode=mode,
         market=market,
         activity_lifecycle=activity_lifecycle,
+        ensure_group_history=ensure_group_history,
     )
 
 
@@ -1731,6 +1742,7 @@ def smart_refresh_cache(
     mode: str = "auto",
     market: str | None = None,
     activity_lifecycle: str | None = None,
+    ensure_group_history: bool = False,
 ):
     """Run the smart price refresh workflow behind the Celery data-fetch lock."""
     return run_smart_price_refresh(
@@ -1738,6 +1750,7 @@ def smart_refresh_cache(
         mode=mode,
         market=market,
         activity_lifecycle=activity_lifecycle,
+        ensure_group_history=ensure_group_history,
     )
 
 

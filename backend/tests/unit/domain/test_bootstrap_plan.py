@@ -21,9 +21,12 @@ def test_us_bootstrap_plan_includes_us_only_industry_group_seed() -> None:
         "exposure",
         "groups",
         "snapshot",
+        "group_history",
     ]
     assert plan.market_plans[0].stages[1].queue_kind == BootstrapQueueKind.MARKET_JOBS
     assert plan.market_plans[0].stages[3].queue_kind == BootstrapQueueKind.CELERY
+    assert plan.market_plans[0].stages[-1].operation == BootstrapOperation.ENSURE_GROUP_HISTORY
+    assert plan.market_plans[0].stages[2].kwargs["ensure_group_history"] is True
 
 
 def test_non_us_bootstrap_plan_uses_official_universe_without_industry_seed() -> None:
@@ -39,10 +42,12 @@ def test_non_us_bootstrap_plan_uses_official_universe_without_industry_seed() ->
         BootstrapOperation.CALCULATE_MARKET_RS_SNAPSHOT,
         BootstrapOperation.CALCULATE_DAILY_BREADTH_WITH_GAPFILL,
         BootstrapOperation.CALCULATE_MARKET_EXPOSURE,
-        BootstrapOperation.CALCULATE_DAILY_GROUP_RANKINGS_WITH_GAPFILL,
+        BootstrapOperation.CALCULATE_DAILY_GROUP_RANKINGS,
         BootstrapOperation.BUILD_DAILY_SNAPSHOT,
+        BootstrapOperation.ENSURE_GROUP_HISTORY,
     ]
-    assert hk_plan.stages[-1].kwargs == {
+    snapshot_stage = next(stage for stage in hk_plan.stages if stage.key == "snapshot")
+    assert snapshot_stage.kwargs == {
         "market": "HK",
         "universe_name": "market:HK",
         "publish_pointer_key": "latest_published_market:HK",
@@ -54,6 +59,9 @@ def test_non_us_bootstrap_plan_uses_official_universe_without_industry_seed() ->
 
     assert breadth_stage.kwargs["execution_policy"] == "refresh_guarded"
     assert groups_stage.kwargs["execution_policy"] == "refresh_guarded"
+    assert groups_stage.kwargs["strict"] is True
+    assert hk_plan.stages[-1].key == "group_history"
+    assert hk_plan.stages[-1].kwargs["strict"] is True
 
 
 def test_au_bootstrap_plan_refreshes_universe_before_prices_and_fundamentals() -> None:

@@ -51,6 +51,10 @@ class GroupRankReasonCode:
     UNKNOWN = "unknown"
 
 
+class StrictGroupRankingFailure(RuntimeError):
+    """A result-level Group failure that must stop a strict task chain."""
+
+
 _ALLOW_SAME_DAY_WARMUP_BYPASS: ContextVar[bool] = ContextVar(
     "allow_same_day_group_rank_warmup_bypass",
     default=False,
@@ -194,6 +198,7 @@ def calculate_daily_group_rankings(
     market: str | None = None,
     activity_lifecycle: str | None = None,
     execution_policy: str | None = None,
+    strict: bool = False,
 ):
     """
     Calculate and store daily IBD industry group rankings.
@@ -234,11 +239,21 @@ def calculate_daily_group_rankings(
             logger.info(f"Calculating group rankings for: {calc_date}")
         except ValueError as e:
             logger.error(f"Invalid date format: {calculation_date}. Use YYYY-MM-DD")
+            if strict:
+                raise
             return {
                 'error': 'Invalid date format',
                 'reason_code': GroupRankReasonCode.INVALID_DATE,
                 'timestamp': datetime.now().isoformat(),
             }
+    elif activity_lifecycle == "bootstrap":
+        calc_date = calendar_service.last_completed_trading_day(effective_market)
+        logger.info(
+            "Calculating bootstrap group rankings for last completed session "
+            "(%s): %s",
+            effective_market,
+            calc_date,
+        )
     else:
         calc_date = today_local
 
@@ -301,6 +316,8 @@ def calculate_daily_group_rankings(
                 task_id=getattr(getattr(self, "request", None), "id", None),
                 message=str(task_result["error"]),
             )
+            if strict:
+                raise StrictGroupRankingFailure(str(task_result["error"]))
             return task_result
 
         groups_ranked = int(task_result["groups_ranked"])
@@ -330,6 +347,9 @@ def calculate_daily_group_rankings(
             message="Soft time limit exceeded",
         )
         raise
+    except StrictGroupRankingFailure:
+        db.rollback()
+        raise
     except TRANSIENT_TASK_EXCEPTIONS as e:
         db.rollback()
         _mark_market_activity_failed_safely(
@@ -355,6 +375,8 @@ def calculate_daily_group_rankings(
             task_id=getattr(getattr(self, "request", None), "id", None),
             message=str(e),
         )
+        if strict:
+            raise
         error_result = {
             'error': str(e),
             'reason_code': GroupRankReasonCode.UNKNOWN,

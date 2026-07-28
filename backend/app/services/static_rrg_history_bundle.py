@@ -328,9 +328,15 @@ class StaticRRGHistoryProvider:
         market: str,
         days: int,
         as_of_date: date | None = None,
+        formula_version: str | None = None,
     ) -> RRGHistoryResult:
         normalized_market = normalize_static_rrg_market(market)
         if normalized_market != self.state.market:
+            return None, {}, {}
+        if (
+            formula_version is not None
+            and str(formula_version).strip() != self.state.rs_formula_version
+        ):
             return None, {}, {}
         target_date = as_of_date or self.state.through_date
         cutoff = target_date - timedelta(days=days)

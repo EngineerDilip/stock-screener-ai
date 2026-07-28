@@ -75,6 +75,7 @@ class PriceRefreshWorkflow:
         mode: PriceRefreshMode | str = PriceRefreshMode.AUTO,
         market: str | None = None,
         activity_lifecycle: str | None = None,
+        ensure_group_history: bool = False,
     ) -> dict[str, Any]:
         parsed_mode = PriceRefreshMode.parse(mode)
         gateway = self._deps.market_gateway
@@ -147,6 +148,7 @@ class PriceRefreshWorkflow:
                 effective_market=effective_market,
                 activity_lifecycle=activity_lifecycle,
                 log_extra=log_extra,
+                ensure_group_history=ensure_group_history,
             )
             terminal_completion = self._build_terminal_completion(
                 mode=parsed_mode,
@@ -292,6 +294,7 @@ class PriceRefreshWorkflow:
         effective_market: str,
         activity_lifecycle: str,
         log_extra: Mapping[str, Any],
+        ensure_group_history: bool,
     ) -> PriceRefreshPlan:
         gateway = self._deps.market_gateway
         def symbols_needing_auto_refresh(candidate_symbols: Sequence[str]) -> Sequence[str]:
@@ -320,6 +323,7 @@ class PriceRefreshWorkflow:
             mode=mode,
             market=market,
             effective_market=effective_market,
+            ensure_group_history=ensure_group_history,
             recently_refreshed_filter=(
                 symbols_needing_auto_refresh
                 if mode is PriceRefreshMode.AUTO

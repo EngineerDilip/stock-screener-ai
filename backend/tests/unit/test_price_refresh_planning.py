@@ -387,6 +387,81 @@ def test_build_market_price_refresh_plan_owns_universe_and_github_seed(universe_
     assert plan.symbols == ("0005.HK", "^HSI", "2800.HK", "3690.HK", "0941.HK")
 
 
+def test_live_bootstrap_treats_fresh_but_group_history_incomplete_as_no_history(
+    universe_session,
+):
+    from app.models.stock_universe import StockUniverse
+    from app.services.group_history_price_coverage import GroupHistoryPriceCoverage
+    from app.services.price_refresh_plan_builder import build_market_price_refresh_plan
+    from app.services.price_refresh_planning import PriceRefreshJobKind
+
+    universe_session.add(
+        StockUniverse(symbol="AAA", market="US", market_cap=500, is_active=True)
+    )
+    universe_session.add(
+        StockPrice(
+            symbol="AAA",
+            date=date(2026, 6, 8),
+            close=100,
+            adj_close=100,
+            volume=1000,
+        )
+    )
+    universe_session.commit()
+
+    class _CoverageService:
+        def classify(self, db, *, market, through_date, symbols):
+            assert db is universe_session
+            assert market == "US"
+            assert through_date == date(2026, 6, 8)
+            assert symbols == ("AAA", "OLD", "SPY", "IVV")
+            return GroupHistoryPriceCoverage(
+                complete_symbols=(),
+                incomplete_symbols=("AAA", "OLD", "SPY", "IVV"),
+                required_anchor_count=12,
+                available_anchor_counts={
+                    "AAA": 11,
+                    "OLD": 0,
+                    "SPY": 11,
+                    "IVV": 12,
+                },
+            )
+
+    class _HistoryUniverseService:
+        def symbols(self, db, *, market, through_date):
+            assert db is universe_session
+            assert market == "US"
+            assert through_date == date(2026, 6, 8)
+            return ("AAA", "OLD")
+
+    plan = build_market_price_refresh_plan(
+        universe_session,
+        mode="bootstrap",
+        market="US",
+        effective_market="US",
+        normalize_market=lambda market: str(market).upper(),
+        market_calendar_service=_calendar(date(2026, 6, 8)),
+        sync_github_seed=lambda *_args, **_kwargs: {
+            "status": "success",
+            "as_of_date": "2026-06-08",
+        },
+        ensure_group_history=True,
+        group_history_price_coverage_service=_CoverageService(),
+        group_history_price_universe_service=_HistoryUniverseService(),
+    )
+
+    no_history = next(
+        job for job in plan.jobs if job.kind is PriceRefreshJobKind.NO_HISTORY
+    )
+    assert "AAA" in no_history.symbols
+    assert "OLD" in no_history.symbols
+    assert "SPY" in no_history.symbols
+    assert "IVV" in no_history.symbols
+    assert plan.symbol_markets["OLD"] == "US"
+    assert plan.symbol_markets["IVV"] == "US"
+    assert no_history.period == "2y"
+
+
 def test_split_supported_price_symbols_reuses_provider_no_data_policy():
     from app.domain.providers.price_symbol_support import split_supported_price_symbols
 

@@ -11,7 +11,10 @@ from app.domain.relative_strength import (
 from app.infra.db.models.relative_strength import MarketRsRun, StockRsSnapshot
 from app.models.industry import IBDGroupRank, IBDIndustryGroup
 from app.models.stock_universe import StockUniverse
-from app.services.canonical_group_ranking_service import CanonicalGroupRankingService
+from app.services.canonical_group_ranking_service import (
+    CanonicalGroupRankingService,
+    CanonicalGroupRankingUnavailable,
+)
 from app.services.ibd_industry_service import IBDIndustryService
 
 
@@ -244,3 +247,39 @@ def test_canonical_and_legacy_group_rows_coexist(db_session):
         LEGACY_RS_FORMULA_VERSION,
         BALANCED_RS_FORMULA_VERSION,
     }
+
+
+def test_empty_canonical_calculation_preserves_existing_snapshot(db_session):
+    run = _seed_run(
+        db_session,
+        [
+            ("AAA", 90, 50, 50, 100.0),
+            ("BBB", 80, 50, 50, 100.0),
+        ],
+    )
+    _map(db_session, "Too Small", "AAA", "BBB")
+    db_session.add(
+        IBDGroupRank(
+            market="US",
+            industry_group="Legacy Invalid",
+            date=AS_OF,
+            rank=1,
+            avg_rs_rating=75.0,
+            num_stocks=2,
+            num_stocks_rs_above_80=1,
+            rs_formula_version=BALANCED_RS_FORMULA_VERSION,
+            market_rs_run_id=run.id,
+        )
+    )
+    db_session.commit()
+
+    with pytest.raises(CanonicalGroupRankingUnavailable, match="produced no rankings"):
+        CanonicalGroupRankingService().calculate_and_store(
+            db_session,
+            market="US",
+            as_of_date=AS_OF,
+            formula_version=BALANCED_RS_FORMULA_VERSION,
+        )
+
+    rows = db_session.query(IBDGroupRank).all()
+    assert [row.industry_group for row in rows] == ["Legacy Invalid"]
