@@ -679,9 +679,14 @@ class UISnapshotService:
         expected_formula_version: str | None = None,
         expected_through_date: date | None = None,
     ) -> SnapshotResult:
+        pointer = (
+            db.query(MarketRsFormulaPointer)
+            .filter(MarketRsFormulaPointer.market == "US")
+            .with_for_update()
+            .one_or_none()
+        )
         formula_version = expected_formula_version
         if formula_version is not None:
-            pointer = db.get(MarketRsFormulaPointer, "US")
             if pointer is None or str(pointer.formula_version) != formula_version:
                 raise GroupsBootstrapUnavailableError(
                     "Active Group formula changed before publication"
@@ -689,7 +694,6 @@ class UISnapshotService:
 
         if expected_through_date is not None:
             if formula_version is None:
-                pointer = db.get(MarketRsFormulaPointer, "US")
                 if pointer is None:
                     raise GroupsBootstrapUnavailableError(
                         "No active Group formula is available for publication"

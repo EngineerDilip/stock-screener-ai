@@ -267,6 +267,52 @@ def test_execution_service_revalidates_fresh_bootstrap_target_before_finalizatio
     failed.assert_called_once()
 
 
+def test_execution_service_revalidates_target_after_snapshot_publication():
+    from app.services.group_history_execution_service import (
+        GroupHistoryExecutionService,
+    )
+    from app.services.group_history_reconciliation import (
+        GroupHistoryReservation,
+        GroupHistoryTarget,
+    )
+
+    target = GroupHistoryTarget("US", "captured-v1", date(2026, 6, 30))
+    replacement = GroupHistoryTarget("US", "balanced-v1", date(2026, 6, 30))
+    repository = Mock()
+    repository.reserve_finalization.return_value = GroupHistoryReservation(
+        target, "fresh-lease"
+    )
+    repository.owns.return_value = True
+    repository.transition.return_value = True
+    publish = Mock(return_value={"snapshot_revision": "42"})
+    resolved_targets = iter((target, target, replacement))
+    service = GroupHistoryExecutionService(
+        bootstrap_service=Mock(ensure=Mock(return_value=_result(ready=True))),
+        reconciliation_repository=repository,
+        bump_epoch=Mock(),
+        publish_snapshot=publish,
+        mark_started=Mock(),
+        mark_completed=Mock(),
+        mark_failed=Mock(),
+        resolve_current_target=lambda _db, *, market: next(resolved_targets),
+    )
+
+    with pytest.raises(RuntimeError, match="target changed after publication"):
+        service.execute_bootstrap(
+            Mock(),
+            target=target,
+            task_name="ensure_group_history",
+            task_id="task-1",
+        )
+
+    publish.assert_called_once_with(target)
+    transition_statuses = [
+        call.kwargs["status"].value for call in repository.transition.call_args_list
+    ]
+    assert "ready" not in transition_statuses
+    assert "incomplete" in transition_statuses
+
+
 def test_execution_service_records_successful_fresh_bootstrap_as_ready(db_session):
     from app.services.group_history_execution_service import (
         GroupHistoryExecutionService,

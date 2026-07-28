@@ -189,6 +189,20 @@ class GroupHistoryExecutionService:
                         if strict:
                             raise RuntimeError(message)
                         return payload
+                if not self._target_is_current(db, target=target):
+                    superseded = self._record_superseded(
+                        db,
+                        reservation=reservation,
+                        reason="target_changed_after_publication",
+                        expected_statuses={
+                            GroupHistoryReconciliationStatus.FINALIZING
+                        },
+                    )
+                    if fresh_bootstrap and strict:
+                        raise RuntimeError(
+                            "Group history target changed after publication"
+                        )
+                    return superseded
 
             if reservation is not None:
                 expected_status = (
