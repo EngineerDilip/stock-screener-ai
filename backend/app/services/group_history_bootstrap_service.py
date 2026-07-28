@@ -8,6 +8,7 @@ from datetime import date
 from enum import StrEnum
 from typing import Any
 
+from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy.orm import Session
 
 from app.domain.group_history import GroupHistoryTarget
@@ -45,9 +46,7 @@ class GroupHistoryBootstrapResult:
             "formula_version": self.formula_version,
             "processed_dates": [item.isoformat() for item in self.processed_dates],
             "failed_dates": [item.isoformat() for item in self.failed_dates],
-            "errors": {
-                item.isoformat(): message for item, message in self.errors
-            },
+            "errors": {item.isoformat(): message for item, message in self.errors},
             "skipped_valid": self.skipped_valid,
             "policy_counts": dict(self.policy_counts or {}),
             "before": self.before.as_dict(),
@@ -96,9 +95,7 @@ class GroupHistoryBootstrapService:
                 skipped_valid=len(before.valid_dates),
             )
         invalid_dates = set(before.invalid_dates)
-        target_dates = tuple(
-            sorted(set(before.missing_dates) | invalid_dates)
-        )
+        target_dates = tuple(sorted(set(before.missing_dates) | invalid_dates))
         processed: list[date] = []
         failed: list[date] = []
         errors: list[tuple[date, str]] = []
@@ -121,6 +118,9 @@ class GroupHistoryBootstrapService:
                         identity=identity,
                     )
                 db.commit()
+            except SoftTimeLimitExceeded:
+                db.rollback()
+                raise
             except Exception as exc:
                 db.rollback()
                 failed.append(target_date)

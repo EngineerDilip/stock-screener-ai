@@ -305,22 +305,38 @@ def discover_group_history_reconciliation() -> dict[str, str]:
             except Exception as exc:
                 outcomes[market_code] = f"target_failed:{type(exc).__name__}"
                 continue
+            readiness = None
+            existing = repository.load(db, market=target.market)
+            if (
+                existing is not None
+                and existing.target == target
+                and existing.status is GroupHistoryReconciliationStatus.READY
+            ):
+                try:
+                    readiness = _evaluate_group_history_readiness(db, target=target)
+                except Exception as exc:
+                    outcomes[market_code] = f"readiness_failed:{type(exc).__name__}"
+                    continue
+                if readiness.ready:
+                    outcomes[market_code] = "ready"
+                    continue
             reservation = repository.reserve(db, target=target)
             if reservation is None:
                 outcomes[market_code] = "already_queued"
                 continue
-            try:
-                readiness = _evaluate_group_history_readiness(db, target=target)
-            except Exception as exc:
-                repository.transition(
-                    db,
-                    reservation=reservation,
-                    expected_statuses={GroupHistoryReconciliationStatus.QUEUED},
-                    status=GroupHistoryReconciliationStatus.INCOMPLETE,
-                    error=str(exc),
-                )
-                outcomes[market_code] = f"readiness_failed:{type(exc).__name__}"
-                continue
+            if readiness is None:
+                try:
+                    readiness = _evaluate_group_history_readiness(db, target=target)
+                except Exception as exc:
+                    repository.transition(
+                        db,
+                        reservation=reservation,
+                        expected_statuses={GroupHistoryReconciliationStatus.QUEUED},
+                        status=GroupHistoryReconciliationStatus.INCOMPLETE,
+                        error=str(exc),
+                    )
+                    outcomes[market_code] = f"readiness_failed:{type(exc).__name__}"
+                    continue
             dispatch = (
                 _dispatch_group_history_finalization
                 if readiness.ready

@@ -336,6 +336,7 @@ def test_startup_reconciliation_database_ready_queues_finalization(monkeypatch):
 
     db = Mock()
     repository = Mock()
+    repository.load.return_value = None
     repository.reserve.return_value = GroupHistoryReservation(_target(), "lease-1")
     monkeypatch.setattr(module, "SessionLocal", lambda: db)
     monkeypatch.setattr(
@@ -399,6 +400,65 @@ def test_startup_reconciliation_database_ready_queues_finalization(monkeypatch):
         reservation_id="lease-1",
     )
     repository.transition.assert_not_called()
+
+
+def test_startup_reconciliation_ready_marker_is_verified_noop(monkeypatch):
+    from app.tasks import group_history_tasks as module
+    from app.services.group_history_reconciliation import (
+        GroupHistoryReconciliationStatus,
+        GroupHistoryTarget,
+    )
+
+    db = Mock()
+    target = GroupHistoryTarget(
+        market="US",
+        formula_version="balanced-v1",
+        through_date=date(2026, 6, 30),
+    )
+    repository = Mock()
+    repository.load.return_value = SimpleNamespace(
+        target=target,
+        status=GroupHistoryReconciliationStatus.READY,
+    )
+    monkeypatch.setattr(module, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        module,
+        "get_runtime_preferences",
+        lambda _db: SimpleNamespace(
+            enabled_markets=["US"],
+            bootstrap_state="ready",
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "_resolve_current_group_history_target",
+        lambda _db, *, market: target,
+    )
+    evaluate = Mock(return_value=_readiness(ready=True, formula="balanced-v1"))
+    monkeypatch.setattr(module, "_evaluate_group_history_readiness", evaluate)
+    monkeypatch.setattr(
+        module,
+        "GroupHistoryReconciliationRepository",
+        lambda: repository,
+    )
+    repair_dispatch = Mock()
+    finalization_dispatch = Mock()
+    monkeypatch.setattr(
+        module,
+        "_dispatch_group_history_reconciliation",
+        repair_dispatch,
+    )
+    monkeypatch.setattr(
+        module,
+        "_dispatch_group_history_finalization",
+        finalization_dispatch,
+    )
+
+    assert module.discover_group_history_reconciliation.run() == {"US": "ready"}
+    evaluate.assert_called_once_with(db, target=target)
+    repository.reserve.assert_not_called()
+    repair_dispatch.assert_not_called()
+    finalization_dispatch.assert_not_called()
 
 
 def test_dispatch_failure_returns_marker_to_incomplete(monkeypatch):
@@ -541,9 +601,7 @@ def test_ready_reconciliation_dispatches_only_fenced_finalization(monkeypatch):
         through_date=date(2026, 6, 30),
         reservation_id="lease-1",
     )
-    repair_signature.apply_async.assert_called_once_with(
-        link_error=failure_signature
-    )
+    repair_signature.apply_async.assert_called_once_with(link_error=failure_signature)
 
 
 def test_reconciliation_repair_executes_the_captured_target(monkeypatch):

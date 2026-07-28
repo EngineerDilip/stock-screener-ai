@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from datetime import date
 
+from celery.exceptions import SoftTimeLimitExceeded
+import pytest
+
 from app.services.group_history_readiness_service import GroupHistoryReadinessReport
 from app.services.group_history_reconciliation import GroupHistoryTarget
 
@@ -181,6 +184,31 @@ def test_group_history_bootstrap_continues_after_per_date_commit_failure():
     assert db.rollbacks == 1
 
 
+def test_group_history_bootstrap_reraises_soft_time_limit():
+    from app.services.group_history_bootstrap_service import (
+        GroupHistoryBootstrapService,
+    )
+
+    target_date = date(2026, 5, 2)
+    coordinator = _Coordinator()
+    coordinator.ensure_snapshot = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        SoftTimeLimitExceeded()
+    )
+    db = _DB()
+    service = GroupHistoryBootstrapService(
+        readiness_service=_Readiness(
+            _report(ready=False, missing=(target_date,)),
+        ),
+        snapshot_coordinator=coordinator,
+        universe_resolver=_Policies(),
+    )
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        service.ensure(db, target=_target())
+
+    assert db.rollbacks == 1
+
+
 def test_group_history_bootstrap_skips_unsupported_market():
     from app.services.group_history_bootstrap_service import (
         GroupHistoryBootstrapService,
@@ -203,6 +231,7 @@ def test_group_history_bootstrap_preserves_supplied_target_identity():
     from app.services.group_history_bootstrap_service import (
         GroupHistoryBootstrapService,
     )
+
     target = GroupHistoryTarget(
         market="US",
         formula_version="captured-formula-v1",
