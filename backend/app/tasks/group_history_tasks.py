@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 
 from celery import chain
+from celery.exceptions import SoftTimeLimitExceeded
 
 from app.celery_app import celery_app
 from app.database import SessionLocal
@@ -302,11 +303,23 @@ def discover_group_history_reconciliation() -> dict[str, str]:
                     db,
                     market=market_code,
                 )
+            except SoftTimeLimitExceeded:
+                db.rollback()
+                raise
             except Exception as exc:
+                db.rollback()
                 outcomes[market_code] = f"target_failed:{type(exc).__name__}"
                 continue
             readiness = None
-            existing = repository.load(db, market=target.market)
+            try:
+                existing = repository.load(db, market=target.market)
+            except SoftTimeLimitExceeded:
+                db.rollback()
+                raise
+            except Exception as exc:
+                db.rollback()
+                outcomes[market_code] = f"marker_failed:{type(exc).__name__}"
+                continue
             if (
                 existing is not None
                 and existing.target == target
@@ -314,20 +327,36 @@ def discover_group_history_reconciliation() -> dict[str, str]:
             ):
                 try:
                     readiness = _evaluate_group_history_readiness(db, target=target)
+                except SoftTimeLimitExceeded:
+                    db.rollback()
+                    raise
                 except Exception as exc:
+                    db.rollback()
                     outcomes[market_code] = f"readiness_failed:{type(exc).__name__}"
                     continue
                 if readiness.ready:
                     outcomes[market_code] = "ready"
                     continue
-            reservation = repository.reserve(db, target=target)
+            try:
+                reservation = repository.reserve(db, target=target)
+            except SoftTimeLimitExceeded:
+                db.rollback()
+                raise
+            except Exception as exc:
+                db.rollback()
+                outcomes[market_code] = f"reserve_failed:{type(exc).__name__}"
+                continue
             if reservation is None:
                 outcomes[market_code] = "already_queued"
                 continue
             if readiness is None:
                 try:
                     readiness = _evaluate_group_history_readiness(db, target=target)
+                except SoftTimeLimitExceeded:
+                    db.rollback()
+                    raise
                 except Exception as exc:
+                    db.rollback()
                     repository.transition(
                         db,
                         reservation=reservation,
@@ -349,7 +378,11 @@ def discover_group_history_reconciliation() -> dict[str, str]:
                     through_date=target.through_date,
                     reservation_id=reservation.reservation_id,
                 )
+            except SoftTimeLimitExceeded:
+                db.rollback()
+                raise
             except Exception as exc:
+                db.rollback()
                 repository.transition(
                     db,
                     reservation=reservation,

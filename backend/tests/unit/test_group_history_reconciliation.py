@@ -5,6 +5,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+from celery.exceptions import SoftTimeLimitExceeded
+import pytest
 from sqlalchemy.orm import sessionmaker
 
 
@@ -459,6 +461,85 @@ def test_startup_reconciliation_ready_marker_is_verified_noop(monkeypatch):
     repository.reserve.assert_not_called()
     repair_dispatch.assert_not_called()
     finalization_dispatch.assert_not_called()
+
+
+def test_startup_reconciliation_reserve_failure_isolated_per_market(monkeypatch):
+    from app.tasks import group_history_tasks as module
+    from app.services.group_history_reconciliation import GroupHistoryTarget
+
+    db = Mock()
+    repository = Mock()
+    repository.load.return_value = None
+    repository.reserve.side_effect = [RuntimeError("database unavailable"), None]
+    monkeypatch.setattr(module, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        module,
+        "get_runtime_preferences",
+        lambda _db: SimpleNamespace(
+            enabled_markets=["US", "HK"],
+            bootstrap_state="ready",
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "_resolve_current_group_history_target",
+        lambda _db, *, market: GroupHistoryTarget(
+            market=market,
+            formula_version="balanced-v1",
+            through_date=date(2026, 6, 30),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "GroupHistoryReconciliationRepository",
+        lambda: repository,
+    )
+
+    assert module.discover_group_history_reconciliation.run() == {
+        "US": "reserve_failed:RuntimeError",
+        "HK": "already_queued",
+    }
+    db.rollback.assert_called_once()
+    db.close.assert_called_once()
+
+
+def test_startup_reconciliation_reraises_soft_timeout(monkeypatch):
+    from app.tasks import group_history_tasks as module
+    from app.services.group_history_reconciliation import GroupHistoryTarget
+
+    db = Mock()
+    repository = Mock()
+    repository.load.return_value = None
+    repository.reserve.side_effect = SoftTimeLimitExceeded()
+    monkeypatch.setattr(module, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        module,
+        "get_runtime_preferences",
+        lambda _db: SimpleNamespace(
+            enabled_markets=["US"],
+            bootstrap_state="ready",
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "_resolve_current_group_history_target",
+        lambda _db, *, market: GroupHistoryTarget(
+            market=market,
+            formula_version="balanced-v1",
+            through_date=date(2026, 6, 30),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "GroupHistoryReconciliationRepository",
+        lambda: repository,
+    )
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        module.discover_group_history_reconciliation.run()
+
+    db.rollback.assert_called_once()
+    db.close.assert_called_once()
 
 
 def test_dispatch_failure_returns_marker_to_incomplete(monkeypatch):
