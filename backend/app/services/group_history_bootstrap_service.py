@@ -14,6 +14,7 @@ from app.domain.relative_strength import GroupSnapshotIdentity
 from app.services.group_history_readiness_service import (
     GroupHistoryReadinessReport,
 )
+from app.services.group_history_reconciliation import GroupHistoryTarget
 
 
 class GroupHistoryBootstrapStatus(StrEnum):
@@ -72,20 +73,29 @@ class GroupHistoryBootstrapService:
         self,
         db: Session,
         *,
-        market: str,
-        through_date: date,
+        target: GroupHistoryTarget | None = None,
+        market: str | None = None,
+        through_date: date | None = None,
     ) -> GroupHistoryBootstrapResult:
-        normalized_market = str(market or "").strip().upper()
-        before = self._readiness_service.evaluate(
-            db,
-            market=normalized_market,
-            through_date=through_date,
-        )
+        if target is not None:
+            normalized_market = target.market
+            resolved_through_date = target.through_date
+            before = self._readiness_service.evaluate(db, target=target)
+        else:
+            normalized_market = str(market or "").strip().upper()
+            if through_date is None:
+                raise ValueError("Group history through date is required")
+            resolved_through_date = through_date
+            before = self._readiness_service.evaluate(
+                db,
+                market=normalized_market,
+                through_date=resolved_through_date,
+            )
         if not before.supported:
             return GroupHistoryBootstrapResult(
                 status=GroupHistoryBootstrapStatus.SKIPPED,
                 market=normalized_market,
-                through_date=through_date,
+                through_date=resolved_through_date,
                 formula_version=before.formula_version,
                 before=before,
                 after=before,
@@ -94,13 +104,18 @@ class GroupHistoryBootstrapService:
             return GroupHistoryBootstrapResult(
                 status=GroupHistoryBootstrapStatus.READY,
                 market=normalized_market,
-                through_date=through_date,
-                formula_version=before.formula_version,
+                through_date=resolved_through_date,
+                formula_version=(
+                    target.formula_version if target is not None else before.formula_version
+                ),
                 before=before,
                 after=before,
                 skipped_valid=len(before.valid_dates),
             )
-        if before.formula_version is None:
+        formula_version = (
+            target.formula_version if target is not None else before.formula_version
+        )
+        if formula_version is None:
             raise RuntimeError("Group history readiness did not resolve an RS formula")
 
         invalid_dates = set(before.invalid_dates)
@@ -115,7 +130,7 @@ class GroupHistoryBootstrapService:
             identity = GroupSnapshotIdentity(
                 normalized_market,
                 target_date,
-                before.formula_version,
+                formula_version,
             )
             try:
                 if target_date in invalid_dates:
@@ -141,10 +156,14 @@ class GroupHistoryBootstrapService:
             if policy:
                 policies[policy] += 1
 
-        after = self._readiness_service.evaluate(
-            db,
-            market=normalized_market,
-            through_date=through_date,
+        after = (
+            self._readiness_service.evaluate(db, target=target)
+            if target is not None
+            else self._readiness_service.evaluate(
+                db,
+                market=normalized_market,
+                through_date=resolved_through_date,
+            )
         )
         return GroupHistoryBootstrapResult(
             status=(
@@ -153,8 +172,8 @@ class GroupHistoryBootstrapService:
                 else GroupHistoryBootstrapStatus.INCOMPLETE
             ),
             market=normalized_market,
-            through_date=through_date,
-            formula_version=before.formula_version,
+            through_date=resolved_through_date,
+            formula_version=formula_version,
             before=before,
             after=after,
             processed_dates=tuple(processed),

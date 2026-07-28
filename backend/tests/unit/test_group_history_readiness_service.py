@@ -150,3 +150,35 @@ def test_rrg_market_requires_twelve_provider_usable_weeks() -> None:
     assert report.rrg_usable_weeks == 11
     assert report.rrg_plottable_series == 0
     assert report.ready is False
+
+
+def test_readiness_uses_supplied_target_without_resolving_active_formula() -> None:
+    from app.services.group_history_readiness_service import (
+        GroupHistoryReadinessService,
+    )
+    from app.services.group_history_reconciliation import GroupHistoryTarget
+
+    current = date(2026, 6, 30)
+
+    class _UnexpectedFormulaLookup:
+        @staticmethod
+        def active_formula(*_args, **_kwargs):
+            raise AssertionError("target formula must be authoritative")
+
+    service = GroupHistoryReadinessService(
+        calendar_service=_Calendar(_reference_days(current)),
+        snapshot_reader=_Reader(),
+        market_rs_repository=_UnexpectedFormulaLookup(),
+        rrg_history_provider=_RRGProvider(weekly_points=12),
+    )
+    target = GroupHistoryTarget(
+        market="US",
+        formula_version="captured-formula-v1",
+        through_date=current,
+    )
+
+    report = service.evaluate(object(), target=target)
+
+    assert report.formula_version == "captured-formula-v1"
+    assert report.market == "US"
+    assert report.through_date == current

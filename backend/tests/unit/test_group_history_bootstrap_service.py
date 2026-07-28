@@ -149,3 +149,36 @@ def test_group_history_bootstrap_skips_unsupported_market():
     assert result.status is GroupHistoryBootstrapStatus.SKIPPED
     assert coordinator.ensure_calls == []
     assert coordinator.repair_calls == []
+
+
+def test_group_history_bootstrap_preserves_supplied_target_identity():
+    from app.services.group_history_bootstrap_service import (
+        GroupHistoryBootstrapService,
+    )
+    from app.services.group_history_reconciliation import GroupHistoryTarget
+
+    target = GroupHistoryTarget(
+        market="US",
+        formula_version="captured-formula-v1",
+        through_date=date(2026, 6, 30),
+    )
+
+    class _TargetReadiness:
+        def __init__(self):
+            self.targets = []
+
+        def evaluate(self, _db, *, target):
+            self.targets.append(target)
+            return _report(ready=True)
+
+    readiness = _TargetReadiness()
+    result = GroupHistoryBootstrapService(
+        readiness_service=readiness,
+        snapshot_coordinator=_Coordinator(),
+        universe_resolver=_Policies(),
+    ).ensure(_DB(), target=target)
+
+    assert readiness.targets == [target]
+    assert result.market == target.market
+    assert result.formula_version == target.formula_version
+    assert result.through_date == target.through_date

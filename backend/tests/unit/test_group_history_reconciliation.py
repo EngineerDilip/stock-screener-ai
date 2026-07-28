@@ -5,6 +5,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+from sqlalchemy.orm import sessionmaker
+
 
 def test_reconciliation_marker_reservation_is_idempotent_and_resumable(db_session):
     from app.services.group_history_reconciliation import (
@@ -46,6 +48,56 @@ def test_reconciliation_marker_reservation_is_idempotent_and_resumable(db_sessio
     marker = repository.load(db_session, market="US")
     assert marker.status is GroupHistoryReconciliationStatus.QUEUED
     assert marker.error is None
+
+
+def test_existing_marker_compare_and_swap_allows_only_one_stale_reservation(
+    db_session,
+):
+    from app.models.app_settings import AppSetting
+    from app.services.group_history_reconciliation import (
+        GroupHistoryReconciliationRepository,
+        GroupHistoryReconciliationStatus,
+        GroupHistoryTarget,
+    )
+
+    repository = GroupHistoryReconciliationRepository()
+    target = GroupHistoryTarget(
+        market="US",
+        formula_version="balanced-v1",
+        through_date=date(2026, 6, 30),
+    )
+    repository.mark(
+        db_session,
+        target=target,
+        status=GroupHistoryReconciliationStatus.INCOMPLETE,
+    )
+    setting = (
+        db_session.query(AppSetting)
+        .filter(AppSetting.key == repository.key("US"))
+        .one()
+    )
+    observed_value = setting.value
+    observed_marker = repository.load(db_session, market="US")
+
+    class _StaleObservationRepository(GroupHistoryReconciliationRepository):
+        def load(self, _db, *, market):
+            assert market == "US"
+            return observed_marker
+
+        def _load_record(self, _db, *, market):
+            assert market == "US"
+            return observed_marker, observed_value
+
+    Session = sessionmaker(bind=db_session.get_bind())
+    first = Session()
+    second = Session()
+    try:
+        contenders = _StaleObservationRepository()
+        assert contenders.reserve(first, target=target) is True
+        assert contenders.reserve(second, target=target) is False
+    finally:
+        first.close()
+        second.close()
 
 
 def test_stale_active_marker_can_be_reserved_after_interrupted_worker(db_session):

@@ -20,6 +20,7 @@ from app.services.group_rank_snapshot_reader import (
     GroupRankSnapshotReader,
     GroupSnapshotIntegrityError,
 )
+from app.services.group_history_reconciliation import GroupHistoryTarget
 from app.services.market_calendar_service import MarketCalendarService
 from app.services.rrg_service import (
     DEFAULT_LOOKBACK_DAYS,
@@ -94,12 +95,20 @@ class GroupHistoryReadinessService:
         self,
         db: Session,
         *,
-        market: str,
+        target: GroupHistoryTarget | None = None,
+        market: str | None = None,
         through_date: date | None = None,
     ) -> GroupHistoryReadinessReport:
-        normalized_market = str(market or "").strip().upper()
-        through = through_date or self._calendar_service.last_completed_trading_day(
-            normalized_market
+        normalized_market = (
+            target.market
+            if target is not None
+            else str(market or "").strip().upper()
+        )
+        through = (
+            target.through_date
+            if target is not None
+            else through_date
+            or self._calendar_service.last_completed_trading_day(normalized_market)
         )
         catalog_entry = get_market_catalog().get(normalized_market)
         if not catalog_entry.capabilities.group_rankings:
@@ -112,9 +121,13 @@ class GroupHistoryReadinessService:
                 reason="group_rankings_not_supported",
             )
 
-        formula_version = self._market_rs_repository.active_formula(
-            db,
-            market=normalized_market,
+        formula_version = (
+            target.formula_version
+            if target is not None
+            else self._market_rs_repository.active_formula(
+                db,
+                market=normalized_market,
+            )
         )
         start_date = through - timedelta(
             days=DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS

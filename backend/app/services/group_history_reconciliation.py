@@ -8,6 +8,7 @@ from enum import StrEnum
 import json
 from typing import Any
 
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -31,6 +32,23 @@ class GroupHistoryReconciliationStatus(StrEnum):
 
 
 @dataclass(frozen=True)
+class GroupHistoryTarget:
+    market: str
+    formula_version: str
+    through_date: date
+
+    def __post_init__(self) -> None:
+        market = str(self.market or "").strip().upper()
+        formula = str(self.formula_version or "").strip()
+        if not market:
+            raise ValueError("Group history target market is required")
+        if not formula:
+            raise ValueError("Group history target formula is required")
+        object.__setattr__(self, "market", market)
+        object.__setattr__(self, "formula_version", formula)
+
+
+@dataclass(frozen=True)
 class GroupHistoryReconciliationMarker:
     market: str
     formula_version: str
@@ -39,6 +57,14 @@ class GroupHistoryReconciliationMarker:
     updated_at: str
     counts: dict[str, Any] | None = None
     error: str | None = None
+
+    @property
+    def target(self) -> GroupHistoryTarget:
+        return GroupHistoryTarget(
+            market=self.market,
+            formula_version=self.formula_version,
+            through_date=self.through_date,
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -64,21 +90,30 @@ class GroupHistoryReconciliationRepository:
         *,
         market: str,
     ) -> GroupHistoryReconciliationMarker | None:
+        marker, _encoded = self._load_record(db, market=market)
+        return marker
+
+    def _load_record(
+        self,
+        db: Session,
+        *,
+        market: str,
+    ) -> tuple[GroupHistoryReconciliationMarker | None, str | None]:
         setting = (
             db.query(AppSetting)
             .filter(AppSetting.key == self.key(market))
             .one_or_none()
         )
         if setting is None:
-            return None
+            return None, None
         try:
             payload = json.loads(setting.value)
             if (
                 int(payload.get("schema_version"))
                 != GROUP_HISTORY_RECONCILIATION_SCHEMA_VERSION
             ):
-                return None
-            return GroupHistoryReconciliationMarker(
+                return None, setting.value
+            marker = GroupHistoryReconciliationMarker(
                 market=str(payload["market"]).upper(),
                 formula_version=str(payload["formula_version"]),
                 through_date=date.fromisoformat(str(payload["through_date"])),
@@ -91,23 +126,32 @@ class GroupHistoryReconciliationRepository:
                 ),
                 error=(str(payload["error"]) if payload.get("error") else None),
             )
+            return marker, setting.value
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            return None
+            return None, setting.value
 
     def reserve(
         self,
         db: Session,
         *,
-        market: str,
-        formula_version: str,
-        through_date: date,
+        target: GroupHistoryTarget | None = None,
+        market: str | None = None,
+        formula_version: str | None = None,
+        through_date: date | None = None,
     ) -> bool:
-        normalized_market = str(market).upper()
-        existing = self.load(db, market=normalized_market)
+        resolved = self._target(
+            target=target,
+            market=market,
+            formula_version=formula_version,
+            through_date=through_date,
+        )
+        existing, observed_value = self._load_record(
+            db,
+            market=resolved.market,
+        )
         if (
             existing is not None
-            and existing.formula_version == formula_version
-            and existing.through_date == through_date
+            and existing.target == resolved
             and existing.status
             in {
                 GroupHistoryReconciliationStatus.QUEUED,
@@ -116,14 +160,41 @@ class GroupHistoryReconciliationRepository:
             and not self._is_stale(existing)
         ):
             return False
-        try:
-            self.mark(
-                db,
-                market=normalized_market,
-                formula_version=formula_version,
-                through_date=through_date,
-                status=GroupHistoryReconciliationStatus.QUEUED,
+
+        marker = self._marker(
+            target=resolved,
+            status=GroupHistoryReconciliationStatus.QUEUED,
+        )
+        encoded = json.dumps(marker.as_dict(), sort_keys=True)
+        key = self.key(resolved.market)
+        if observed_value is not None:
+            result = db.execute(
+                update(AppSetting)
+                .where(
+                    AppSetting.key == key,
+                    AppSetting.value == observed_value,
+                )
+                .values(
+                    value=encoded,
+                    category=GROUP_HISTORY_RECONCILIATION_CATEGORY,
+                )
             )
+            if result.rowcount != 1:
+                db.rollback()
+                return False
+            db.commit()
+            return True
+
+        try:
+            db.add(
+                AppSetting(
+                    key=key,
+                    value=encoded,
+                    category=GROUP_HISTORY_RECONCILIATION_CATEGORY,
+                    description=f"Group history repair state for {resolved.market}",
+                )
+            )
+            db.commit()
         except IntegrityError:
             db.rollback()
             return False
@@ -146,36 +217,39 @@ class GroupHistoryReconciliationRepository:
         self,
         db: Session,
         *,
-        market: str,
-        formula_version: str,
-        through_date: date,
+        target: GroupHistoryTarget | None = None,
+        market: str | None = None,
+        formula_version: str | None = None,
+        through_date: date | None = None,
         status: GroupHistoryReconciliationStatus,
         counts: dict[str, Any] | None = None,
         error: str | None = None,
     ) -> GroupHistoryReconciliationMarker:
-        normalized_market = str(market).upper()
-        marker = GroupHistoryReconciliationMarker(
-            market=normalized_market,
+        resolved = self._target(
+            target=target,
+            market=market,
             formula_version=formula_version,
             through_date=through_date,
+        )
+        marker = self._marker(
+            target=resolved,
             status=status,
-            updated_at=datetime.now(timezone.utc).isoformat(),
             counts=counts,
             error=error,
         )
-        key = self.key(normalized_market)
+        key = self.key(resolved.market)
         setting = db.query(AppSetting).filter(AppSetting.key == key).one_or_none()
         encoded = json.dumps(marker.as_dict(), sort_keys=True)
         if setting is None:
             db.add(
                 AppSetting(
-                    key=key,
-                    value=encoded,
-                    category=GROUP_HISTORY_RECONCILIATION_CATEGORY,
-                    description=(
-                        f"Group history repair state for {normalized_market}"
-                    ),
-                )
+                key=key,
+                value=encoded,
+                category=GROUP_HISTORY_RECONCILIATION_CATEGORY,
+                description=(
+                    f"Group history repair state for {resolved.market}"
+                ),
+            )
             )
         else:
             setting.value = encoded
@@ -183,10 +257,47 @@ class GroupHistoryReconciliationRepository:
         db.commit()
         return marker
 
+    @staticmethod
+    def _target(
+        *,
+        target: GroupHistoryTarget | None,
+        market: str | None,
+        formula_version: str | None,
+        through_date: date | None,
+    ) -> GroupHistoryTarget:
+        if target is not None:
+            return target
+        if through_date is None:
+            raise ValueError("Group history target through date is required")
+        return GroupHistoryTarget(
+            market=str(market or ""),
+            formula_version=str(formula_version or ""),
+            through_date=through_date,
+        )
+
+    @staticmethod
+    def _marker(
+        *,
+        target: GroupHistoryTarget,
+        status: GroupHistoryReconciliationStatus,
+        counts: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> GroupHistoryReconciliationMarker:
+        return GroupHistoryReconciliationMarker(
+            market=target.market,
+            formula_version=target.formula_version,
+            through_date=target.through_date,
+            status=status,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+            counts=counts,
+            error=error,
+        )
+
 
 __all__ = [
     "GROUP_HISTORY_RECONCILIATION_SCHEMA_VERSION",
     "GROUP_HISTORY_RECONCILIATION_ACTIVE_TIMEOUT",
+    "GroupHistoryTarget",
     "GroupHistoryReconciliationMarker",
     "GroupHistoryReconciliationRepository",
     "GroupHistoryReconciliationStatus",
