@@ -70,6 +70,12 @@ STATIC_EXPORT_NO_CURRENT_ARTIFACT_EXIT_CODE = 79
 STATIC_RS_BENCHMARK_HYDRATION_PERIOD = "2y"
 STATIC_RS_BENCHMARK_HYDRATION_ATTEMPTS = 2
 STATIC_RS_BENCHMARK_RESOLUTION_EXCEPTION = "benchmark_resolution_exception"
+STATIC_MARKET_RS_NON_CURRENT_ARTIFACT_REASON_CODES = frozenset(
+    {
+        "benchmark_adjusted_anchor_missing",
+        "current_adjusted_price_coverage_below_threshold",
+    }
+)
 SUPPORTED_RS_FORMULA_VERSIONS = frozenset(
     {BALANCED_RS_FORMULA_VERSION, LEGACY_RS_FORMULA_VERSION}
 )
@@ -185,6 +191,15 @@ def _static_market_rs_ready(result: Any) -> bool:
     return (
         result.get("status") == "completed"
         and result.get("market_rs_run_id") is not None
+    )
+
+
+def _static_market_rs_non_current_artifact(result: Any) -> bool:
+    return (
+        isinstance(result, dict)
+        and result.get("status") == "failed"
+        and result.get("reason_code")
+        in STATIC_MARKET_RS_NON_CURRENT_ARTIFACT_REASON_CODES
     )
 
 
@@ -513,6 +528,8 @@ def _prepare_balanced_static_rs(*, market: str, as_of_date: date) -> dict[str, A
             and result.get("reason_code") == "benchmark_adjusted_anchor_missing"
         ):
             return {**result, "market_rs_run_id": None}
+    if _static_market_rs_non_current_artifact(result):
+        return {**result, "market_rs_run_id": None}
     if (
         not isinstance(result, dict)
         or result.get("status") != "completed"

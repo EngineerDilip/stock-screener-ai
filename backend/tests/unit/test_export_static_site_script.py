@@ -268,9 +268,19 @@ def test_run_daily_refresh_activates_balanced_rs_before_static_consumers(
             assert formula_version == BALANCED_RS_FORMULA_VERSION
             events.append("formula_activate")
 
+    class FakeBenchmarkCache:
+        def resolve_benchmark_bundle(self, **_kwargs):
+            return SimpleNamespace(
+                bundle=SimpleNamespace(benchmark_symbol="SPY"),
+                error_payload=lambda **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("available benchmark must not build an error")
+                ),
+            )
+
     real_helper = _stub_balanced_static_rs_preparation
     if real_helper is not None:
         monkeypatch.setattr(export_script, "_prepare_balanced_static_rs", real_helper)
+    monkeypatch.setattr(export_script, "get_benchmark_cache", lambda: FakeBenchmarkCache())
     monkeypatch.setattr(export_script, "SessionLocal", fake_session)
     monkeypatch.setattr(
         export_script,
@@ -749,6 +759,127 @@ def test_prepare_balanced_static_rs_hydrates_fallback_after_anchor_gap(
         "formula_commit",
     ]
     assert result["market_rs_run_id"] == 42
+
+
+def test_prepare_balanced_static_rs_reports_price_coverage_gap_without_activation(
+    monkeypatch,
+    _stub_balanced_static_rs_preparation,
+):
+    events: list[str] = []
+
+    class FakeBenchmarkCache:
+        def resolve_benchmark_bundle(self, **_kwargs):
+            return SimpleNamespace(
+                bundle=SimpleNamespace(
+                    benchmark_symbol="^GDAXI",
+                    candidate_symbols=("^GDAXI",),
+                ),
+                error_payload=lambda **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("available benchmark must not build an error")
+                ),
+            )
+
+    class FakeMarketRsRepository:
+        def activate_formula(self, _db, *, market, formula_version):
+            events.append(f"activate:{market}:{formula_version}")
+
+    @contextmanager
+    def fake_session():
+        yield SimpleNamespace(commit=lambda: events.append("formula_commit"))
+
+    real_helper = _stub_balanced_static_rs_preparation
+    if real_helper is not None:
+        monkeypatch.setattr(export_script, "_prepare_balanced_static_rs", real_helper)
+    monkeypatch.setattr(export_script, "get_benchmark_cache", lambda: FakeBenchmarkCache())
+    monkeypatch.setattr(export_script, "SessionLocal", fake_session)
+    monkeypatch.setattr(
+        export_script,
+        "MarketRsRunRepository",
+        FakeMarketRsRepository,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        market_rs_tasks,
+        "calculate_market_rs_snapshot",
+        SimpleNamespace(
+            run=lambda **kwargs: {
+                "status": "failed",
+                "market": kwargs["market"],
+                "as_of_date": kwargs["calculation_date"],
+                "formula_version": kwargs["formula_version"],
+                "reason_code": "current_adjusted_price_coverage_below_threshold",
+                "diagnostics": {
+                    "current_price_coverage": 0.8434065934065934,
+                    "minimum_current_price_coverage": 0.88,
+                    "current_prices_available": 1228,
+                    "expected_symbol_count": 1456,
+                },
+            }
+        ),
+    )
+
+    result = export_script._prepare_balanced_static_rs(
+        market="DE",
+        as_of_date=date(2026, 7, 27),
+    )
+
+    assert events == []
+    assert result == {
+        "status": "failed",
+        "market": "DE",
+        "as_of_date": "2026-07-27",
+        "formula_version": BALANCED_RS_FORMULA_VERSION,
+        "reason_code": "current_adjusted_price_coverage_below_threshold",
+        "diagnostics": {
+            "current_price_coverage": 0.8434065934065934,
+            "minimum_current_price_coverage": 0.88,
+            "current_prices_available": 1228,
+            "expected_symbol_count": 1456,
+        },
+        "market_rs_run_id": None,
+    }
+
+
+def test_prepare_balanced_static_rs_still_raises_unexpected_failed_result(
+    monkeypatch,
+    _stub_balanced_static_rs_preparation,
+):
+    class FakeBenchmarkCache:
+        def resolve_benchmark_bundle(self, **_kwargs):
+            return SimpleNamespace(
+                bundle=SimpleNamespace(
+                    benchmark_symbol="^GDAXI",
+                    candidate_symbols=("^GDAXI",),
+                ),
+                error_payload=lambda **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("available benchmark must not build an error")
+                ),
+            )
+
+    real_helper = _stub_balanced_static_rs_preparation
+    if real_helper is not None:
+        monkeypatch.setattr(export_script, "_prepare_balanced_static_rs", real_helper)
+    monkeypatch.setattr(export_script, "get_benchmark_cache", lambda: FakeBenchmarkCache())
+    monkeypatch.setattr(
+        market_rs_tasks,
+        "calculate_market_rs_snapshot",
+        SimpleNamespace(
+            run=lambda **kwargs: {
+                "status": "failed",
+                "market": kwargs["market"],
+                "as_of_date": kwargs["calculation_date"],
+                "formula_version": kwargs["formula_version"],
+                "reason_code": "calculation_failed",
+                "diagnostics": {"error": "database invariant failed"},
+            }
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="Balanced Market RS preparation failed"):
+        export_script._prepare_balanced_static_rs(
+            market="DE",
+            as_of_date=date(2026, 7, 27),
+        )
 
 
 def test_prepare_balanced_static_rs_reports_missing_required_benchmark_anchor(
