@@ -46,6 +46,44 @@ class _Reader:
             }
         ]
 
+    def load_window(
+        self,
+        db,
+        *,
+        market,
+        formula_version,
+        dates,
+        **kwargs,
+    ):
+        from app.services.group_rank_snapshot_reader import (
+            GroupSnapshotWindowIntegrityError,
+        )
+
+        snapshots = {}
+        errors = {}
+        for target_date in dates:
+            try:
+                rows = self.load_exact(
+                    db,
+                    identity=GroupSnapshotIdentity(
+                        market,
+                        target_date,
+                        formula_version,
+                    ),
+                    **kwargs,
+                )
+            except GroupSnapshotIntegrityError as exc:
+                errors[target_date] = str(exc)
+                continue
+            if rows:
+                snapshots[target_date] = rows
+        if errors:
+            raise GroupSnapshotWindowIntegrityError(
+                snapshots=snapshots,
+                errors=errors,
+            )
+        return snapshots
+
 
 class _RRGProvider:
     def __init__(self, weekly_points=12):

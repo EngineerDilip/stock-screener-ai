@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session
 
 from app.analysis.rrg_weekly import bucket_rrg_weekly
 from app.domain.markets import get_market_catalog
-from app.domain.relative_strength import GroupSnapshotIdentity
 from app.services.group_rank_history_policy import (
     CALENDAR_DAY_GROUP_RANK_CHANGE_WINDOWS,
     CALENDAR_DAY_GROUP_RANK_LOOKUP_TOLERANCE_DAYS,
@@ -18,7 +17,7 @@ from app.services.group_rank_history_policy import (
 )
 from app.services.group_rank_snapshot_reader import (
     GroupRankSnapshotReader,
-    GroupSnapshotIntegrityError,
+    GroupSnapshotWindowIntegrityError,
 )
 from app.services.group_history_reconciliation import GroupHistoryTarget
 from app.services.market_calendar_service import MarketCalendarService
@@ -143,30 +142,28 @@ class GroupHistoryReadinessService:
                 )
             )
         )
-        valid: list[date] = []
-        missing: list[date] = []
-        invalid: list[date] = []
-        invalid_reasons: list[tuple[date, str]] = []
-        for target_date in desired_dates:
-            identity = GroupSnapshotIdentity(
-                normalized_market,
-                target_date,
-                formula_version,
+        invalid_by_date: dict[date, str] = {}
+        try:
+            snapshots = self._snapshot_reader.load_window(
+                db,
+                market=normalized_market,
+                formula_version=formula_version,
+                dates=desired_dates,
+                include_top_symbol_names=False,
             )
-            try:
-                rows = self._snapshot_reader.load_exact(
-                    db,
-                    identity=identity,
-                    include_top_symbol_names=False,
-                )
-            except GroupSnapshotIntegrityError as exc:
-                invalid.append(target_date)
-                invalid_reasons.append((target_date, str(exc)))
-                continue
-            if rows:
-                valid.append(target_date)
-            else:
-                missing.append(target_date)
+        except GroupSnapshotWindowIntegrityError as exc:
+            snapshots = exc.snapshots
+            invalid_by_date = exc.errors
+        valid = [item for item in desired_dates if item in snapshots]
+        invalid = [item for item in desired_dates if item in invalid_by_date]
+        missing = [
+            item
+            for item in desired_dates
+            if item not in snapshots and item not in invalid_by_date
+        ]
+        invalid_reasons = [
+            (item, invalid_by_date[item]) for item in invalid
+        ]
 
         rank_change_ready = self._rank_change_readiness(
             through_date=through,
