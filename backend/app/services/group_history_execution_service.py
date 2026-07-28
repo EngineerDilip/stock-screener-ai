@@ -348,7 +348,7 @@ class GroupHistoryExecutionService:
                     reason="target_changed_before_finalization",
                     strict=strict,
                 )
-            reservation = self._reconciliation_repository.reserve(
+            reservation = self._reconciliation_repository.reserve_finalization(
                 db,
                 target=target,
             )
@@ -360,11 +360,9 @@ class GroupHistoryExecutionService:
                 )
 
         assert reservation is not None
-        expected_status = (
-            GroupHistoryReconciliationStatus.QUEUED
-            if fresh_bootstrap
-            else GroupHistoryReconciliationStatus.REPAIRING
-        )
+        expected_status = GroupHistoryReconciliationStatus.FINALIZING
+        if not fresh_bootstrap:
+            expected_status = GroupHistoryReconciliationStatus.REPAIRING
         if not self._reservation_is_current(db, reservation=reservation):
             superseded = self._record_superseded(
                 db,
@@ -375,19 +373,17 @@ class GroupHistoryExecutionService:
             if fresh_bootstrap and strict:
                 raise RuntimeError("Group history target changed before finalization")
             return None, superseded
-        if not self._reconciliation_repository.transition(
-            db,
-            reservation=reservation,
-            expected_statuses={expected_status},
-            status=GroupHistoryReconciliationStatus.FINALIZING,
-        ):
-            superseded = self._superseded_payload(
-                reservation,
-                "reservation_lost_before_finalization",
-            )
-            if fresh_bootstrap and strict:
-                raise RuntimeError("Group history finalization reservation lost")
-            return None, superseded
+        if not fresh_bootstrap:
+            if not self._reconciliation_repository.transition(
+                db,
+                reservation=reservation,
+                expected_statuses={expected_status},
+                status=GroupHistoryReconciliationStatus.FINALIZING,
+            ):
+                return None, self._superseded_payload(
+                    reservation,
+                    "reservation_lost_before_finalization",
+                )
         return reservation, None
 
     def _record_superseded(

@@ -50,6 +50,37 @@ def test_reconciliation_marker_reservation_is_idempotent_and_resumable(db_sessio
     assert marker.error is None
 
 
+def test_fresh_finalization_adopts_same_target_queued_reservation(db_session):
+    from app.services.group_history_reconciliation import (
+        GroupHistoryReconciliationRepository,
+        GroupHistoryReconciliationStatus,
+    )
+
+    repository = GroupHistoryReconciliationRepository()
+    target = _target()
+    queued = repository.reserve(db_session, target=target)
+    assert queued is not None
+
+    finalization = repository.reserve_finalization(db_session, target=target)
+
+    assert finalization is not None
+    assert finalization.target == target
+    marker = repository.load(db_session, market="US")
+    assert marker is not None
+    assert marker.status is GroupHistoryReconciliationStatus.FINALIZING
+    assert marker.reservation_id == finalization.reservation_id
+    assert marker.reservation_id != queued.reservation_id
+    assert (
+        repository.transition(
+            db_session,
+            reservation=queued,
+            expected_statuses={GroupHistoryReconciliationStatus.QUEUED},
+            status=GroupHistoryReconciliationStatus.REPAIRING,
+        )
+        is False
+    )
+
+
 def test_existing_marker_compare_and_swap_allows_only_one_stale_reservation(
     db_session,
 ):

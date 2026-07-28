@@ -51,7 +51,9 @@ def test_ensure_group_history_invalidates_cache_and_publishes_us_snapshot(
         lambda _db, *, market: target,
     )
     repository = Mock()
-    repository.reserve.return_value = GroupHistoryReservation(target, "fresh-lease")
+    repository.reserve_finalization.return_value = GroupHistoryReservation(
+        target, "fresh-lease"
+    )
     repository.transition.return_value = True
     repository.owns.return_value = True
     monkeypatch.setattr(
@@ -148,7 +150,9 @@ def test_strict_group_history_task_records_snapshot_publication_failure_once(
         lambda _db, *, market: target,
     )
     repository = Mock()
-    repository.reserve.return_value = GroupHistoryReservation(target, "fresh-lease")
+    repository.reserve_finalization.return_value = GroupHistoryReservation(
+        target, "fresh-lease"
+    )
     repository.transition.return_value = True
     repository.owns.return_value = True
     monkeypatch.setattr(
@@ -257,7 +261,7 @@ def test_execution_service_revalidates_fresh_bootstrap_target_before_finalizatio
             task_id="task-1",
         )
 
-    repository.reserve.assert_not_called()
+    repository.reserve_finalization.assert_not_called()
     bump.assert_not_called()
     publish.assert_not_called()
     failed.assert_called_once()
@@ -299,6 +303,48 @@ def test_execution_service_records_successful_fresh_bootstrap_as_ready(db_sessio
     assert marker.target == target
     assert marker.status is GroupHistoryReconciliationStatus.READY
     assert marker.counts == {"ready": True}
+
+
+def test_fresh_bootstrap_adopts_queued_reconciliation_for_same_target(db_session):
+    from app.services.group_history_execution_service import (
+        GroupHistoryExecutionService,
+    )
+    from app.services.group_history_reconciliation import (
+        GroupHistoryReconciliationRepository,
+        GroupHistoryReconciliationStatus,
+        GroupHistoryTarget,
+    )
+
+    target = GroupHistoryTarget("US", "captured-v1", date(2026, 6, 30))
+    repository = GroupHistoryReconciliationRepository()
+    queued = repository.reserve(db_session, target=target)
+    assert queued is not None
+    bump = Mock()
+    publish = Mock(return_value={"snapshot_revision": "42"})
+    service = GroupHistoryExecutionService(
+        bootstrap_service=Mock(ensure=Mock(return_value=_result(ready=True))),
+        reconciliation_repository=repository,
+        bump_epoch=bump,
+        publish_snapshot=publish,
+        mark_started=Mock(),
+        mark_completed=Mock(),
+        mark_failed=Mock(),
+        resolve_current_target=lambda _db, *, market: target,
+    )
+
+    result = service.execute_bootstrap(
+        db_session,
+        target=target,
+        task_name="ensure_group_history",
+        task_id="task-1",
+    )
+
+    assert result["status"] == "ready"
+    marker = repository.load(db_session, market="US")
+    assert marker is not None
+    assert marker.status is GroupHistoryReconciliationStatus.READY
+    bump.assert_called_once_with("US")
+    publish.assert_called_once_with(target)
 
 
 def test_activity_completion_failure_does_not_reclassify_success():

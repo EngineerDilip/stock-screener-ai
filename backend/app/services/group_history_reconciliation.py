@@ -133,9 +133,52 @@ class GroupHistoryReconciliationRepository:
         *,
         target: GroupHistoryTarget,
     ) -> GroupHistoryReservation | None:
+        return self._reserve(
+            db,
+            target=target,
+            status=GroupHistoryReconciliationStatus.QUEUED,
+        )
+
+    def reserve_finalization(
+        self,
+        db: Session,
+        *,
+        target: GroupHistoryTarget,
+    ) -> GroupHistoryReservation | None:
+        """Fence finalization, adopting an undispatched same-target queue."""
+        for _attempt in range(2):
+            reservation = self._reserve(
+                db,
+                target=target,
+                status=GroupHistoryReconciliationStatus.FINALIZING,
+            )
+            if reservation is not None:
+                return reservation
+            current = self.load(db, market=target.market)
+            if not (
+                current is not None
+                and current.target == target
+                and current.status is GroupHistoryReconciliationStatus.QUEUED
+            ):
+                return None
+        return None
+
+    def _reserve(
+        self,
+        db: Session,
+        *,
+        target: GroupHistoryTarget,
+        status: GroupHistoryReconciliationStatus,
+    ) -> GroupHistoryReservation | None:
         existing, observed_value = self._load_record(
             db,
             market=target.market,
+        )
+        adopting_matching_queue = bool(
+            status is GroupHistoryReconciliationStatus.FINALIZING
+            and existing is not None
+            and existing.target == target
+            and existing.status is GroupHistoryReconciliationStatus.QUEUED
         )
         if (
             existing is not None
@@ -150,6 +193,7 @@ class GroupHistoryReconciliationRepository:
                 existing.target == target
                 or existing.status is GroupHistoryReconciliationStatus.FINALIZING
             )
+            and not adopting_matching_queue
         ):
             return None
 
@@ -159,7 +203,7 @@ class GroupHistoryReconciliationRepository:
         )
         marker = self._marker(
             target=target,
-            status=GroupHistoryReconciliationStatus.QUEUED,
+            status=status,
             reservation_id=reservation.reservation_id,
         )
         encoded = json.dumps(marker.as_dict(), sort_keys=True)
