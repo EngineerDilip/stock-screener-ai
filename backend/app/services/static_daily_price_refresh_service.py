@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
 from typing import Any, Callable
 
@@ -32,6 +33,15 @@ STATIC_DAILY_PRICE_REFRESH_BATCH_SIZE = 250
 STATIC_RATE_LIMITED_RETRY_MARKETS = frozenset({"IN"})
 STATIC_RATE_LIMITED_RETRY_WAIT_SECONDS = 300
 STATIC_RATE_LIMITED_RETRY_BATCH_SIZE = 25
+
+
+@dataclass(frozen=True)
+class _RRGHistoryCoverageOutcome:
+    incomplete_symbols: tuple[str, ...]
+    status: str
+    error: str | None = None
+
+
 def static_daily_price_refresh_batch_size(market: str | None) -> int:
     if market:
         from app.services.rate_budget_policy import get_rate_budget_policy
@@ -127,7 +137,7 @@ class StaticDailyPriceRefreshService:
                 as_of_date=as_of_date,
                 symbols_requiring_positive_volume=volume_required_symbols,
             )
-            history_incomplete_symbols = self._history_incomplete_symbols(
+            rrg_history_coverage = self._rrg_history_coverage(
                 db,
                 market=market,
                 through_date=as_of_date,
@@ -135,6 +145,7 @@ class StaticDailyPriceRefreshService:
                 enabled=ensure_rrg_history,
             )
 
+        history_incomplete_symbols = list(rrg_history_coverage.incomplete_symbols)
         db_fresh_symbols = list(coverage.fresh)
         history_incomplete_symbol_set = set(history_incomplete_symbols)
         stale_symbols = [
@@ -164,6 +175,8 @@ class StaticDailyPriceRefreshService:
                 "stale_symbols": len(stale_symbols),
                 "no_history_symbols": len(no_history_symbols),
                 "history_incomplete_symbols": len(history_incomplete_symbols),
+                "rrg_history_coverage_status": rrg_history_coverage.status,
+                "rrg_history_coverage_error": rrg_history_coverage.error,
                 "skipped_unsupported_symbols": len(skipped_symbols),
                 "yahoo_fetched_symbols": 0,
                 "yahoo_failed_symbols": 0,
@@ -223,13 +236,15 @@ class StaticDailyPriceRefreshService:
             "stale_symbols": len(stale_symbols),
             "no_history_symbols": len(no_history_symbols),
             "history_incomplete_symbols": len(history_incomplete_symbols),
+            "rrg_history_coverage_status": rrg_history_coverage.status,
+            "rrg_history_coverage_error": rrg_history_coverage.error,
             "skipped_unsupported_symbols": len(skipped_symbols),
             "yahoo_fetched_symbols": refreshed,
             "yahoo_failed_symbols": failed,
             "rate_limited_retry": retry_stats,
         }
 
-    def _history_incomplete_symbols(
+    def _rrg_history_coverage(
         self,
         db,
         *,
@@ -237,9 +252,11 @@ class StaticDailyPriceRefreshService:
         through_date: date,
         symbols: tuple[str, ...],
         enabled: bool,
-    ) -> list[str]:
-        if not enabled or market is None or not symbols:
-            return []
+    ) -> _RRGHistoryCoverageOutcome:
+        if not enabled:
+            return _RRGHistoryCoverageOutcome((), "not_requested")
+        if market is None or not symbols:
+            return _RRGHistoryCoverageOutcome((), "not_applicable")
 
         try:
             required_anchor_dates = (
@@ -254,16 +271,22 @@ class StaticDailyPriceRefreshService:
                 f"for market={market}: {exc}",
                 flush=True,
             )
-            return []
+            return _RRGHistoryCoverageOutcome(
+                (),
+                "unverified",
+                str(exc),
+            )
 
-        return list(
-            self._group_history_price_coverage.classify(
-                db,
-                market=market,
-                through_date=through_date,
-                symbols=symbols,
-                required_anchor_dates=required_anchor_dates,
-            ).incomplete_symbols
+        coverage = self._group_history_price_coverage.classify(
+            db,
+            market=market,
+            through_date=through_date,
+            symbols=symbols,
+            required_anchor_dates=required_anchor_dates,
+        )
+        return _RRGHistoryCoverageOutcome(
+            tuple(coverage.incomplete_symbols),
+            "verified",
         )
 
     def _fetch_and_store(

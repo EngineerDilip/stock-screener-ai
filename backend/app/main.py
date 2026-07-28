@@ -120,7 +120,9 @@ async def lifespan(app: FastAPI):
     initialize_runtime()
     runtime_services = initialize_process_runtime_services(session_factory=SessionLocal)
     app.state.runtime_services = runtime_services
-    await trigger_group_history_reconciliation_on_startup()
+    app.state.group_history_reconciliation_task = asyncio.create_task(
+        trigger_group_history_reconciliation_on_startup()
+    )
     if settings.mcp_http_enabled:
         from .interfaces.mcp.http_transport import create_mcp_http_server
 
@@ -134,6 +136,9 @@ async def lifespan(app: FastAPI):
         clear_runtime_services()
         if hasattr(app.state, "runtime_services"):
             delattr(app.state, "runtime_services")
+        if hasattr(app.state, "group_history_reconciliation_task"):
+            app.state.group_history_reconciliation_task.cancel()
+            delattr(app.state, "group_history_reconciliation_task")
         if hasattr(app.state, "mcp_server"):
             delattr(app.state, "mcp_server")
         engine.dispose()

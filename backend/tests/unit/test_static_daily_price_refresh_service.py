@@ -639,6 +639,8 @@ def test_static_daily_price_refresh_continues_when_rrg_calendar_lookup_fails() -
     ]
     assert result["db_fresh_symbols"] == 1
     assert result["history_incomplete_symbols"] == 0
+    assert result["rrg_history_coverage_status"] == "unverified"
+    assert result["rrg_history_coverage_error"] == "calendar unavailable"
     assert result["yahoo_fetched_symbols"] == len(IN_KEY_MARKET_PRICE_SYMBOLS)
 
 
