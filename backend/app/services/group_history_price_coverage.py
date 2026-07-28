@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -77,14 +77,19 @@ class GroupHistoryPriceCoverageService:
         market: str,
         through_date: date,
         symbols: Sequence[str],
+        required_anchor_dates: Collection[date] | None = None,
     ) -> GroupHistoryPriceCoverage:
         normalized_symbols = tuple(
             dict.fromkeys(str(symbol or "").strip().upper() for symbol in symbols)
         )
         normalized_symbols = tuple(symbol for symbol in normalized_symbols if symbol)
-        anchor_dates = self.required_anchor_dates(
-            market=market,
-            through_date=through_date,
+        anchor_dates = frozenset(
+            required_anchor_dates
+            if required_anchor_dates is not None
+            else self.required_anchor_dates(
+                market=market,
+                through_date=through_date,
+            )
         )
         if not anchor_dates:
             return GroupHistoryPriceCoverage(

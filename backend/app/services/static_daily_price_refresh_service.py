@@ -127,17 +127,12 @@ class StaticDailyPriceRefreshService:
                 as_of_date=as_of_date,
                 symbols_requiring_positive_volume=volume_required_symbols,
             )
-            history_incomplete_symbols = (
-                list(
-                    self._group_history_price_coverage.classify(
-                        db,
-                        market=market,
-                        through_date=as_of_date,
-                        symbols=coverage.fresh + coverage.stale,
-                    ).incomplete_symbols
-                )
-                if ensure_rrg_history and market is not None
-                else []
+            history_incomplete_symbols = self._history_incomplete_symbols(
+                db,
+                market=market,
+                through_date=as_of_date,
+                symbols=coverage.fresh + coverage.stale,
+                enabled=ensure_rrg_history,
             )
 
         db_fresh_symbols = list(coverage.fresh)
@@ -233,6 +228,43 @@ class StaticDailyPriceRefreshService:
             "yahoo_failed_symbols": failed,
             "rate_limited_retry": retry_stats,
         }
+
+    def _history_incomplete_symbols(
+        self,
+        db,
+        *,
+        market: str | None,
+        through_date: date,
+        symbols: tuple[str, ...],
+        enabled: bool,
+    ) -> list[str]:
+        if not enabled or market is None or not symbols:
+            return []
+
+        try:
+            required_anchor_dates = (
+                self._group_history_price_coverage.required_anchor_dates(
+                    market=market,
+                    through_date=through_date,
+                )
+            )
+        except Exception as exc:
+            print(
+                "[static-daily prices] Could not resolve RRG history anchors "
+                f"for market={market}: {exc}",
+                flush=True,
+            )
+            return []
+
+        return list(
+            self._group_history_price_coverage.classify(
+                db,
+                market=market,
+                through_date=through_date,
+                symbols=symbols,
+                required_anchor_dates=required_anchor_dates,
+            ).incomplete_symbols
+        )
 
     def _fetch_and_store(
         self,
