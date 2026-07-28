@@ -21,6 +21,10 @@ from app.services.point_in_time_universe_service import (
     PointInTimeUniverseService,
     PointInTimeUniverseUnavailable,
 )
+from app.services.market_rs_result_contract import (
+    MARKET_RS_REASON_BENCHMARK_ADJUSTED_ANCHOR_MISSING,
+    MARKET_RS_REASON_CURRENT_ADJUSTED_PRICE_COVERAGE_BELOW_THRESHOLD,
+)
 
 
 EMPTY_UNIVERSE_HASH = hashlib.sha256(b"").hexdigest()
@@ -173,7 +177,7 @@ class MarketRsInputLoader:
             }
             raise MarketRsInputUnavailable(
                 f"No {normalized} benchmark has every exact RS session anchor",
-                reason_code="benchmark_adjusted_anchor_missing",
+                reason_code=MARKET_RS_REASON_BENCHMARK_ADJUSTED_ANCHOR_MISSING,
                 diagnostics={"missing_anchor_dates": missing_by_candidate},
                 **context,
             )
@@ -194,7 +198,9 @@ class MarketRsInputLoader:
                 f"{normalized} current price coverage is "
                 f"{current_price_coverage:.1%}; "
                 f"{minimum_current_price_coverage:.1%} required",
-                reason_code="current_adjusted_price_coverage_below_threshold",
+                reason_code=(
+                    MARKET_RS_REASON_CURRENT_ADJUSTED_PRICE_COVERAGE_BELOW_THRESHOLD
+                ),
                 diagnostics={
                     "current_price_coverage": current_price_coverage,
                     "minimum_current_price_coverage": minimum_current_price_coverage,
