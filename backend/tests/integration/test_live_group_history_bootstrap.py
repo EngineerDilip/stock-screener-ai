@@ -18,9 +18,10 @@ from app.infra.db.models.relative_strength import (
 )
 from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
 from app.main import app
-from app.models.industry import IBDGroupRank
+from app.models.industry import IBDGroupRank, IBDIndustryGroup
 from app.models.scan_result import Scan
 from app.models.stock import StockPrice
+from app.models.stock_universe import StockUniverse
 from app.models.watchlist import Watchlist
 from app.services.group_history_bootstrap_service import (
     GroupHistoryBootstrapService,
@@ -29,7 +30,17 @@ from app.services.group_history_bootstrap_service import (
 from app.services.group_history_readiness_service import (
     GroupHistoryReadinessService,
 )
+from app.services.group_history_snapshot_coordinator import (
+    build_group_history_snapshot_coordinator,
+)
+from app.services.group_history_universe import GroupHistoryUniverseResolver
 from app.services.group_rank_snapshot_reader import GroupRankSnapshotReader
+from app.services.group_rank_history_policy import (
+    DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS,
+)
+from app.services.point_in_time_universe_service import (
+    PointInTimeUniverseUnavailable,
+)
 from app.services.rrg_history_provider import StoredGroupRankHistoryProvider
 from app.services.server_auth import require_server_session
 
@@ -44,6 +55,21 @@ class _WeekdayCalendar:
                 days.append(cursor)
             cursor += timedelta(days=1)
         return days
+
+    @staticmethod
+    def session_anchors(_market: str, as_of_date: date, *, offsets) -> dict:
+        days_by_offset = {
+            0: 0,
+            21: 30,
+            63: 90,
+            126: 180,
+            189: 270,
+            252: 365,
+        }
+        return {
+            offset: as_of_date - timedelta(days=days_by_offset[offset])
+            for offset in (0, *offsets)
+        }
 
 
 def _store_balanced_snapshot(db, snapshot_date: date) -> None:
@@ -88,18 +114,81 @@ def _store_balanced_snapshot(db, snapshot_date: date) -> None:
     db.commit()
 
 
-class _SnapshotCoordinator:
-    def ensure_snapshot(self, db, *, identity):
-        _store_balanced_snapshot(db, identity.as_of_date)
-
-    def repair_snapshot(self, db, *, identity):
-        raise AssertionError(f"Unexpected invalid snapshot: {identity}")
-
-
-class _UniverseResolver:
+class _UnavailablePointInTimeUniverse:
     @staticmethod
-    def policy_for(_market: str, _as_of_date: date) -> str:
-        return "current_active_fallback_v1"
+    def resolve(_db, *, market: str, as_of_date: date):
+        raise PointInTimeUniverseUnavailable(
+            f"No historical lifecycle for {market} on {as_of_date}"
+        )
+
+
+def _seed_production_repair_inputs(
+    db,
+    *,
+    calendar: _WeekdayCalendar,
+    repair_date: date,
+) -> None:
+    groups = {
+        "Group Alpha": ("A1", "A2", "A3"),
+        "Group Beta": ("B1", "B2", "B3"),
+    }
+    for group, symbols in groups.items():
+        for index, symbol in enumerate(symbols, start=1):
+            db.add(
+                StockUniverse(
+                    symbol=symbol,
+                    name=f"{symbol} Acceptance",
+                    market="US",
+                    exchange="NASDAQ",
+                    market_cap=float(index * 100),
+                    is_active=True,
+                    status="active",
+                )
+            )
+            db.add(
+                IBDIndustryGroup(
+                    symbol=symbol,
+                    industry_group=group,
+                    market="US",
+                    source="manual",
+                )
+            )
+
+    anchors = calendar.session_anchors(
+        "US",
+        repair_date,
+        offsets=(21, 63, 126, 189, 252),
+    )
+    for offset, anchor_date in anchors.items():
+        db.add(
+            StockPrice(
+                symbol="SPY",
+                date=anchor_date,
+                close=100.0,
+                adj_close=100.0,
+            )
+        )
+        for symbol in groups["Group Alpha"]:
+            value = 50.0 if offset == 0 else 100.0
+            db.add(
+                StockPrice(
+                    symbol=symbol,
+                    date=anchor_date,
+                    close=value,
+                    adj_close=value,
+                )
+            )
+        for symbol in groups["Group Beta"]:
+            value = 200.0 if offset == 0 else 100.0
+            db.add(
+                StockPrice(
+                    symbol=symbol,
+                    date=anchor_date,
+                    close=value,
+                    adj_close=value,
+                )
+            )
+    db.commit()
 
 
 @pytest.mark.asyncio
@@ -140,7 +229,24 @@ async def test_live_repair_populates_rank_changes_movers_and_rrg_without_data_lo
         ]
     )
     db_session.commit()
-    _store_balanced_snapshot(db_session, through_date)
+    calendar = _WeekdayCalendar()
+    desired_dates = calendar.trading_days(
+        "US",
+        through_date
+        - timedelta(
+            days=DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS
+        ),
+        through_date,
+    )
+    production_repair_date = desired_dates[0]
+    for snapshot_date in desired_dates:
+        if snapshot_date != production_repair_date:
+            _store_balanced_snapshot(db_session, snapshot_date)
+    _seed_production_repair_inputs(
+        db_session,
+        calendar=calendar,
+        repair_date=production_repair_date,
+    )
 
     preserved = {
         StockPrice: db_session.query(StockPrice).count(),
@@ -156,21 +262,30 @@ async def test_live_repair_populates_rank_changes_movers_and_rrg_without_data_lo
     )
 
     repository = MarketRsRunRepository()
+    universe_resolver = GroupHistoryUniverseResolver(
+        point_in_time_universe=_UnavailablePointInTimeUniverse(),
+    )
+    coordinator = build_group_history_snapshot_coordinator(
+        universe_resolver=universe_resolver,
+        legacy_group_service=object(),
+        calendar_service=calendar,
+        market_rs_repository=repository,
+    )
     provider = StoredGroupRankHistoryProvider(
         object(),
         repository,
         snapshot_reader=GroupRankSnapshotReader(),
     )
     readiness = GroupHistoryReadinessService(
-        calendar_service=_WeekdayCalendar(),
-        snapshot_reader=GroupRankSnapshotReader(),
+        calendar_service=calendar,
+        snapshot_reader=coordinator.reader,
         market_rs_repository=repository,
         rrg_history_provider=provider,
     )
     repair = GroupHistoryBootstrapService(
         readiness_service=readiness,
-        snapshot_coordinator=_SnapshotCoordinator(),
-        universe_resolver=_UniverseResolver(),
+        snapshot_coordinator=coordinator,
+        universe_resolver=universe_resolver,
     ).ensure(
         db_session,
         market="US",
@@ -179,11 +294,20 @@ async def test_live_repair_populates_rank_changes_movers_and_rrg_without_data_lo
 
     assert repair.status is GroupHistoryBootstrapStatus.READY
     assert repair.after.ready is True
-    assert repair.skipped_valid == 1
-    assert repair.processed_dates
+    assert repair.skipped_valid == len(desired_dates) - 1
+    assert repair.processed_dates == (production_repair_date,)
     assert repair.policy_counts == {
         "current_active_fallback_v1": len(repair.processed_dates)
     }
+    production_run = repository.get_completed_exact(
+        db_session,
+        market="US",
+        as_of_date=production_repair_date,
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+    )
+    assert production_run is not None
+    assert production_run.expected_symbol_count == 6
+    assert production_run.eligible_symbol_count == 6
     for model, count in preserved.items():
         assert db_session.query(model).count() == count
     assert (
