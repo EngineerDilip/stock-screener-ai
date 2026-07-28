@@ -28,7 +28,7 @@ class GroupHistoryBootstrapResult:
     status: GroupHistoryBootstrapStatus
     market: str
     through_date: date
-    formula_version: str | None
+    formula_version: str
     before: GroupHistoryReadinessReport
     after: GroupHistoryReadinessReport
     processed_dates: tuple[date, ...] = ()
@@ -73,51 +73,28 @@ class GroupHistoryBootstrapService:
         self,
         db: Session,
         *,
-        target: GroupHistoryTarget | None = None,
-        market: str | None = None,
-        through_date: date | None = None,
+        target: GroupHistoryTarget,
     ) -> GroupHistoryBootstrapResult:
-        if target is not None:
-            normalized_market = target.market
-            resolved_through_date = target.through_date
-            before = self._readiness_service.evaluate(db, target=target)
-        else:
-            normalized_market = str(market or "").strip().upper()
-            if through_date is None:
-                raise ValueError("Group history through date is required")
-            resolved_through_date = through_date
-            before = self._readiness_service.evaluate(
-                db,
-                market=normalized_market,
-                through_date=resolved_through_date,
-            )
+        before = self._readiness_service.evaluate(db, target=target)
         if not before.supported:
             return GroupHistoryBootstrapResult(
                 status=GroupHistoryBootstrapStatus.SKIPPED,
-                market=normalized_market,
-                through_date=resolved_through_date,
-                formula_version=before.formula_version,
+                market=target.market,
+                through_date=target.through_date,
+                formula_version=target.formula_version,
                 before=before,
                 after=before,
             )
         if before.ready:
             return GroupHistoryBootstrapResult(
                 status=GroupHistoryBootstrapStatus.READY,
-                market=normalized_market,
-                through_date=resolved_through_date,
-                formula_version=(
-                    target.formula_version if target is not None else before.formula_version
-                ),
+                market=target.market,
+                through_date=target.through_date,
+                formula_version=target.formula_version,
                 before=before,
                 after=before,
                 skipped_valid=len(before.valid_dates),
             )
-        formula_version = (
-            target.formula_version if target is not None else before.formula_version
-        )
-        if formula_version is None:
-            raise RuntimeError("Group history readiness did not resolve an RS formula")
-
         invalid_dates = set(before.invalid_dates)
         target_dates = tuple(
             sorted(set(before.missing_dates) | invalid_dates)
@@ -128,9 +105,9 @@ class GroupHistoryBootstrapService:
         policies: Counter[str] = Counter()
         for target_date in target_dates:
             identity = GroupSnapshotIdentity(
-                normalized_market,
+                target.market,
                 target_date,
-                formula_version,
+                target.formula_version,
             )
             try:
                 if target_date in invalid_dates:
@@ -150,30 +127,22 @@ class GroupHistoryBootstrapService:
                 continue
             processed.append(target_date)
             policy = self._universe_resolver.policy_for(
-                normalized_market,
+                target.market,
                 target_date,
             )
             if policy:
                 policies[policy] += 1
 
-        after = (
-            self._readiness_service.evaluate(db, target=target)
-            if target is not None
-            else self._readiness_service.evaluate(
-                db,
-                market=normalized_market,
-                through_date=resolved_through_date,
-            )
-        )
+        after = self._readiness_service.evaluate(db, target=target)
         return GroupHistoryBootstrapResult(
             status=(
                 GroupHistoryBootstrapStatus.READY
                 if after.ready
                 else GroupHistoryBootstrapStatus.INCOMPLETE
             ),
-            market=normalized_market,
-            through_date=resolved_through_date,
-            formula_version=formula_version,
+            market=target.market,
+            through_date=target.through_date,
+            formula_version=target.formula_version,
             before=before,
             after=after,
             processed_dates=tuple(processed),

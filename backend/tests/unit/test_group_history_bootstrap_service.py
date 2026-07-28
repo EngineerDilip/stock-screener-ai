@@ -3,6 +3,15 @@ from __future__ import annotations
 from datetime import date
 
 from app.services.group_history_readiness_service import GroupHistoryReadinessReport
+from app.services.group_history_reconciliation import GroupHistoryTarget
+
+
+def _target(market="US"):
+    return GroupHistoryTarget(
+        market=market,
+        formula_version="balanced-v1",
+        through_date=date(2026, 6, 30),
+    )
 
 
 def _report(
@@ -37,9 +46,9 @@ class _Readiness:
     def __init__(self, *reports):
         self.reports = list(reports)
 
-    def evaluate(self, _db, *, market, through_date):
-        assert market in {"US", "SG"}
-        assert through_date == date(2026, 6, 30)
+    def evaluate(self, _db, *, target):
+        assert target.market in {"US", "SG"}
+        assert target.through_date == date(2026, 6, 30)
         return self.reports.pop(0)
 
 
@@ -92,7 +101,7 @@ def test_group_history_bootstrap_processes_only_missing_and_invalid_oldest_first
         universe_resolver=_Policies(),
     )
 
-    result = service.ensure(_DB(), market="us", through_date=date(2026, 6, 30))
+    result = service.ensure(_DB(), target=_target())
 
     assert result.status is GroupHistoryBootstrapStatus.READY
     assert [item.as_of_date for item in coordinator.repair_calls] == [invalid]
@@ -124,7 +133,7 @@ def test_group_history_bootstrap_rolls_back_failed_date_and_trusts_after_report(
         universe_resolver=_Policies(),
     )
 
-    result = service.ensure(db, market="US", through_date=date(2026, 6, 30))
+    result = service.ensure(db, target=_target())
 
     assert result.status is GroupHistoryBootstrapStatus.INCOMPLETE
     assert result.failed_dates == (failed,)
@@ -144,7 +153,7 @@ def test_group_history_bootstrap_skips_unsupported_market():
         readiness_service=_Readiness(_report(ready=True, supported=False)),
         snapshot_coordinator=coordinator,
         universe_resolver=_Policies(),
-    ).ensure(_DB(), market="SG", through_date=date(2026, 6, 30))
+    ).ensure(_DB(), target=_target("SG"))
 
     assert result.status is GroupHistoryBootstrapStatus.SKIPPED
     assert coordinator.ensure_calls == []
@@ -155,8 +164,6 @@ def test_group_history_bootstrap_preserves_supplied_target_identity():
     from app.services.group_history_bootstrap_service import (
         GroupHistoryBootstrapService,
     )
-    from app.services.group_history_reconciliation import GroupHistoryTarget
-
     target = GroupHistoryTarget(
         market="US",
         formula_version="captured-formula-v1",

@@ -8,6 +8,16 @@ from unittest.mock import Mock
 from sqlalchemy.orm import sessionmaker
 
 
+def _target():
+    from app.services.group_history_reconciliation import GroupHistoryTarget
+
+    return GroupHistoryTarget(
+        market="US",
+        formula_version="balanced-v1",
+        through_date=date(2026, 6, 30),
+    )
+
+
 def test_reconciliation_marker_reservation_is_idempotent_and_resumable(db_session):
     from app.services.group_history_reconciliation import (
         GroupHistoryReconciliationRepository,
@@ -15,36 +25,19 @@ def test_reconciliation_marker_reservation_is_idempotent_and_resumable(db_sessio
     )
 
     repository = GroupHistoryReconciliationRepository()
-    through = date(2026, 6, 30)
+    target = _target()
 
-    assert repository.reserve(
-        db_session,
-        market="US",
-        formula_version="balanced-v1",
-        through_date=through,
-    ) is True
-    assert repository.reserve(
-        db_session,
-        market="US",
-        formula_version="balanced-v1",
-        through_date=through,
-    ) is False
+    assert repository.reserve(db_session, target=target) is True
+    assert repository.reserve(db_session, target=target) is False
 
     repository.mark(
         db_session,
-        market="US",
-        formula_version="balanced-v1",
-        through_date=through,
+        target=target,
         status=GroupHistoryReconciliationStatus.INCOMPLETE,
         error="worker interrupted",
     )
 
-    assert repository.reserve(
-        db_session,
-        market="US",
-        formula_version="balanced-v1",
-        through_date=through,
-    ) is True
+    assert repository.reserve(db_session, target=target) is True
     marker = repository.load(db_session, market="US")
     assert marker.status is GroupHistoryReconciliationStatus.QUEUED
     assert marker.error is None
@@ -107,13 +100,8 @@ def test_stale_active_marker_can_be_reserved_after_interrupted_worker(db_session
     )
 
     repository = GroupHistoryReconciliationRepository()
-    through = date(2026, 6, 30)
-    assert repository.reserve(
-        db_session,
-        market="US",
-        formula_version="balanced-v1",
-        through_date=through,
-    )
+    target = _target()
+    assert repository.reserve(db_session, target=target)
     setting = (
         db_session.query(AppSetting)
         .filter(AppSetting.key == repository.key("US"))
@@ -126,12 +114,7 @@ def test_stale_active_marker_can_be_reserved_after_interrupted_worker(db_session
     setting.value = json.dumps(payload)
     db_session.commit()
 
-    assert repository.reserve(
-        db_session,
-        market="US",
-        formula_version="balanced-v1",
-        through_date=through,
-    ) is True
+    assert repository.reserve(db_session, target=target) is True
 
 
 def _readiness(*, ready: bool, formula: str = "balanced-v1"):

@@ -134,24 +134,15 @@ class GroupHistoryReconciliationRepository:
         self,
         db: Session,
         *,
-        target: GroupHistoryTarget | None = None,
-        market: str | None = None,
-        formula_version: str | None = None,
-        through_date: date | None = None,
+        target: GroupHistoryTarget,
     ) -> bool:
-        resolved = self._target(
-            target=target,
-            market=market,
-            formula_version=formula_version,
-            through_date=through_date,
-        )
         existing, observed_value = self._load_record(
             db,
-            market=resolved.market,
+            market=target.market,
         )
         if (
             existing is not None
-            and existing.target == resolved
+            and existing.target == target
             and existing.status
             in {
                 GroupHistoryReconciliationStatus.QUEUED,
@@ -162,11 +153,11 @@ class GroupHistoryReconciliationRepository:
             return False
 
         marker = self._marker(
-            target=resolved,
+            target=target,
             status=GroupHistoryReconciliationStatus.QUEUED,
         )
         encoded = json.dumps(marker.as_dict(), sort_keys=True)
-        key = self.key(resolved.market)
+        key = self.key(target.market)
         if observed_value is not None:
             result = db.execute(
                 update(AppSetting)
@@ -191,7 +182,7 @@ class GroupHistoryReconciliationRepository:
                     key=key,
                     value=encoded,
                     category=GROUP_HISTORY_RECONCILIATION_CATEGORY,
-                    description=f"Group history repair state for {resolved.market}",
+                    description=f"Group history repair state for {target.market}",
                 )
             )
             db.commit()
@@ -217,63 +208,34 @@ class GroupHistoryReconciliationRepository:
         self,
         db: Session,
         *,
-        target: GroupHistoryTarget | None = None,
-        market: str | None = None,
-        formula_version: str | None = None,
-        through_date: date | None = None,
+        target: GroupHistoryTarget,
         status: GroupHistoryReconciliationStatus,
         counts: dict[str, Any] | None = None,
         error: str | None = None,
     ) -> GroupHistoryReconciliationMarker:
-        resolved = self._target(
-            target=target,
-            market=market,
-            formula_version=formula_version,
-            through_date=through_date,
-        )
         marker = self._marker(
-            target=resolved,
+            target=target,
             status=status,
             counts=counts,
             error=error,
         )
-        key = self.key(resolved.market)
+        key = self.key(target.market)
         setting = db.query(AppSetting).filter(AppSetting.key == key).one_or_none()
         encoded = json.dumps(marker.as_dict(), sort_keys=True)
         if setting is None:
             db.add(
                 AppSetting(
-                key=key,
-                value=encoded,
-                category=GROUP_HISTORY_RECONCILIATION_CATEGORY,
-                description=(
-                    f"Group history repair state for {resolved.market}"
-                ),
-            )
+                    key=key,
+                    value=encoded,
+                    category=GROUP_HISTORY_RECONCILIATION_CATEGORY,
+                    description=f"Group history repair state for {target.market}",
+                )
             )
         else:
             setting.value = encoded
             setting.category = GROUP_HISTORY_RECONCILIATION_CATEGORY
         db.commit()
         return marker
-
-    @staticmethod
-    def _target(
-        *,
-        target: GroupHistoryTarget | None,
-        market: str | None,
-        formula_version: str | None,
-        through_date: date | None,
-    ) -> GroupHistoryTarget:
-        if target is not None:
-            return target
-        if through_date is None:
-            raise ValueError("Group history target through date is required")
-        return GroupHistoryTarget(
-            market=str(market or ""),
-            formula_version=str(formula_version or ""),
-            through_date=through_date,
-        )
 
     @staticmethod
     def _marker(

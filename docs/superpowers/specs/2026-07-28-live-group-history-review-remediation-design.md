@@ -116,4 +116,3 @@ are preserved.
 - Finalization tests prove one cache invalidation and one US publication.
 - Query-count tests prove snapshot-window loading is bounded.
 - The integration acceptance test crosses the production coordinator boundary.
-

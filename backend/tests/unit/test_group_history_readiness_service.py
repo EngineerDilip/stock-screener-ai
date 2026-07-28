@@ -3,14 +3,16 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from app.domain.relative_strength import GroupSnapshotIdentity
+from app.services.group_history_reconciliation import GroupHistoryTarget
 from app.services.group_rank_snapshot_reader import GroupSnapshotIntegrityError
 
 
-class _FormulaRepository:
-    @staticmethod
-    def active_formula(_db, *, market):
-        assert market in {"US", "CA"}
-        return "balanced-v1"
+def _target(market: str, through_date: date) -> GroupHistoryTarget:
+    return GroupHistoryTarget(
+        market=market,
+        formula_version="balanced-v1",
+        through_date=through_date,
+    )
 
 
 class _Calendar:
@@ -86,13 +88,23 @@ class _Reader:
 
 
 class _RRGProvider:
-    def __init__(self, weekly_points=12):
+    def __init__(self, weekly_points=12, expected_formula="balanced-v1"):
         self.weekly_points = weekly_points
+        self.expected_formula = expected_formula
         self.calls = 0
 
-    def get_all_groups_history(self, _db, *, market, days, as_of_date):
+    def get_all_groups_history(
+        self,
+        _db,
+        *,
+        market,
+        days,
+        as_of_date,
+        formula_version,
+    ):
         self.calls += 1
         assert market == "US"
+        assert formula_version == self.expected_formula
         points = [
             (as_of_date - timedelta(days=7 * offset), 50.0 + offset, 10)
             for offset in reversed(range(self.weekly_points))
@@ -125,11 +137,10 @@ def test_readiness_classifies_missing_invalid_rank_windows_and_rrg() -> None:
     service = GroupHistoryReadinessService(
         calendar_service=_Calendar(desired),
         snapshot_reader=_Reader(missing=(missing,), invalid=(invalid,)),
-        market_rs_repository=_FormulaRepository(),
         rrg_history_provider=provider,
     )
 
-    report = service.evaluate(object(), market="US", through_date=current)
+    report = service.evaluate(object(), target=_target("US", current))
 
     assert report.formula_version == "balanced-v1"
     assert report.valid_dates == _reference_days(current)
@@ -157,11 +168,10 @@ def test_non_rrg_group_market_can_be_ready_without_rrg_provider_call() -> None:
     service = GroupHistoryReadinessService(
         calendar_service=_Calendar(_reference_days(current)),
         snapshot_reader=_Reader(),
-        market_rs_repository=_FormulaRepository(),
         rrg_history_provider=provider,
     )
 
-    report = service.evaluate(object(), market="CA", through_date=current)
+    report = service.evaluate(object(), target=_target("CA", current))
 
     assert report.rrg_required is False
     assert report.rrg_usable_weeks == 0
@@ -179,35 +189,54 @@ def test_rrg_market_requires_twelve_provider_usable_weeks() -> None:
     service = GroupHistoryReadinessService(
         calendar_service=_Calendar(_reference_days(current)),
         snapshot_reader=_Reader(),
-        market_rs_repository=_FormulaRepository(),
         rrg_history_provider=_RRGProvider(weekly_points=11),
     )
 
-    report = service.evaluate(object(), market="US", through_date=current)
+    report = service.evaluate(object(), target=_target("US", current))
 
     assert report.rrg_usable_weeks == 11
     assert report.rrg_plottable_series == 0
     assert report.ready is False
 
 
-def test_readiness_uses_supplied_target_without_resolving_active_formula() -> None:
+def test_rrg_integrity_failure_is_reported_as_not_ready() -> None:
     from app.services.group_history_readiness_service import (
         GroupHistoryReadinessService,
     )
-    from app.services.group_history_reconciliation import GroupHistoryTarget
 
     current = date(2026, 6, 30)
 
-    class _UnexpectedFormulaLookup:
+    class _InvalidRRGProvider:
         @staticmethod
-        def active_formula(*_args, **_kwargs):
-            raise AssertionError("target formula must be authoritative")
+        def get_all_groups_history(*_args, **_kwargs):
+            raise GroupSnapshotIntegrityError("mixed run IDs")
 
     service = GroupHistoryReadinessService(
         calendar_service=_Calendar(_reference_days(current)),
         snapshot_reader=_Reader(),
-        market_rs_repository=_UnexpectedFormulaLookup(),
-        rrg_history_provider=_RRGProvider(weekly_points=12),
+        rrg_history_provider=_InvalidRRGProvider(),
+    )
+
+    report = service.evaluate(object(), target=_target("US", current))
+
+    assert report.rrg_usable_weeks == 0
+    assert report.rrg_plottable_series == 0
+    assert report.ready is False
+
+
+def test_readiness_preserves_supplied_target_identity() -> None:
+    from app.services.group_history_readiness_service import (
+        GroupHistoryReadinessService,
+    )
+    current = date(2026, 6, 30)
+
+    service = GroupHistoryReadinessService(
+        calendar_service=_Calendar(_reference_days(current)),
+        snapshot_reader=_Reader(),
+        rrg_history_provider=_RRGProvider(
+            weekly_points=12,
+            expected_formula="captured-formula-v1",
+        ),
     )
     target = GroupHistoryTarget(
         market="US",

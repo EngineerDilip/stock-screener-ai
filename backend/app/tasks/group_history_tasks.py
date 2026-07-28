@@ -67,7 +67,6 @@ def _build_group_history_components():
     readiness = GroupHistoryReadinessService(
         calendar_service=calendar,
         snapshot_reader=coordinator.reader,
-        market_rs_repository=repository,
         rrg_history_provider=history_provider,
     )
     bootstrap = GroupHistoryBootstrapService(

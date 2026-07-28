@@ -33,11 +33,12 @@ from app.services.group_history_readiness_service import (
 from app.services.group_history_snapshot_coordinator import (
     build_group_history_snapshot_coordinator,
 )
+from app.services.group_history_reconciliation import GroupHistoryTarget
 from app.services.group_history_universe import GroupHistoryUniverseResolver
-from app.services.group_rank_snapshot_reader import GroupRankSnapshotReader
 from app.services.group_rank_history_policy import (
     DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS,
 )
+from app.services.group_rank_snapshot_reader import GroupRankSnapshotReader
 from app.services.point_in_time_universe_service import (
     PointInTimeUniverseUnavailable,
 )
@@ -279,7 +280,6 @@ async def test_live_repair_populates_rank_changes_movers_and_rrg_without_data_lo
     readiness = GroupHistoryReadinessService(
         calendar_service=calendar,
         snapshot_reader=coordinator.reader,
-        market_rs_repository=repository,
         rrg_history_provider=provider,
     )
     repair = GroupHistoryBootstrapService(
@@ -288,8 +288,11 @@ async def test_live_repair_populates_rank_changes_movers_and_rrg_without_data_lo
         universe_resolver=universe_resolver,
     ).ensure(
         db_session,
-        market="US",
-        through_date=through_date,
+        target=GroupHistoryTarget(
+            market="US",
+            formula_version=BALANCED_RS_FORMULA_VERSION,
+            through_date=through_date,
+        ),
     )
 
     assert repair.status is GroupHistoryBootstrapStatus.READY

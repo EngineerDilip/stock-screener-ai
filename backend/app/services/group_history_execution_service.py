@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from enum import StrEnum
 from typing import Callable
@@ -17,6 +18,8 @@ from app.services.group_history_reconciliation import (
     GroupHistoryReconciliationStatus,
     GroupHistoryTarget,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class GroupHistoryCompletionPolicy(StrEnum):
@@ -73,9 +76,10 @@ class GroupHistoryExecutionService:
                     target=target,
                     status=GroupHistoryReconciliationStatus.REPAIRING,
                 )
-            self._mark_started(
+            self._mark_activity_safely(
                 db,
-                **activity,
+                callback=self._mark_started,
+                activity=activity,
                 message="Checking Group ranking history",
             )
             result = self._bootstrap_service.ensure(db, target=target)
@@ -135,9 +139,10 @@ class GroupHistoryExecutionService:
                     status=GroupHistoryReconciliationStatus.READY,
                     counts=payload.get("after"),
                 )
-            self._mark_completed(
+            self._mark_activity_safely(
                 db,
-                **activity,
+                callback=self._mark_completed,
+                activity=activity,
                 message="Group ranking history ready",
             )
             return payload
@@ -177,7 +182,7 @@ class GroupHistoryExecutionService:
         self,
         db: Session,
         *,
-        activity: dict,
+        activity: dict[str, object],
         message: str,
     ) -> None:
         db.rollback()
@@ -185,6 +190,21 @@ class GroupHistoryExecutionService:
             self._mark_failed(db, **activity, message=message)
         except Exception:
             db.rollback()
+            logger.warning("Failed to record Group history failure", exc_info=True)
+
+    @staticmethod
+    def _mark_activity_safely(
+        db: Session,
+        *,
+        callback: Callable[..., object],
+        activity: dict[str, object],
+        message: str,
+    ) -> None:
+        try:
+            callback(db, **activity, message=message)
+        except Exception:
+            db.rollback()
+            logger.warning("Failed to record Group history activity", exc_info=True)
 
     def _mark_reconciliation_failed_safely(
         self,
@@ -202,6 +222,10 @@ class GroupHistoryExecutionService:
             )
         except Exception:
             db.rollback()
+            logger.warning(
+                "Failed to record Group history reconciliation failure",
+                exc_info=True,
+            )
 
 
 __all__ = [

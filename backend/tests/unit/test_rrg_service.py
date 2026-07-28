@@ -225,6 +225,15 @@ def test_stored_rrg_history_provider_isolates_the_active_formula():
     assert [point[1] for point in legacy_series["Internet Services"]] == [
         10.0 + index for index in range(14)
     ]
+    _latest, _meta, captured_series = provider.get_all_groups_history(
+        session,
+        market="HK",
+        days=365,
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+    )
+    assert [point[1] for point in captured_series["Internet Services"]] == [
+        70.0 + index for index in range(14)
+    ]
 
 
 def test_live_and_static_rrg_coordinates_match_for_formula_isolated_history():

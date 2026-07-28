@@ -185,3 +185,43 @@ def test_execution_service_finalizes_successful_us_reconciliation_once():
     assert repository.mark.call_args.kwargs["target"] == target
     assert repository.mark.call_args.kwargs["status"].value == "ready"
     completed.assert_called_once()
+
+
+def test_activity_completion_failure_does_not_reclassify_success():
+    from app.services.group_history_execution_service import (
+        GroupHistoryCompletionPolicy,
+        GroupHistoryExecutionService,
+    )
+    from app.services.group_history_reconciliation import GroupHistoryTarget
+
+    db = Mock()
+    bootstrap = Mock()
+    bootstrap.ensure.return_value = _result(ready=True)
+    repository = Mock()
+    service = GroupHistoryExecutionService(
+        bootstrap_service=bootstrap,
+        reconciliation_repository=repository,
+        bump_epoch=Mock(),
+        publish_snapshot=Mock(return_value={"snapshot_revision": "42"}),
+        mark_started=Mock(),
+        mark_completed=Mock(side_effect=RuntimeError("telemetry unavailable")),
+        mark_failed=Mock(),
+    )
+
+    result = service.execute(
+        db,
+        target=GroupHistoryTarget(
+            market="US",
+            formula_version="captured-v1",
+            through_date=date(2026, 6, 30),
+        ),
+        completion_policy=GroupHistoryCompletionPolicy.RECONCILIATION,
+        task_name="repair_group_history_reconciliation",
+        task_id="task-1",
+    )
+
+    assert result["status"] == "ready"
+    assert [call.kwargs["status"].value for call in repository.mark.call_args_list] == [
+        "repairing",
+        "ready",
+    ]

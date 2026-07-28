@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.analysis.rrg_weekly import bucket_rrg_weekly
 from app.domain.markets import get_market_catalog
+from app.services.group_history_reconciliation import GroupHistoryTarget
 from app.services.group_rank_history_policy import (
     CALENDAR_DAY_GROUP_RANK_CHANGE_WINDOWS,
     CALENDAR_DAY_GROUP_RANK_LOOKUP_TOLERANCE_DAYS,
@@ -17,9 +18,9 @@ from app.services.group_rank_history_policy import (
 )
 from app.services.group_rank_snapshot_reader import (
     GroupRankSnapshotReader,
+    GroupSnapshotIntegrityError,
     GroupSnapshotWindowIntegrityError,
 )
-from app.services.group_history_reconciliation import GroupHistoryTarget
 from app.services.market_calendar_service import MarketCalendarService
 from app.services.rrg_service import (
     DEFAULT_LOOKBACK_DAYS,
@@ -32,7 +33,7 @@ from app.services.rrg_service import (
 class GroupHistoryReadinessReport:
     market: str
     through_date: date
-    formula_version: str | None
+    formula_version: str
     supported: bool
     desired_dates: tuple[date, ...] = ()
     valid_dates: tuple[date, ...] = ()
@@ -76,68 +77,41 @@ class GroupHistoryReadinessService:
         *,
         calendar_service: MarketCalendarService | None = None,
         snapshot_reader: GroupRankSnapshotReader | None = None,
-        market_rs_repository=None,
         rrg_history_provider=None,
     ) -> None:
-        if market_rs_repository is None:
-            from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
-
-            market_rs_repository = MarketRsRunRepository()
         if rrg_history_provider is None:
             raise ValueError("RRG history provider is required")
         self._calendar_service = calendar_service or MarketCalendarService()
         self._snapshot_reader = snapshot_reader or GroupRankSnapshotReader()
-        self._market_rs_repository = market_rs_repository
         self._rrg_history_provider = rrg_history_provider
 
     def evaluate(
         self,
         db: Session,
         *,
-        target: GroupHistoryTarget | None = None,
-        market: str | None = None,
-        through_date: date | None = None,
+        target: GroupHistoryTarget,
     ) -> GroupHistoryReadinessReport:
-        normalized_market = (
-            target.market
-            if target is not None
-            else str(market or "").strip().upper()
-        )
-        through = (
-            target.through_date
-            if target is not None
-            else through_date
-            or self._calendar_service.last_completed_trading_day(normalized_market)
-        )
-        catalog_entry = get_market_catalog().get(normalized_market)
+        catalog_entry = get_market_catalog().get(target.market)
         if not catalog_entry.capabilities.group_rankings:
             return GroupHistoryReadinessReport(
-                market=normalized_market,
-                through_date=through,
-                formula_version=None,
+                market=target.market,
+                through_date=target.through_date,
+                formula_version=target.formula_version,
                 supported=False,
                 ready=True,
                 reason="group_rankings_not_supported",
             )
 
-        formula_version = (
-            target.formula_version
-            if target is not None
-            else self._market_rs_repository.active_formula(
-                db,
-                market=normalized_market,
-            )
-        )
-        start_date = through - timedelta(
+        start_date = target.through_date - timedelta(
             days=DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS
         )
         desired_dates = tuple(
             sorted(
                 dict.fromkeys(
                     self._calendar_service.trading_days(
-                        normalized_market,
+                        target.market,
                         start_date,
-                        through,
+                        target.through_date,
                     )
                 )
             )
@@ -146,8 +120,8 @@ class GroupHistoryReadinessService:
         try:
             snapshots = self._snapshot_reader.load_window(
                 db,
-                market=normalized_market,
-                formula_version=formula_version,
+                market=target.market,
+                formula_version=target.formula_version,
                 dates=desired_dates,
                 include_top_symbol_names=False,
             )
@@ -166,7 +140,7 @@ class GroupHistoryReadinessService:
         ]
 
         rank_change_ready = self._rank_change_readiness(
-            through_date=through,
+            through_date=target.through_date,
             valid_dates=valid,
         )
         rrg_required = bool(catalog_entry.capabilities.rrg_scopes)
@@ -175,8 +149,9 @@ class GroupHistoryReadinessService:
         if rrg_required:
             rrg_usable_weeks, rrg_plottable_series = self._rrg_readiness(
                 db,
-                market=normalized_market,
-                through_date=through,
+                market=target.market,
+                formula_version=target.formula_version,
+                through_date=target.through_date,
             )
 
         ready = (
@@ -193,9 +168,9 @@ class GroupHistoryReadinessService:
             )
         )
         return GroupHistoryReadinessReport(
-            market=normalized_market,
-            through_date=through,
-            formula_version=formula_version,
+            market=target.market,
+            through_date=target.through_date,
+            formula_version=target.formula_version,
             supported=True,
             desired_dates=desired_dates,
             valid_dates=tuple(valid),
@@ -231,6 +206,7 @@ class GroupHistoryReadinessService:
         db: Session,
         *,
         market: str,
+        formula_version: str,
         through_date: date,
     ) -> tuple[int, int]:
         try:
@@ -240,6 +216,7 @@ class GroupHistoryReadinessService:
                     market=market,
                     days=DEFAULT_LOOKBACK_DAYS,
                     as_of_date=through_date,
+                    formula_version=formula_version,
                 )
             )
         except (GroupSnapshotIntegrityError, LookupError, ValueError):
