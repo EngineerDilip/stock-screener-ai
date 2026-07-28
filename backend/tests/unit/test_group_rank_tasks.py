@@ -445,6 +445,9 @@ def test_daily_group_rankings_fail_explicitly_when_ibd_mappings_missing(monkeypa
     assert "error" in result
     assert "ibd industry mappings are not loaded" in result["error"].lower()
 
+    with pytest.raises(RuntimeError, match="IBD industry mappings are not loaded"):
+        module.calculate_daily_group_rankings.run(market="US", strict=True)
+
 
 def test_historical_group_rankings_do_not_repair_current_us_metadata(monkeypatch):
     import app.tasks.group_rank_tasks as module

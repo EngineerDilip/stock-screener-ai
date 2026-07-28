@@ -160,6 +160,7 @@ def _build_market_plan(market: str) -> MarketBootstrapPlan:
                 queue_kind=BootstrapQueueKind.MARKET_JOBS,
                 market=market,
                 execution_policy="refresh_guarded",
+                **({"strict": True} if supports_group_rankings else {}),
             ),
             _stage(
                 key="snapshot",

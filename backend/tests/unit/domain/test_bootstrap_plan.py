@@ -59,6 +59,7 @@ def test_non_us_bootstrap_plan_uses_official_universe_without_industry_seed() ->
 
     assert breadth_stage.kwargs["execution_policy"] == "refresh_guarded"
     assert groups_stage.kwargs["execution_policy"] == "refresh_guarded"
+    assert groups_stage.kwargs["strict"] is True
     assert hk_plan.stages[-1].key == "group_history"
     assert hk_plan.stages[-1].kwargs["strict"] is True
 
