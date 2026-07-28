@@ -38,6 +38,24 @@ class CanonicalGroupRankingService:
         as_of_date: date,
         formula_version: str,
     ) -> list[dict[str, Any]]:
+        rankings = self.calculate_and_stage(
+            db,
+            market=market,
+            as_of_date=as_of_date,
+            formula_version=formula_version,
+        )
+        db.commit()
+        return rankings
+
+    def calculate_and_stage(
+        self,
+        db: Session,
+        *,
+        market: str,
+        as_of_date: date,
+        formula_version: str,
+    ) -> list[dict[str, Any]]:
+        """Stage Group rows in the caller's transaction without committing."""
         normalized_market = market.strip().upper()
         run = self.repository.get_completed_exact(
             db,
@@ -183,7 +201,7 @@ class CanonicalGroupRankingService:
         stale_query.delete(synchronize_session=False)
 
         if not values:
-            db.commit()
+            db.flush()
             return
 
         bind = db.get_bind()
@@ -233,4 +251,4 @@ class CanonicalGroupRankingService:
                     continue
                 for key, field_value in value.items():
                     setattr(record, key, field_value)
-        db.commit()
+        db.flush()

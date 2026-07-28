@@ -132,14 +132,13 @@ class GroupRankSnapshotCoordinator:
     ) -> GroupSnapshotResult:
         """Recalculate one integrity-invalid snapshot identity in place."""
         if identity.formula_version == BALANCED_RS_FORMULA_VERSION:
-            run = self.market_rs_snapshot_service.calculate(
+            run = self.market_rs_snapshot_service.rebuild_incompatible_staged(
                 db,
                 market=identity.market,
                 as_of_date=identity.as_of_date,
                 formula_version=identity.formula_version,
-                rebuild_incompatible=True,
             )
-            rankings = self.canonical_group_service.calculate_and_store(
+            rankings = self.canonical_group_service.calculate_and_stage(
                 db,
                 market=identity.market,
                 as_of_date=identity.as_of_date,
