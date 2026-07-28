@@ -55,7 +55,7 @@ def test_main_returns_skip_code_for_market_not_trading_day(monkeypatch, tmp_path
         ],
     )
 
-    assert export_script.main() == 78
+    assert export_script.main() == export_script.STATIC_EXPORT_SKIPPED_EXIT_CODE
 
     captured = capsys.readouterr()
     assert "Static site export skipped for market TW because it is not a trading day." in captured.out
@@ -449,6 +449,17 @@ def test_main_returns_no_current_artifact_code_for_market_rs_price_coverage_gap(
     assert export_calls == []
 
 
+def test_no_current_artifact_exit_message_uses_generic_detail_for_unknown_reason():
+    message = export_script._no_current_artifact_exit_message(  # noqa: SLF001
+        market="DE",
+        failed_markets=("DE",),
+        reasons=("new_allowlisted_reason",),
+    )
+
+    assert "one or more market artifacts were not current" in message
+    assert "fallback" in message
+
+
 def test_main_returns_no_current_artifact_code_for_quarantined_selected_market(
     monkeypatch,
     tmp_path,
@@ -460,6 +471,8 @@ def test_main_returns_no_current_artifact_code_for_quarantined_selected_market(
     monkeypatch.setattr(
         export_script,
         "_run_daily_refresh",
+        # data_quality_gate is not allowlisted by the new collector, so this
+        # intentionally falls through to the existing artifact-missing handler.
         lambda **_kwargs: (
             {
                 "feature_snapshots": {
@@ -503,7 +516,7 @@ def test_main_returns_no_current_artifact_code_for_quarantined_selected_market(
         ],
     )
 
-    assert export_script.main() == 79
+    assert export_script.main() == export_script.STATIC_EXPORT_NO_CURRENT_ARTIFACT_EXIT_CODE
 
     diagnostics_path = output_dir / "diagnostics" / "in" / "snapshot-failure.json"
     assert diagnostics_path.exists()
@@ -524,6 +537,8 @@ def test_main_reraises_unrelated_runtime_errors_for_non_ready_selected_market(
     monkeypatch.setattr(
         export_script,
         "_run_daily_refresh",
+        # Missing reason is not allowlisted by the new collector, so this
+        # intentionally falls through to the original runtime-error path.
         lambda **_kwargs: (
             {
                 "feature_snapshots": {

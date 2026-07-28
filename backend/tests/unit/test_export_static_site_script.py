@@ -1076,6 +1076,118 @@ def test_run_daily_refresh_skips_snapshot_when_market_rs_benchmark_anchor_missin
     ) in warnings
 
 
+def test_run_daily_refresh_continues_eligible_market_when_peer_market_rs_is_not_ready(
+    monkeypatch,
+):
+    calls: list[str] = []
+
+    monkeypatch.setattr(export_script, "STATIC_EXPORT_MARKETS", ("DE", "HK"))
+    monkeypatch.setattr(
+        export_script,
+        "_resolve_latest_completed_trading_date",
+        lambda _market: date(2026, 7, 24),
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_refresh_static_daily_prices",
+        lambda *, as_of_date, market=None: calls.append(f"price:{market}")
+        or {"status": "completed"},
+    )
+
+    def prepare_market_rs(*, market, as_of_date, formula_version):
+        calls.append(f"market-rs:{market}")
+        if market == "DE":
+            return {
+                "status": "failed",
+                "market": market,
+                "as_of_date": as_of_date.isoformat(),
+                "formula_version": formula_version,
+                "reason_code": "current_adjusted_price_coverage_below_threshold",
+                "diagnostics": {
+                    "current_price_coverage": 0.84,
+                    "minimum_current_price_coverage": 0.88,
+                },
+                "market_rs_run_id": None,
+            }
+        return {
+            "status": "completed",
+            "market": market,
+            "as_of_date": as_of_date.isoformat(),
+            "formula_version": formula_version,
+            "market_rs_run_id": 42,
+        }
+
+    monkeypatch.setattr(export_script, "_prepare_static_rs_formula", prepare_market_rs)
+
+    def compute_exposure(*, as_of_date, market):
+        if market == "DE":
+            raise AssertionError("DE exposure must be skipped when Market RS is not ready")
+        calls.append(f"exposure:{market}")
+        return {"status": "completed"}
+
+    monkeypatch.setattr(export_script, "_compute_static_market_exposure", compute_exposure)
+    monkeypatch.setattr(
+        feature_store_tasks,
+        "build_daily_snapshot",
+        SimpleNamespace(
+            run=lambda **kwargs: calls.append(f"snapshot:{kwargs['market']}")
+            or {"status": "published", "run_id": 77, "market": kwargs["market"]}
+        ),
+    )
+
+    def ensure_group_history(*, as_of_date, market, formula_version):
+        if market == "DE":
+            raise AssertionError("DE group-rank history must be skipped")
+        calls.append(f"group:{market}")
+        return _backfill_result(
+            status=GroupRankHistoryBackfillStatus.COMPLETED,
+            market=market,
+            as_of_date=as_of_date,
+        )
+
+    monkeypatch.setattr(export_script, "_ensure_group_rank_history", ensure_group_history)
+    monkeypatch.setattr(
+        feature_store_tasks,
+        "_enrich_feature_run_with_ibd_metadata",
+        lambda **kwargs: calls.append(f"metadata:{kwargs['feature_run_id']}")
+        or {"status": "completed"},
+    )
+    monkeypatch.setattr(
+        export_script.IBDIndustryService,
+        "load_from_csv",
+        lambda _db, csv_path=None: 1,
+    )
+    monkeypatch.setattr(export_script, "_upsert_feature_run_pointer", lambda **_kwargs: None)
+
+    results, warnings = export_script._run_daily_refresh(
+        skip_universe_refresh=True,
+        skip_fundamentals_refresh=True,
+    )
+
+    assert calls == [
+        "price:DE",
+        "price:HK",
+        "market-rs:DE",
+        "market-rs:HK",
+        "exposure:HK",
+        "snapshot:HK",
+        "group:HK",
+        "metadata:77",
+    ]
+    assert results["feature_snapshots"]["DE"]["reason"] == "market_rs_not_ready"
+    assert results["feature_snapshots"]["HK"] == {
+        "status": "published",
+        "run_id": 77,
+        "market": "HK",
+    }
+    assert results["group_rank_history_backfill"]["DE"]["reason"] == "market_rs_not_ready"
+    assert results["group_rank_history_backfill"]["HK"]["status"] == "completed"
+    assert (
+        "Static export market DE Market RS not ready for 2026-07-24: "
+        "current_adjusted_price_coverage_below_threshold."
+    ) in warnings
+
+
 def test_run_daily_refresh_raises_hard_market_rs_failure(
     monkeypatch,
 ):
@@ -1129,6 +1241,56 @@ def test_run_daily_refresh_raises_hard_market_rs_failure(
             skip_universe_refresh=True,
             skip_fundamentals_refresh=True,
         )
+
+
+def test_run_daily_refresh_reports_every_hard_market_rs_failure(
+    monkeypatch,
+):
+    monkeypatch.setattr(export_script, "STATIC_EXPORT_MARKETS", ("DE", "HK"))
+    monkeypatch.setattr(
+        export_script,
+        "_resolve_latest_completed_trading_date",
+        lambda _market: date(2026, 7, 24),
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_refresh_static_daily_prices",
+        lambda *, as_of_date, market=None: {"status": "completed"},
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_prepare_static_rs_formula",
+        lambda *, market, as_of_date, formula_version: {
+            "status": "failed",
+            "market": market,
+            "as_of_date": as_of_date.isoformat(),
+            "formula_version": formula_version,
+            "reason_code": "calculation_failed",
+            "diagnostics": {"error": f"{market} invariant failed"},
+        },
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_compute_static_market_exposure",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("hard Market RS failures must not fall through to exposure")
+        ),
+    )
+    monkeypatch.setattr(
+        export_script.IBDIndustryService,
+        "load_from_csv",
+        lambda _db, csv_path=None: 1,
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        export_script._run_daily_refresh(
+            skip_universe_refresh=True,
+            skip_fundamentals_refresh=True,
+        )
+
+    message = str(exc_info.value)
+    assert "Static Market RS failed hard for DE on 2026-07-24" in message
+    assert "Static Market RS failed hard for HK on 2026-07-24" in message
 
 
 def test_run_daily_refresh_treats_explicit_legacy_rs_selection_as_ready(

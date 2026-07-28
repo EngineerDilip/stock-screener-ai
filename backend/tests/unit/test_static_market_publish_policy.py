@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
+from app.domain.relative_strength import (
+    BALANCED_RS_FORMULA_VERSION,
+    LEGACY_RS_FORMULA_VERSION,
+)
 from app.services.static_market_publish_policy import (
     StaticMarketRsArtifactState,
     classify_static_market_rs_artifact_result,
@@ -32,6 +35,98 @@ def test_market_rs_price_coverage_gap_is_no_current_artifact():
         )
         is StaticMarketRsArtifactState.NO_CURRENT_ARTIFACT
     )
+
+
+def test_market_rs_balanced_completed_result_is_ready():
+    result = {
+        "status": "completed",
+        "market": "DE",
+        "as_of_date": "2026-07-27",
+        "formula_version": BALANCED_RS_FORMULA_VERSION,
+        "market_rs_run_id": 42,
+    }
+
+    assert (
+        classify_static_market_rs_artifact_result(
+            result,
+            market="DE",
+            as_of_date="2026-07-27",
+            formula_version=BALANCED_RS_FORMULA_VERSION,
+        )
+        is StaticMarketRsArtifactState.READY
+    )
+
+
+def test_market_rs_legacy_selected_result_is_ready():
+    result = {
+        "status": "selected",
+        "market": "DE",
+        "as_of_date": "2026-07-27",
+        "formula_version": LEGACY_RS_FORMULA_VERSION,
+        "market_rs_run_id": None,
+    }
+
+    assert (
+        classify_static_market_rs_artifact_result(
+            result,
+            market="DE",
+            as_of_date="2026-07-27",
+            formula_version=LEGACY_RS_FORMULA_VERSION,
+        )
+        is StaticMarketRsArtifactState.READY
+    )
+
+
+def test_market_rs_legacy_non_selected_result_is_hard_failure():
+    result = {
+        "status": "failed",
+        "market": "DE",
+        "as_of_date": "2026-07-27",
+        "formula_version": LEGACY_RS_FORMULA_VERSION,
+        "market_rs_run_id": None,
+    }
+
+    assert (
+        classify_static_market_rs_artifact_result(
+            result,
+            market="DE",
+            as_of_date="2026-07-27",
+            formula_version=LEGACY_RS_FORMULA_VERSION,
+        )
+        is StaticMarketRsArtifactState.HARD_FAILURE
+    )
+
+
+def test_market_rs_payload_identity_mismatch_is_hard_failure():
+    valid_result = {
+        "status": "completed",
+        "market": "DE",
+        "as_of_date": "2026-07-27",
+        "formula_version": BALANCED_RS_FORMULA_VERSION,
+        "market_rs_run_id": 42,
+    }
+
+    mismatch_cases = [
+        ({"market": "HK"}, {"market": "DE", "as_of_date": "2026-07-27"}),
+        ({"as_of_date": "2026-07-26"}, {"market": "DE", "as_of_date": "2026-07-27"}),
+        ({"formula_version": "legacy-linear-v1"}, {"market": "DE", "as_of_date": "2026-07-27"}),
+        ("failed", {"market": "DE", "as_of_date": "2026-07-27"}),
+    ]
+
+    for overrides, kwargs in mismatch_cases:
+        result = (
+            {**valid_result, **overrides}
+            if isinstance(overrides, dict)
+            else overrides
+        )
+        assert (
+            classify_static_market_rs_artifact_result(
+                result,
+                formula_version=BALANCED_RS_FORMULA_VERSION,
+                **kwargs,
+            )
+            is StaticMarketRsArtifactState.HARD_FAILURE
+        )
 
 
 def test_market_rs_unexpected_failure_is_hard_failure():

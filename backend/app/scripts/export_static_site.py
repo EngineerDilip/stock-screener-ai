@@ -273,11 +273,15 @@ def _no_current_artifact_exit_message(
     reasons: tuple[str, ...],
 ) -> str:
     market_label = market or ", ".join(failed_markets)
+    generic_detail = "one or more market artifacts were not current"
     unique_reasons = set(reasons)
     if len(unique_reasons) == 1:
-        detail = STATIC_NO_CURRENT_ARTIFACT_EXIT_MESSAGES[reasons[0]]
+        detail = STATIC_NO_CURRENT_ARTIFACT_EXIT_MESSAGES.get(
+            reasons[0],
+            generic_detail,
+        )
     else:
-        detail = "one or more market artifacts were not current"
+        detail = generic_detail
     return (
         f"Static site export skipped for market {market_label}; "
         f"{detail}, diagnostics were uploaded, "
@@ -739,10 +743,13 @@ def _run_daily_refresh(
             is StaticMarketRsArtifactState.HARD_FAILURE
         }
         if hard_market_rs_failures:
-            failed_market, failed_result = next(iter(hard_market_rs_failures.items()))
-            raise RuntimeError(
+            details = "; ".join(
                 f"Static Market RS failed hard for {failed_market} "
                 f"on {as_of_by_market[failed_market].isoformat()}: {failed_result}"
+                for failed_market, failed_result in hard_market_rs_failures.items()
+            )
+            raise RuntimeError(
+                details
             )
 
         market_rs_no_current_artifact_warnings = {
@@ -760,7 +767,10 @@ def _run_daily_refresh(
         market_exposure: dict[str, Any] = {}
         for selected_market in selected_markets:
             market_as_of = as_of_by_market[selected_market]
-            if selected_market in market_rs_no_current_artifact_warnings:
+            if (
+                market_rs_artifact_states[selected_market]
+                is StaticMarketRsArtifactState.NO_CURRENT_ARTIFACT
+            ):
                 market_exposure[selected_market] = {
                     "status": "skipped",
                     "reason": "market_rs_not_ready",
@@ -848,7 +858,10 @@ def _run_daily_refresh(
         group_rank_history_report: dict[str, dict[str, Any]] = {}
         for selected_market in selected_markets:
             market_as_of = as_of_by_market[selected_market]
-            if selected_market in market_rs_no_current_artifact_warnings:
+            if (
+                market_rs_artifact_states[selected_market]
+                is StaticMarketRsArtifactState.NO_CURRENT_ARTIFACT
+            ):
                 skipped = GroupRankHistoryBackfillResult(
                     status=GroupRankHistoryBackfillStatus.SKIPPED,
                     market=selected_market,
