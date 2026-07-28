@@ -95,6 +95,7 @@ class GroupHistoryExecutionService:
         strict: bool,
         lifecycle: str,
     ) -> dict:
+        fresh_bootstrap = reservation is None
         activity = {
             "market": target.market,
             "stage_key": "group_history",
@@ -151,28 +152,16 @@ class GroupHistoryExecutionService:
                 return payload
 
             if result.status is GroupHistoryBootstrapStatus.READY:
-                if reservation is not None and not self._reservation_is_current(
+                reservation, superseded = self._prepare_finalization(
                     db,
+                    target=target,
                     reservation=reservation,
-                ):
-                    return self._record_superseded(
-                        db,
-                        reservation=reservation,
-                        reason="target_changed_before_finalization",
-                    )
-                if (
-                    reservation is not None
-                    and not self._reconciliation_repository.transition(
-                        db,
-                        reservation=reservation,
-                        expected_statuses={GroupHistoryReconciliationStatus.REPAIRING},
-                        status=GroupHistoryReconciliationStatus.FINALIZING,
-                    )
-                ):
-                    return self._superseded_payload(
-                        reservation,
-                        "reservation_lost_before_finalization",
-                    )
+                    fresh_bootstrap=fresh_bootstrap,
+                    strict=strict,
+                )
+                if superseded is not None:
+                    return superseded
+                assert reservation is not None
                 self._bump_epoch(target.market)
                 payload["cache_invalidated"] = True
                 if target.market == "US":
@@ -214,10 +203,15 @@ class GroupHistoryExecutionService:
                     status=GroupHistoryReconciliationStatus.READY,
                     counts=payload.get("after"),
                 ):
-                    return self._superseded_payload(
+                    superseded = self._superseded_payload(
                         reservation,
                         "reservation_lost_after_finalization",
                     )
+                    if fresh_bootstrap and strict:
+                        raise RuntimeError(
+                            "Group history finalization reservation lost"
+                        )
+                    return superseded
             self._mark_activity_safely(
                 db,
                 callback=self._mark_completed,
@@ -326,13 +320,75 @@ class GroupHistoryExecutionService:
             return False
         if self._resolve_current_target is None:
             return True
-        return (
-            self._resolve_current_target(
+        return self._target_is_current(db, target=reservation.target)
+
+    def _target_is_current(
+        self,
+        db: Session,
+        *,
+        target: GroupHistoryTarget,
+    ) -> bool:
+        if self._resolve_current_target is None:
+            return True
+        return self._resolve_current_target(db, market=target.market) == target
+
+    def _prepare_finalization(
+        self,
+        db: Session,
+        *,
+        target: GroupHistoryTarget,
+        reservation: GroupHistoryReservation | None,
+        fresh_bootstrap: bool,
+        strict: bool,
+    ) -> tuple[GroupHistoryReservation | None, dict | None]:
+        if fresh_bootstrap:
+            if not self._target_is_current(db, target=target):
+                return None, self._fresh_bootstrap_superseded(
+                    target=target,
+                    reason="target_changed_before_finalization",
+                    strict=strict,
+                )
+            reservation = self._reconciliation_repository.reserve(
                 db,
-                market=reservation.target.market,
+                target=target,
             )
-            == reservation.target
+            if reservation is None:
+                return None, self._fresh_bootstrap_superseded(
+                    target=target,
+                    reason="finalization_reservation_unavailable",
+                    strict=strict,
+                )
+
+        assert reservation is not None
+        expected_status = (
+            GroupHistoryReconciliationStatus.QUEUED
+            if fresh_bootstrap
+            else GroupHistoryReconciliationStatus.REPAIRING
         )
+        if not self._reservation_is_current(db, reservation=reservation):
+            superseded = self._record_superseded(
+                db,
+                reservation=reservation,
+                reason="target_changed_before_finalization",
+                expected_statuses={expected_status},
+            )
+            if fresh_bootstrap and strict:
+                raise RuntimeError("Group history target changed before finalization")
+            return None, superseded
+        if not self._reconciliation_repository.transition(
+            db,
+            reservation=reservation,
+            expected_statuses={expected_status},
+            status=GroupHistoryReconciliationStatus.FINALIZING,
+        ):
+            superseded = self._superseded_payload(
+                reservation,
+                "reservation_lost_before_finalization",
+            )
+            if fresh_bootstrap and strict:
+                raise RuntimeError("Group history finalization reservation lost")
+            return None, superseded
+        return reservation, None
 
     def _record_superseded(
         self,
@@ -340,27 +396,52 @@ class GroupHistoryExecutionService:
         *,
         reservation: GroupHistoryReservation,
         reason: str,
+        expected_statuses: set[GroupHistoryReconciliationStatus] | None = None,
     ) -> dict:
         self._reconciliation_repository.transition(
             db,
             reservation=reservation,
-            expected_statuses={GroupHistoryReconciliationStatus.REPAIRING},
+            expected_statuses=expected_statuses
+            or {GroupHistoryReconciliationStatus.REPAIRING},
             status=GroupHistoryReconciliationStatus.INCOMPLETE,
             error=reason,
         )
         return self._superseded_payload(reservation, reason)
 
-    @staticmethod
+    @classmethod
+    def _fresh_bootstrap_superseded(
+        cls,
+        *,
+        target: GroupHistoryTarget,
+        reason: str,
+        strict: bool,
+    ) -> dict:
+        if strict:
+            raise RuntimeError(f"Group history {reason.replace('_', ' ')}")
+        return cls._target_superseded_payload(target, reason)
+
+    @classmethod
     def _superseded_payload(
+        cls,
         reservation: GroupHistoryReservation,
+        reason: str,
+    ) -> dict:
+        return cls._target_superseded_payload(
+            reservation.target,
+            reason,
+        )
+
+    @staticmethod
+    def _target_superseded_payload(
+        target: GroupHistoryTarget,
         reason: str,
     ) -> dict:
         return {
             "status": "superseded",
             "reason": reason,
-            "market": reservation.target.market,
-            "formula_version": reservation.target.formula_version,
-            "through_date": reservation.target.through_date.isoformat(),
+            "market": target.market,
+            "formula_version": target.formula_version,
+            "through_date": target.through_date.isoformat(),
         }
 
 
