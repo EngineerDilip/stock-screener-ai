@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import date
 import logging
-from typing import Optional, Sequence
+from typing import Collection, Optional, Sequence
 
 import pandas as pd
 from sqlalchemy.orm import Session
@@ -54,6 +54,7 @@ class GroupRankInputLoader:
         market: str,
         policy: DerivedDataExecutionPolicy,
         calculation_date: date | None = None,
+        universe_symbols: Collection[str] | None = None,
     ) -> GroupRankPrefetchData:
         normalized_market = (market or "US").upper()
         group_names = tuple(
@@ -92,9 +93,10 @@ class GroupRankInputLoader:
                 group_names=group_names,
             )
 
-        active_symbols = self.universe_source.active_symbols(
-            db,
-            normalized_market,
+        active_symbols = (
+            frozenset(str(symbol).upper() for symbol in universe_symbols)
+            if universe_symbols is not None
+            else self.universe_source.active_symbols(db, normalized_market)
         )
         symbols_by_group: dict[str, tuple[str, ...]] = {}
         unsupported_symbols: set[str] = set()

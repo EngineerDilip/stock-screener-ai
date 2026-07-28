@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import threading
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -96,19 +97,32 @@ async def trigger_ui_snapshot_rebuild_on_startup() -> None:
     return None
 
 
-async def trigger_group_history_reconciliation_on_startup() -> dict[str, str | None]:
-    """Queue upgrade repair without blocking the FastAPI event loop."""
+def _publish_group_history_reconciliation() -> None:
+    """Publish from a daemon thread that cannot delay process shutdown."""
     from .tasks.group_history_tasks import discover_group_history_reconciliation
 
     try:
-        result = await asyncio.to_thread(discover_group_history_reconciliation.delay)
-        return {"status": "queued", "task_id": result.id}
-    except Exception as exc:
+        result = discover_group_history_reconciliation.delay()
+        logger.info(
+            "Group history startup reconciliation queued",
+            extra={"task_id": result.id},
+        )
+    except Exception:
         logger.warning(
             "Group history startup reconciliation failed",
             exc_info=True,
         )
-        return {"status": f"failed:{type(exc).__name__}"}
+
+
+def trigger_group_history_reconciliation_on_startup() -> dict[str, str]:
+    """Launch best-effort broker publication outside loop-owned executors."""
+    publisher = threading.Thread(
+        target=_publish_group_history_reconciliation,
+        name="group-history-startup-publisher",
+        daemon=True,
+    )
+    publisher.start()
+    return {"status": "dispatching"}
 
 
 @asynccontextmanager
@@ -120,9 +134,7 @@ async def lifespan(app: FastAPI):
     initialize_runtime()
     runtime_services = initialize_process_runtime_services(session_factory=SessionLocal)
     app.state.runtime_services = runtime_services
-    app.state.group_history_reconciliation_task = asyncio.create_task(
-        trigger_group_history_reconciliation_on_startup()
-    )
+    trigger_group_history_reconciliation_on_startup()
     if settings.mcp_http_enabled:
         from .interfaces.mcp.http_transport import create_mcp_http_server
 
@@ -136,9 +148,6 @@ async def lifespan(app: FastAPI):
         clear_runtime_services()
         if hasattr(app.state, "runtime_services"):
             delattr(app.state, "runtime_services")
-        if hasattr(app.state, "group_history_reconciliation_task"):
-            app.state.group_history_reconciliation_task.cancel()
-            delattr(app.state, "group_history_reconciliation_task")
         if hasattr(app.state, "mcp_server"):
             delattr(app.state, "mcp_server")
         engine.dispose()

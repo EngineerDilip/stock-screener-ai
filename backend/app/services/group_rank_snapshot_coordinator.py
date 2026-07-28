@@ -68,6 +68,7 @@ class GroupRankSnapshotCoordinator:
         db: Session,
         *,
         identity: GroupSnapshotIdentity,
+        universe_symbols: Iterable[str] | None = None,
     ) -> GroupSnapshotResult:
         existing = self.reader.load_exact(
             db,
@@ -107,6 +108,7 @@ class GroupRankSnapshotCoordinator:
                 identity.as_of_date,
                 market=identity.market,
                 formula_version=LEGACY_RS_FORMULA_VERSION,
+                **self._legacy_universe_kwargs(universe_symbols),
             )
             rows = self.reader.load_exact(
                 db,
@@ -126,6 +128,7 @@ class GroupRankSnapshotCoordinator:
         db: Session,
         *,
         identity: GroupSnapshotIdentity,
+        universe_symbols: Iterable[str] | None = None,
     ) -> GroupSnapshotResult:
         """Recalculate one integrity-invalid snapshot identity in place."""
         if identity.formula_version == BALANCED_RS_FORMULA_VERSION:
@@ -166,6 +169,7 @@ class GroupRankSnapshotCoordinator:
                 identity.as_of_date,
                 market=identity.market,
                 formula_version=LEGACY_RS_FORMULA_VERSION,
+                **self._legacy_universe_kwargs(universe_symbols),
             )
             if not calculation.rankings:
                 raise RuntimeError("Legacy Group repair produced no rankings")
@@ -208,6 +212,14 @@ class GroupRankSnapshotCoordinator:
                     )
                 )
         return GroupBackfillReport(results=tuple(results))
+
+    @staticmethod
+    def _legacy_universe_kwargs(
+        universe_symbols: Iterable[str] | None,
+    ) -> dict[str, tuple[str, ...]]:
+        if universe_symbols is None:
+            return {}
+        return {"universe_symbols": tuple(universe_symbols)}
 
     @staticmethod
     def _result(identity, status, rows) -> GroupSnapshotResult:

@@ -5,14 +5,15 @@ from datetime import date
 from celery.exceptions import SoftTimeLimitExceeded
 import pytest
 
+from app.domain.relative_strength import LEGACY_RS_FORMULA_VERSION
 from app.services.group_history_readiness_service import GroupHistoryReadinessReport
 from app.services.group_history_reconciliation import GroupHistoryTarget
 
 
-def _target(market="US"):
+def _target(market="US", formula_version="balanced-v1"):
     return GroupHistoryTarget(
         market=market,
-        formula_version="balanced-v1",
+        formula_version=formula_version,
         through_date=date(2026, 6, 30),
     )
 
@@ -23,6 +24,7 @@ def _report(
     missing=(),
     invalid=(),
     supported: bool = True,
+    formula_version: str = "balanced-v1",
 ) -> GroupHistoryReadinessReport:
     through = date(2026, 6, 30)
     valid = tuple(
@@ -33,7 +35,7 @@ def _report(
     return GroupHistoryReadinessReport(
         market="US",
         through_date=through,
-        formula_version="balanced-v1" if supported else None,
+        formula_version=formula_version if supported else None,
         supported=supported,
         desired_dates=tuple(sorted((*valid, *missing, *invalid))),
         valid_dates=valid,
@@ -59,15 +61,19 @@ class _Coordinator:
     def __init__(self, fail_date=None):
         self.ensure_calls = []
         self.repair_calls = []
+        self.ensure_universes = []
+        self.repair_universes = []
         self.fail_date = fail_date
 
-    def ensure_snapshot(self, _db, *, identity):
+    def ensure_snapshot(self, _db, *, identity, universe_symbols=None):
         self.ensure_calls.append(identity)
+        self.ensure_universes.append(universe_symbols)
         if identity.as_of_date == self.fail_date:
             raise RuntimeError("price anchor unavailable")
 
-    def repair_snapshot(self, _db, *, identity):
+    def repair_snapshot(self, _db, *, identity, universe_symbols=None):
         self.repair_calls.append(identity)
+        self.repair_universes.append(universe_symbols)
         if identity.as_of_date == self.fail_date:
             raise RuntimeError("repair failed")
 
@@ -76,6 +82,14 @@ class _Policies:
     @staticmethod
     def policy_for(_market, day):
         return "point_in_time" if day.day == 1 else "current_active_fallback_v1"
+
+
+class _LegacyPolicies(_Policies):
+    @staticmethod
+    def resolve(_db, *, market, as_of_date):
+        assert market == "US"
+        assert as_of_date == date(2026, 5, 2)
+        return type("Universe", (), {"symbols": ("OLD", "HIST")})()
 
 
 class _DB:
@@ -130,6 +144,28 @@ def test_group_history_bootstrap_processes_only_missing_and_invalid_oldest_first
     }
     assert result.after.ready is True
     assert db.commits == 2
+
+
+def test_group_history_bootstrap_resolves_legacy_historical_universe():
+    from app.services.group_history_bootstrap_service import (
+        GroupHistoryBootstrapService,
+    )
+
+    missing = date(2026, 5, 2)
+    coordinator = _Coordinator()
+    formula = LEGACY_RS_FORMULA_VERSION
+    service = GroupHistoryBootstrapService(
+        readiness_service=_Readiness(
+            _report(ready=False, missing=(missing,), formula_version=formula),
+            _report(ready=True, formula_version=formula),
+        ),
+        snapshot_coordinator=coordinator,
+        universe_resolver=_LegacyPolicies(),
+    )
+
+    service.ensure(_DB(), target=_target(formula_version=formula))
+
+    assert coordinator.ensure_universes == [("OLD", "HIST")]
 
 
 def test_group_history_bootstrap_rolls_back_failed_date_and_trusts_after_report():

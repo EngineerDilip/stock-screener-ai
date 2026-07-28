@@ -1,40 +1,44 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 
-def test_group_history_startup_trigger_dispatches_outside_event_loop(monkeypatch):
+def test_group_history_startup_trigger_uses_shutdown_independent_daemon(monkeypatch):
     from app import main as module
 
-    discovery = Mock()
-    discovery.delay.return_value = SimpleNamespace(id="discovery-1")
+    publisher = Mock(name="publisher-thread")
+    thread_factory = Mock(return_value=publisher)
+    monkeypatch.setattr(module.threading, "Thread", thread_factory)
 
+    result = module.trigger_group_history_reconciliation_on_startup()
+
+    assert result == {"status": "dispatching"}
+    thread_factory.assert_called_once_with(
+        target=module._publish_group_history_reconciliation,
+        name="group-history-startup-publisher",
+        daemon=True,
+    )
+    publisher.start.assert_called_once_with()
+
+
+def test_daemon_publisher_can_remain_blocked_without_lifespan_owning_it(monkeypatch):
+    from app import main as module
+
+    dispatch_started = threading.Event()
+    release_dispatch = threading.Event()
+    discovery = Mock()
+    discovery.delay.side_effect = lambda: (
+        dispatch_started.set(),
+        release_dispatch.wait(),
+        SimpleNamespace(id="discovery-1"),
+    )[-1]
     monkeypatch.setattr(
         "app.tasks.group_history_tasks.discover_group_history_reconciliation",
         discovery,
     )
-
-    to_thread = Mock(side_effect=lambda fn: asyncio.sleep(0, result=fn()))
-    monkeypatch.setattr(module.asyncio, "to_thread", to_thread)
-
-    result = asyncio.run(module.trigger_group_history_reconciliation_on_startup())
-
-    assert result == {"status": "queued", "task_id": "discovery-1"}
-    to_thread.assert_called_once_with(discovery.delay)
-    discovery.delay.assert_called_once_with()
-
-
-def test_lifespan_does_not_await_group_history_dispatch(monkeypatch):
-    from app import main as module
-
-    dispatch_started = asyncio.Event()
-    keep_dispatch_pending = asyncio.Event()
-
-    async def pending_dispatch():
-        dispatch_started.set()
-        await keep_dispatch_pending.wait()
 
     monkeypatch.setattr(module, "initialize_runtime", Mock())
     monkeypatch.setattr(
@@ -43,17 +47,15 @@ def test_lifespan_does_not_await_group_history_dispatch(monkeypatch):
         Mock(return_value=object()),
     )
     monkeypatch.setattr(module, "clear_runtime_services", Mock())
-    monkeypatch.setattr(
-        module,
-        "trigger_group_history_reconciliation_on_startup",
-        pending_dispatch,
-    )
     monkeypatch.setattr(module.settings, "mcp_http_enabled", False)
     monkeypatch.setattr(module.engine, "dispose", Mock())
     test_app = SimpleNamespace(state=SimpleNamespace())
 
     async def run_lifespan():
         async with module.lifespan(test_app):
-            await asyncio.wait_for(dispatch_started.wait(), timeout=0.1)
+            assert dispatch_started.wait(timeout=0.1)
 
-    asyncio.run(asyncio.wait_for(run_lifespan(), timeout=0.2))
+    try:
+        asyncio.run(asyncio.wait_for(run_lifespan(), timeout=0.2))
+    finally:
+        release_dispatch.set()

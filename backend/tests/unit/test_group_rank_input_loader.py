@@ -145,6 +145,38 @@ def test_guarded_load_uses_only_cached_benchmark_and_stock_reads(db_session):
     benchmark_cache.get_benchmark_data.assert_not_called()
 
 
+def test_load_uses_explicit_historical_universe_instead_of_current_active(db_session):
+    prices = _price_frame()
+    price_cache = Mock()
+    price_cache.get_cached_only_fresh.return_value = prices
+    price_cache.get_many_cached_only_fresh.return_value = {"OLD": prices}
+    benchmark_cache = Mock()
+    benchmark_cache.get_benchmark_symbol.return_value = "SPY"
+    benchmark_cache.get_benchmark_candidates.return_value = ["SPY"]
+    loader = _loader(
+        price_cache=price_cache,
+        benchmark_cache=benchmark_cache,
+        groups={"Software": ("OLD", "CURRENT")},
+        active=("CURRENT",),
+    )
+
+    prefetch = loader.load(
+        db_session,
+        market="US",
+        policy=_policy("refresh_guarded"),
+        calculation_date=date(2026, 3, 20),
+        universe_symbols=("OLD",),
+    )
+
+    assert prefetch.active_symbols == frozenset({"OLD"})
+    assert prefetch.symbols_by_group == {"Software": ("OLD",)}
+    price_cache.get_many_cached_only_fresh.assert_called_once_with(
+        ["OLD"],
+        period="2y",
+        required_as_of_date=date(2026, 3, 20),
+    )
+
+
 def test_guarded_load_requires_target_session_for_benchmark(db_session):
     target = date(2026, 3, 20)
     price_cache = Mock()

@@ -530,6 +530,31 @@ def test_prefetch_for_daily_calculation_forwards_target_date():
         market="US",
         policy=policy,
         calculation_date=target,
+        universe_symbols=None,
+    )
+
+
+def test_prefetch_forwards_explicit_historical_universe():
+    service = _make_group_rank_service()
+    service.input_loader.load = Mock(return_value=Mock())
+    db = Mock()
+    target = date(2026, 3, 20)
+    policy = _policy("refresh_guarded", target)
+
+    service._prefetch_all_data(
+        db,
+        market="US",
+        policy=policy,
+        calculation_date=target,
+        universe_symbols=("OLD", "HIST"),
+    )
+
+    service.input_loader.load.assert_called_once_with(
+        db,
+        market="US",
+        policy=policy,
+        calculation_date=target,
+        universe_symbols=("OLD", "HIST"),
     )
 
 

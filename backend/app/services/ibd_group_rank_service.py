@@ -4,6 +4,7 @@ Service for calculating and managing IBD Industry Group Rankings.
 Calculates daily rankings based on average RS rating of constituent stocks.
 """
 import logging
+from collections.abc import Collection
 from typing import Any, Dict, List
 from datetime import datetime, date, timedelta
 from sqlalchemy.orm import Session
@@ -139,6 +140,7 @@ class IBDGroupRankService:
         ),
         cache_requirement: GroupRankCacheRequirement = GroupRankCacheRequirement.disabled(),
         formula_version: str | None = None,
+        universe_symbols: Collection[str] | None = None,
     ) -> GroupRankCalculationResult:
         """
         Calculate and store rankings for all IBD groups for a given date.
@@ -178,6 +180,7 @@ class IBDGroupRankService:
             market=normalized_market,
             policy=policy,
             calculation_date=calculation_date,
+            universe_symbols=universe_symbols,
         )
         legacy_prefetch = not isinstance(
             raw_prefetch,
@@ -655,12 +658,14 @@ class IBDGroupRankService:
             DerivedDataExecutionPolicy.provider_allowed()
         ),
         calculation_date: date | None = None,
+        universe_symbols: Collection[str] | None = None,
     ) -> GroupRankPrefetchData:
         return self.input_loader.load(
             db,
             market=(market or "US").upper(),
             policy=policy,
             calculation_date=calculation_date,
+            universe_symbols=universe_symbols,
         )
 
     def backfill_rankings_optimized(

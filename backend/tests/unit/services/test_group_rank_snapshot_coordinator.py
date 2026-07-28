@@ -73,6 +73,27 @@ def test_legacy_snapshot_never_calls_canonical_stock_or_group(db_session):
     canonical.calculate_and_store.assert_not_called()
 
 
+def test_legacy_snapshot_passes_historical_universe_to_calculation(db_session):
+    reader = Mock()
+    reader.load_exact.side_effect = [[], [{"market_rs_run_id": None}]]
+    legacy = Mock()
+    identity = GroupSnapshotIdentity("US", AS_OF, LEGACY_RS_FORMULA_VERSION)
+
+    _coordinator(reader, Mock(), Mock(), legacy).ensure_snapshot(
+        db_session,
+        identity=identity,
+        universe_symbols=("OLD", "HIST"),
+    )
+
+    legacy.calculate_group_rankings.assert_called_once_with(
+        db_session,
+        AS_OF,
+        market="US",
+        formula_version=LEGACY_RS_FORMULA_VERSION,
+        universe_symbols=("OLD", "HIST"),
+    )
+
+
 def test_backfill_rolls_back_failed_date_before_processing_next(db_session):
     coordinator = _coordinator(Mock(), Mock(), Mock(), Mock())
     first = GroupSnapshotIdentity(
