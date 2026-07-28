@@ -23,6 +23,7 @@ GROUP_HISTORY_RECONCILIATION_KEY_PREFIX = (
     f"runtime.group_history.v{GROUP_HISTORY_RECONCILIATION_SCHEMA_VERSION}."
 )
 GROUP_HISTORY_RECONCILIATION_ACTIVE_TIMEOUT = timedelta(hours=6)
+GROUP_HISTORY_RECONCILIATION_QUEUED_TIMEOUT = timedelta(days=1)
 
 
 class GroupHistoryReconciliationStatus(StrEnum):
@@ -253,18 +254,18 @@ class GroupHistoryReconciliationRepository:
 
     @staticmethod
     def _is_stale(marker: GroupHistoryReconciliationMarker) -> bool:
-        if marker.status is GroupHistoryReconciliationStatus.QUEUED:
-            return False
         try:
             updated_at = datetime.fromisoformat(marker.updated_at)
         except ValueError:
             return True
         if updated_at.tzinfo is None:
             updated_at = updated_at.replace(tzinfo=timezone.utc)
-        return (
-            datetime.now(timezone.utc) - updated_at
-            > GROUP_HISTORY_RECONCILIATION_ACTIVE_TIMEOUT
+        timeout = (
+            GROUP_HISTORY_RECONCILIATION_QUEUED_TIMEOUT
+            if marker.status is GroupHistoryReconciliationStatus.QUEUED
+            else GROUP_HISTORY_RECONCILIATION_ACTIVE_TIMEOUT
         )
+        return datetime.now(timezone.utc) - updated_at > timeout
 
     def owns(
         self,
@@ -350,6 +351,7 @@ class GroupHistoryReconciliationRepository:
 __all__ = [
     "GROUP_HISTORY_RECONCILIATION_SCHEMA_VERSION",
     "GROUP_HISTORY_RECONCILIATION_ACTIVE_TIMEOUT",
+    "GROUP_HISTORY_RECONCILIATION_QUEUED_TIMEOUT",
     "GroupHistoryReservation",
     "GroupHistoryReconciliationMarker",
     "GroupHistoryReconciliationRepository",

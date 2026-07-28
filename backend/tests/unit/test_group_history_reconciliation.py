@@ -175,7 +175,7 @@ def test_stale_dispatching_marker_can_be_reserved_after_interrupted_dispatch(
     assert repository.reserve(db_session, target=target) is not None
 
 
-def test_stale_queued_marker_remains_owned_while_workflow_waits(db_session):
+def test_queued_marker_remains_owned_during_extended_broker_backlog(db_session):
     from app.models.app_settings import AppSetting
     from app.services.group_history_reconciliation import (
         GroupHistoryReconciliationRepository,
@@ -193,7 +193,7 @@ def test_stale_queued_marker_remains_owned_while_workflow_waits(db_session):
     payload = json.loads(setting.value)
     payload["status"] = "queued"
     payload["updated_at"] = (
-        datetime.now(timezone.utc) - timedelta(days=7)
+        datetime.now(timezone.utc) - timedelta(hours=7)
     ).isoformat()
     setting.value = json.dumps(payload)
     db_session.commit()
@@ -203,6 +203,39 @@ def test_stale_queued_marker_remains_owned_while_workflow_waits(db_session):
     assert marker is not None
     assert marker.reservation_id == reservation.reservation_id
     assert marker.status.value == "queued"
+
+
+def test_abandoned_queued_marker_can_be_reserved_after_bounded_lease(db_session):
+    from app.models.app_settings import AppSetting
+    from app.services.group_history_reconciliation import (
+        GroupHistoryReconciliationRepository,
+    )
+
+    repository = GroupHistoryReconciliationRepository()
+    target = _target()
+    reservation = repository.reserve(db_session, target=target)
+    assert reservation is not None
+    setting = (
+        db_session.query(AppSetting)
+        .filter(AppSetting.key == repository.key("US"))
+        .one()
+    )
+    payload = json.loads(setting.value)
+    payload["status"] = "queued"
+    payload["updated_at"] = (
+        datetime.now(timezone.utc) - timedelta(days=2)
+    ).isoformat()
+    setting.value = json.dumps(payload)
+    db_session.commit()
+
+    replacement = repository.reserve(db_session, target=target)
+
+    assert replacement is not None
+    assert replacement.reservation_id != reservation.reservation_id
+    marker = repository.load(db_session, market="US")
+    assert marker is not None
+    assert marker.reservation_id == replacement.reservation_id
+    assert marker.status.value == "dispatching"
 
 
 def test_stale_reservation_cannot_overwrite_a_new_target(db_session):
