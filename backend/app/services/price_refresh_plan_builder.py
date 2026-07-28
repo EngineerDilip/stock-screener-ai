@@ -35,6 +35,24 @@ def _normalize_symbols(symbols: Sequence[str]) -> tuple[str, ...]:
     return tuple(str(symbol).upper() for symbol in symbols)
 
 
+def _extend_universe(
+    universe: PriceRefreshUniverse,
+    symbol_markets: Mapping[str, str],
+) -> PriceRefreshUniverse:
+    extra_symbols = tuple(
+        symbol for symbol in symbol_markets if symbol not in universe.symbol_markets
+    )
+    if not extra_symbols:
+        return universe
+    return PriceRefreshUniverse(
+        symbols=universe.symbols + extra_symbols,
+        symbol_markets={
+            **universe.symbol_markets,
+            **{symbol: symbol_markets[symbol] for symbol in extra_symbols},
+        },
+    )
+
+
 def _key_market_refresh_symbols(
     market: str | None,
     normalize_market: Callable[[str], str],
@@ -103,18 +121,9 @@ def extend_universe_with_key_market_symbols(
     Composed into refresh planning only — readiness gating loads the plain
     universe and must not count instruments outside it.
     """
-    key_market_symbols = _key_market_refresh_symbols(market, normalize_market)
-    extra_symbols = tuple(
-        symbol for symbol in key_market_symbols if symbol not in universe.symbol_markets
-    )
-    if not extra_symbols:
-        return universe
-    return PriceRefreshUniverse(
-        symbols=universe.symbols + extra_symbols,
-        symbol_markets={
-            **universe.symbol_markets,
-            **{symbol: key_market_symbols[symbol] for symbol in extra_symbols},
-        },
+    return _extend_universe(
+        universe,
+        _key_market_refresh_symbols(market, normalize_market),
     )
 
 
@@ -155,6 +164,9 @@ def build_price_refresh_planning_input(
         if parsed_mode in LIVE_TOP_UP_MODES and universe.symbols
         else None
     )
+    benchmark_symbols = _normalize_symbols(
+        benchmark_registry.get_candidate_symbols(effective_market)
+    )
     group_history_universe_symbols: tuple[str, ...] = ()
     if ensure_group_history and market is not None and target_as_of is not None:
         if group_history_price_universe_service is None:
@@ -172,28 +184,14 @@ def build_price_refresh_planning_input(
                 through_date=target_as_of,
             )
         )
-        historical_extras = tuple(
-            symbol
-            for symbol in group_history_universe_symbols
-            if symbol not in universe.symbol_markets
+        history_refresh_symbols = tuple(
+            dict.fromkeys((*group_history_universe_symbols, *benchmark_symbols))
         )
-        if historical_extras:
-            universe = PriceRefreshUniverse(
-                symbols=universe.symbols + historical_extras,
-                symbol_markets={
-                    **universe.symbol_markets,
-                    **{symbol: effective_market for symbol in historical_extras},
-                },
-            )
+        universe = _extend_universe(
+            universe,
+            {symbol: effective_market for symbol in history_refresh_symbols},
+        )
     all_symbols = _normalize_symbols(universe.symbols)
-    all_symbol_set = set(all_symbols)
-    benchmark_symbols = tuple(
-        symbol
-        for symbol in _normalize_symbols(
-            benchmark_registry.get_candidate_symbols(effective_market)
-        )
-        if symbol in all_symbol_set
-    )
     group_history_symbols = tuple(
         dict.fromkeys(
             (

@@ -414,12 +414,17 @@ def test_live_bootstrap_treats_fresh_but_group_history_incomplete_as_no_history(
             assert db is universe_session
             assert market == "US"
             assert through_date == date(2026, 6, 8)
-            assert symbols == ("AAA", "OLD", "SPY")
+            assert symbols == ("AAA", "OLD", "SPY", "IVV")
             return GroupHistoryPriceCoverage(
                 complete_symbols=(),
-                incomplete_symbols=("AAA", "OLD", "SPY"),
+                incomplete_symbols=("AAA", "OLD", "SPY", "IVV"),
                 required_anchor_count=12,
-                available_anchor_counts={"AAA": 11, "OLD": 0, "SPY": 11},
+                available_anchor_counts={
+                    "AAA": 11,
+                    "OLD": 0,
+                    "SPY": 11,
+                    "IVV": 12,
+                },
             )
 
     class _HistoryUniverseService:
@@ -451,7 +456,9 @@ def test_live_bootstrap_treats_fresh_but_group_history_incomplete_as_no_history(
     assert "AAA" in no_history.symbols
     assert "OLD" in no_history.symbols
     assert "SPY" in no_history.symbols
+    assert "IVV" in no_history.symbols
     assert plan.symbol_markets["OLD"] == "US"
+    assert plan.symbol_markets["IVV"] == "US"
     assert no_history.period == "2y"
 
 
