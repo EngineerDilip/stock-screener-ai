@@ -339,7 +339,7 @@ celery_app.conf.result_expires = 86400  # Results expire after 24 hours
 
 # Celery Beat Schedule - Periodic Tasks
 if settings.cache_warmup_enabled:
-    _enabled_markets = list(SUPPORTED_MARKETS)
+    _enabled_markets = settings.enabled_markets_list
     beat_schedule: dict = {}
 
     for _market in _enabled_markets:
