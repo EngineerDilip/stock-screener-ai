@@ -46,7 +46,14 @@ from app.services.static_group_snapshot_coordinator import (
     build_static_group_snapshot_coordinator,
 )
 from app.services.static_rrg_history_contract import StaticRRGHistoryBundleError
-from app.services.static_market_publish_policy import OPTIONAL_STATIC_MARKETS
+from app.services.market_rs_inputs import (
+    MARKET_RS_REASON_BENCHMARK_ADJUSTED_ANCHOR_MISSING,
+)
+from app.services.static_market_publish_policy import (
+    OPTIONAL_STATIC_MARKETS,
+    StaticMarketRsArtifactState,
+    classify_static_market_rs_artifact_result,
+)
 from app.tasks.data_fetch_lock import disable_serialized_data_fetch_lock
 from app.tasks.workload_coordination import disable_serialized_market_workload
 from app.wiring.bootstrap import (
@@ -70,12 +77,6 @@ STATIC_EXPORT_NO_CURRENT_ARTIFACT_EXIT_CODE = 79
 STATIC_RS_BENCHMARK_HYDRATION_PERIOD = "2y"
 STATIC_RS_BENCHMARK_HYDRATION_ATTEMPTS = 2
 STATIC_RS_BENCHMARK_RESOLUTION_EXCEPTION = "benchmark_resolution_exception"
-STATIC_MARKET_RS_NON_CURRENT_ARTIFACT_REASON_CODES = frozenset(
-    {
-        "benchmark_adjusted_anchor_missing",
-        "current_adjusted_price_coverage_below_threshold",
-    }
-)
 SUPPORTED_RS_FORMULA_VERSIONS = frozenset(
     {BALANCED_RS_FORMULA_VERSION, LEGACY_RS_FORMULA_VERSION}
 )
@@ -181,26 +182,6 @@ def _snapshot_publishable(snapshot: dict[str, Any]) -> bool:
     ):
         return True
     return False
-
-
-def _static_market_rs_ready(result: Any) -> bool:
-    if not isinstance(result, dict):
-        return False
-    if result.get("formula_version") == LEGACY_RS_FORMULA_VERSION:
-        return result.get("status") == "selected"
-    return (
-        result.get("status") == "completed"
-        and result.get("market_rs_run_id") is not None
-    )
-
-
-def _static_market_rs_non_current_artifact(result: Any) -> bool:
-    return (
-        isinstance(result, dict)
-        and result.get("status") == "failed"
-        and result.get("reason_code")
-        in STATIC_MARKET_RS_NON_CURRENT_ARTIFACT_REASON_CODES
-    )
 
 
 def _market_rs_not_ready_warning(
@@ -312,6 +293,28 @@ def _group_rank_backfill_failures(
         if not isinstance(snapshot, dict):
             continue
         if snapshot.get("reason") == "group_rank_backfill_not_ready":
+            failures[selected_market] = snapshot
+    return failures
+
+
+def _market_rs_not_ready_failures(
+    refresh_results: dict[str, Any],
+    market: str | None,
+) -> dict[str, dict[str, Any]]:
+    feature_snapshots = refresh_results.get("feature_snapshots", {})
+    if not isinstance(feature_snapshots, dict):
+        return {}
+    selected_markets = (
+        (market.upper(),)
+        if market is not None
+        else tuple(str(snapshot_market).upper() for snapshot_market in feature_snapshots)
+    )
+    failures: dict[str, dict[str, Any]] = {}
+    for selected_market in selected_markets:
+        snapshot = feature_snapshots.get(selected_market)
+        if not isinstance(snapshot, dict):
+            continue
+        if snapshot.get("reason") == "market_rs_not_ready":
             failures[selected_market] = snapshot
     return failures
 
@@ -492,7 +495,7 @@ def _prepare_balanced_static_rs(*, market: str, as_of_date: date) -> dict[str, A
             "market": normalized_market,
             "as_of_date": as_of_date.isoformat(),
             "formula_version": BALANCED_RS_FORMULA_VERSION,
-            "reason_code": "benchmark_adjusted_anchor_missing",
+            "reason_code": MARKET_RS_REASON_BENCHMARK_ADJUSTED_ANCHOR_MISSING,
             "diagnostics": benchmark_resolution.error_payload(
                 market=normalized_market,
                 as_of_date=as_of_date,
@@ -509,7 +512,8 @@ def _prepare_balanced_static_rs(*, market: str, as_of_date: date) -> dict[str, A
     if (
         isinstance(result, dict)
         and result.get("status") == "failed"
-        and result.get("reason_code") == "benchmark_adjusted_anchor_missing"
+        and result.get("reason_code")
+        == MARKET_RS_REASON_BENCHMARK_ADJUSTED_ANCHOR_MISSING
     ):
         _hydrate_remaining_static_rs_benchmarks(
             market=normalized_market,
@@ -522,22 +526,15 @@ def _prepare_balanced_static_rs(*, market: str, as_of_date: date) -> dict[str, A
             formula_version=BALANCED_RS_FORMULA_VERSION,
             rebuild_incompatible=True,
         )
-        if (
-            isinstance(result, dict)
-            and result.get("status") == "failed"
-            and result.get("reason_code") == "benchmark_adjusted_anchor_missing"
-        ):
-            return {**result, "market_rs_run_id": None}
-    if _static_market_rs_non_current_artifact(result):
+    artifact_state = classify_static_market_rs_artifact_result(
+        result,
+        market=normalized_market,
+        as_of_date=as_of_date,
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+    )
+    if artifact_state is StaticMarketRsArtifactState.NO_CURRENT_ARTIFACT:
         return {**result, "market_rs_run_id": None}
-    if (
-        not isinstance(result, dict)
-        or result.get("status") != "completed"
-        or result.get("market") != normalized_market
-        or result.get("as_of_date") != as_of_date.isoformat()
-        or result.get("formula_version") != BALANCED_RS_FORMULA_VERSION
-        or result.get("market_rs_run_id") is None
-    ):
+    if artifact_state is not StaticMarketRsArtifactState.READY:
         raise RuntimeError(
             f"Balanced Market RS preparation failed for {normalized_market} "
             f"on {as_of_date.isoformat()}: {result}"
@@ -776,6 +773,15 @@ def _run_daily_refresh(
                 formula_version=formula_by_market[selected_market],
             )
         results["market_rs"] = market_rs_results
+        market_rs_artifact_states = {
+            selected_market: classify_static_market_rs_artifact_result(
+                market_rs_results.get(selected_market),
+                market=selected_market,
+                as_of_date=as_of_by_market[selected_market],
+                formula_version=formula_by_market[selected_market],
+            )
+            for selected_market in selected_markets
+        }
         market_rs_not_ready_warnings = {
             selected_market: _market_rs_not_ready_warning(
                 market=selected_market,
@@ -783,7 +789,8 @@ def _run_daily_refresh(
                 result=market_rs_results[selected_market],
             )
             for selected_market in selected_markets
-            if not _static_market_rs_ready(market_rs_results.get(selected_market))
+            if market_rs_artifact_states[selected_market]
+            is not StaticMarketRsArtifactState.READY
         }
         warnings.extend(market_rs_not_ready_warnings.values())
 
@@ -1181,6 +1188,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"Static site export skipped for market {args.market} because it is not a trading day."
                 )
                 return STATIC_EXPORT_SKIPPED_EXIT_CODE
+            market_rs_not_ready_failures = _market_rs_not_ready_failures(
+                refresh_results,
+                args.market,
+            )
+            if market_rs_not_ready_failures:
+                for failed_market, snapshot_failure in market_rs_not_ready_failures.items():
+                    _write_market_diagnostics(
+                        Path(args.output_dir),
+                        failed_market,
+                        snapshot_failure,
+                    )
+                failed_markets = ", ".join(market_rs_not_ready_failures)
+                market_label = args.market or failed_markets
+                print(
+                    f"Static site export skipped for market {market_label}; "
+                    "Market RS was not ready, diagnostics were uploaded, "
+                    "and the combine job can use fallback artifacts."
+                )
+                return STATIC_EXPORT_NO_CURRENT_ARTIFACT_EXIT_CODE
             market_exposure_failures = _market_exposure_failures(
                 refresh_results,
                 args.market,

@@ -252,6 +252,60 @@ def _stub_balanced_static_rs_preparation(monkeypatch):
     return real_helper
 
 
+def _restore_real_balanced_static_rs(monkeypatch, real_helper) -> None:
+    if real_helper is not None:
+        monkeypatch.setattr(export_script, "_prepare_balanced_static_rs", real_helper)
+
+
+def _stub_available_static_rs_benchmark(
+    monkeypatch,
+    *,
+    benchmark_symbol: str,
+    candidate_symbols: tuple[str, ...] | None = None,
+) -> None:
+    candidates = candidate_symbols or (benchmark_symbol,)
+
+    class FakeBenchmarkCache:
+        def resolve_benchmark_bundle(self, **_kwargs):
+            return SimpleNamespace(
+                bundle=SimpleNamespace(
+                    benchmark_symbol=benchmark_symbol,
+                    candidate_symbols=candidates,
+                ),
+                error_payload=lambda **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("available benchmark must not build an error")
+                ),
+            )
+
+    monkeypatch.setattr(export_script, "get_benchmark_cache", lambda: FakeBenchmarkCache())
+
+
+def _stub_market_rs_snapshot_task(monkeypatch, run) -> None:
+    monkeypatch.setattr(
+        market_rs_tasks,
+        "calculate_market_rs_snapshot",
+        SimpleNamespace(run=run),
+    )
+
+
+def _stub_balanced_rs_formula_activation(monkeypatch, events: list[str]) -> None:
+    @contextmanager
+    def fake_session():
+        yield SimpleNamespace(commit=lambda: events.append("formula_commit"))
+
+    class FakeMarketRsRepository:
+        def activate_formula(self, _db, *, market, formula_version):
+            events.append(f"activate:{market}:{formula_version}")
+
+    monkeypatch.setattr(export_script, "SessionLocal", fake_session)
+    monkeypatch.setattr(
+        export_script,
+        "MarketRsRunRepository",
+        FakeMarketRsRepository,
+        raising=False,
+    )
+
+
 def test_run_daily_refresh_activates_balanced_rs_before_static_consumers(
     monkeypatch,
     _stub_balanced_static_rs_preparation,
@@ -268,19 +322,8 @@ def test_run_daily_refresh_activates_balanced_rs_before_static_consumers(
             assert formula_version == BALANCED_RS_FORMULA_VERSION
             events.append("formula_activate")
 
-    class FakeBenchmarkCache:
-        def resolve_benchmark_bundle(self, **_kwargs):
-            return SimpleNamespace(
-                bundle=SimpleNamespace(benchmark_symbol="SPY"),
-                error_payload=lambda **_kwargs: (_ for _ in ()).throw(
-                    AssertionError("available benchmark must not build an error")
-                ),
-            )
-
-    real_helper = _stub_balanced_static_rs_preparation
-    if real_helper is not None:
-        monkeypatch.setattr(export_script, "_prepare_balanced_static_rs", real_helper)
-    monkeypatch.setattr(export_script, "get_benchmark_cache", lambda: FakeBenchmarkCache())
+    _restore_real_balanced_static_rs(monkeypatch, _stub_balanced_static_rs_preparation)
+    _stub_available_static_rs_benchmark(monkeypatch, benchmark_symbol="SPY")
     monkeypatch.setattr(export_script, "SessionLocal", fake_session)
     monkeypatch.setattr(
         export_script,
@@ -288,20 +331,17 @@ def test_run_daily_refresh_activates_balanced_rs_before_static_consumers(
         FakeMarketRsRepository,
         raising=False,
     )
-    monkeypatch.setattr(
-        market_rs_tasks,
-        "calculate_market_rs_snapshot",
-        SimpleNamespace(
-            run=lambda **kwargs: events.append("market_rs_snapshot")
-            or {
-                "status": "completed",
-                "market": kwargs["market"],
-                "as_of_date": kwargs["calculation_date"],
-                "formula_version": kwargs["formula_version"],
-                "market_rs_run_id": 42,
-                "eligible_symbol_count": 500,
-            }
-        ),
+    _stub_market_rs_snapshot_task(
+        monkeypatch,
+        lambda **kwargs: events.append("market_rs_snapshot")
+        or {
+            "status": "completed",
+            "market": kwargs["market"],
+            "as_of_date": kwargs["calculation_date"],
+            "formula_version": kwargs["formula_version"],
+            "market_rs_run_id": 42,
+            "eligible_symbol_count": 500,
+        },
     )
     monkeypatch.setattr(
         export_script,
@@ -767,55 +807,24 @@ def test_prepare_balanced_static_rs_reports_price_coverage_gap_without_activatio
 ):
     events: list[str] = []
 
-    class FakeBenchmarkCache:
-        def resolve_benchmark_bundle(self, **_kwargs):
-            return SimpleNamespace(
-                bundle=SimpleNamespace(
-                    benchmark_symbol="^GDAXI",
-                    candidate_symbols=("^GDAXI",),
-                ),
-                error_payload=lambda **_kwargs: (_ for _ in ()).throw(
-                    AssertionError("available benchmark must not build an error")
-                ),
-            )
-
-    class FakeMarketRsRepository:
-        def activate_formula(self, _db, *, market, formula_version):
-            events.append(f"activate:{market}:{formula_version}")
-
-    @contextmanager
-    def fake_session():
-        yield SimpleNamespace(commit=lambda: events.append("formula_commit"))
-
-    real_helper = _stub_balanced_static_rs_preparation
-    if real_helper is not None:
-        monkeypatch.setattr(export_script, "_prepare_balanced_static_rs", real_helper)
-    monkeypatch.setattr(export_script, "get_benchmark_cache", lambda: FakeBenchmarkCache())
-    monkeypatch.setattr(export_script, "SessionLocal", fake_session)
-    monkeypatch.setattr(
-        export_script,
-        "MarketRsRunRepository",
-        FakeMarketRsRepository,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        market_rs_tasks,
-        "calculate_market_rs_snapshot",
-        SimpleNamespace(
-            run=lambda **kwargs: {
-                "status": "failed",
-                "market": kwargs["market"],
-                "as_of_date": kwargs["calculation_date"],
-                "formula_version": kwargs["formula_version"],
-                "reason_code": "current_adjusted_price_coverage_below_threshold",
-                "diagnostics": {
-                    "current_price_coverage": 0.8434065934065934,
-                    "minimum_current_price_coverage": 0.88,
-                    "current_prices_available": 1228,
-                    "expected_symbol_count": 1456,
-                },
-            }
-        ),
+    _restore_real_balanced_static_rs(monkeypatch, _stub_balanced_static_rs_preparation)
+    _stub_available_static_rs_benchmark(monkeypatch, benchmark_symbol="^GDAXI")
+    _stub_balanced_rs_formula_activation(monkeypatch, events)
+    _stub_market_rs_snapshot_task(
+        monkeypatch,
+        lambda **kwargs: {
+            "status": "failed",
+            "market": kwargs["market"],
+            "as_of_date": kwargs["calculation_date"],
+            "formula_version": kwargs["formula_version"],
+            "reason_code": "current_adjusted_price_coverage_below_threshold",
+            "diagnostics": {
+                "current_price_coverage": 0.8434065934065934,
+                "minimum_current_price_coverage": 0.88,
+                "current_prices_available": 1228,
+                "expected_symbol_count": 1456,
+            },
+        },
     )
 
     result = export_script._prepare_balanced_static_rs(
@@ -844,35 +853,18 @@ def test_prepare_balanced_static_rs_still_raises_unexpected_failed_result(
     monkeypatch,
     _stub_balanced_static_rs_preparation,
 ):
-    class FakeBenchmarkCache:
-        def resolve_benchmark_bundle(self, **_kwargs):
-            return SimpleNamespace(
-                bundle=SimpleNamespace(
-                    benchmark_symbol="^GDAXI",
-                    candidate_symbols=("^GDAXI",),
-                ),
-                error_payload=lambda **_kwargs: (_ for _ in ()).throw(
-                    AssertionError("available benchmark must not build an error")
-                ),
-            )
-
-    real_helper = _stub_balanced_static_rs_preparation
-    if real_helper is not None:
-        monkeypatch.setattr(export_script, "_prepare_balanced_static_rs", real_helper)
-    monkeypatch.setattr(export_script, "get_benchmark_cache", lambda: FakeBenchmarkCache())
-    monkeypatch.setattr(
-        market_rs_tasks,
-        "calculate_market_rs_snapshot",
-        SimpleNamespace(
-            run=lambda **kwargs: {
-                "status": "failed",
-                "market": kwargs["market"],
-                "as_of_date": kwargs["calculation_date"],
-                "formula_version": kwargs["formula_version"],
-                "reason_code": "calculation_failed",
-                "diagnostics": {"error": "database invariant failed"},
-            }
-        ),
+    _restore_real_balanced_static_rs(monkeypatch, _stub_balanced_static_rs_preparation)
+    _stub_available_static_rs_benchmark(monkeypatch, benchmark_symbol="^GDAXI")
+    _stub_market_rs_snapshot_task(
+        monkeypatch,
+        lambda **kwargs: {
+            "status": "failed",
+            "market": kwargs["market"],
+            "as_of_date": kwargs["calculation_date"],
+            "formula_version": kwargs["formula_version"],
+            "reason_code": "calculation_failed",
+            "diagnostics": {"error": "database invariant failed"},
+        },
     )
 
     with pytest.raises(RuntimeError, match="Balanced Market RS preparation failed"):
@@ -2919,6 +2911,98 @@ def test_main_returns_no_current_artifact_code_for_group_rank_backfill_failure(
     )
     captured = capsys.readouterr()
     assert "group-rank history backfill was not ready" in captured.out
+    assert "fallback" in captured.out
+    assert export_calls == []
+
+
+def test_main_returns_no_current_artifact_code_for_market_rs_price_coverage_gap(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    export_calls: list[object] = []
+    output_dir = tmp_path / "out"
+    warning = (
+        "Static export market DE Market RS not ready for 2026-07-27: "
+        "current_adjusted_price_coverage_below_threshold."
+    )
+
+    monkeypatch.setattr(export_script, "prepare_runtime", lambda: None)
+    monkeypatch.setattr(
+        export_script,
+        "_run_daily_refresh",
+        lambda **_kwargs: (
+            {
+                "feature_snapshots": {
+                    "DE": {
+                        "status": "skipped",
+                        "reason": "market_rs_not_ready",
+                        "market": "DE",
+                        "as_of_date": "2026-07-27",
+                        "warnings": [warning],
+                        "failure_diagnostics": {
+                            "reason_code": (
+                                "current_adjusted_price_coverage_below_threshold"
+                            ),
+                            "diagnostics": {
+                                "current_price_coverage": 0.8434065934065934,
+                                "minimum_current_price_coverage": 0.88,
+                                "current_prices_available": 1228,
+                                "expected_symbol_count": 1456,
+                            },
+                        },
+                    }
+                }
+            },
+            [warning],
+        ),
+    )
+
+    class ExportShouldNotRun:
+        def __init__(self, *_args, **_kwargs):
+            export_calls.append("constructed")
+
+        def export(self, *_args, **_kwargs):
+            raise AssertionError("market export should use fallback when Market RS is not ready")
+
+    monkeypatch.setattr(export_script, "StaticSiteExportService", ExportShouldNotRun)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "export_static_site.py",
+            "--output-dir",
+            str(output_dir),
+            "--refresh-daily",
+            "--market",
+            "DE",
+        ],
+    )
+
+    assert export_script.main() == export_script.STATIC_EXPORT_NO_CURRENT_ARTIFACT_EXIT_CODE
+
+    diagnostics_path = output_dir / "diagnostics" / "de" / "snapshot-failure.json"
+    assert diagnostics_path.exists()
+    payload = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+    assert payload == {
+        "market": "DE",
+        "status": "skipped",
+        "reason": "market_rs_not_ready",
+        "failed_symbols": [],
+        "row_count": None,
+        "warnings": [warning],
+        "failure_diagnostics": {
+            "reason_code": "current_adjusted_price_coverage_below_threshold",
+            "diagnostics": {
+                "current_price_coverage": 0.8434065934065934,
+                "minimum_current_price_coverage": 0.88,
+                "current_prices_available": 1228,
+                "expected_symbol_count": 1456,
+            },
+        },
+    }
+    captured = capsys.readouterr()
+    assert "Market RS was not ready" in captured.out
     assert "fallback" in captured.out
     assert export_calls == []
 
