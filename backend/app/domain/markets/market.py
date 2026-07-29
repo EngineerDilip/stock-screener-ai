@@ -11,7 +11,6 @@ SUPPORTED_MARKET_CODE_ORDER: tuple[str, ...] = tuple(
     get_market_catalog().supported_market_codes()
 )
 SUPPORTED_MARKET_CODES: frozenset[str] = frozenset(SUPPORTED_MARKET_CODE_ORDER)
-DEFAULT_ENABLED_MARKET_CODES: tuple[str, ...] = ("US",)
 
 
 class UnsupportedMarketError(ValueError):
@@ -50,34 +49,22 @@ class Market:
         return self.code
 
 
-def normalize_enabled_markets(
-    raw: str | Iterable[str] | None,
-    *,
-    default: Iterable[str] = DEFAULT_ENABLED_MARKET_CODES,
-) -> list[str]:
-    """Return canonical deployment-enabled markets in caller order.
+def normalize_market_codes(raw_values: Iterable[object]) -> list[str]:
+    """Return canonical supported market codes in caller order.
 
-    This is shared by the runtime settings and Docker Compose worker helper so
-    Beat schedules and deployed worker profiles interpret ENABLED_MARKETS the
-    same way.
+    Domain validation only knows which market codes exist. Deployment-specific
+    defaults, such as treating blank ENABLED_MARKETS as US, live outside this
+    module.
     """
-    raw_values: Iterable[str]
-    if raw is None or isinstance(raw, str):
-        raw_values = (raw or "").split(",")
-    else:
-        raw_values = raw
-
-    values = [str(value).strip().upper() for value in raw_values if str(value).strip()]
-    if not values:
-        values = [str(value).strip().upper() for value in default if str(value).strip()]
-
+    values = [raw_values] if isinstance(raw_values, str) else raw_values
     normalized: list[str] = []
     unsupported: list[str] = []
     for value in values:
         try:
             market = Market.from_str(value).code
         except UnsupportedMarketError:
-            unsupported.append(value)
+            label = str(value).strip().upper() if value is not None else "<missing>"
+            unsupported.append(label or "<blank>")
             continue
         if market not in normalized:
             normalized.append(market)

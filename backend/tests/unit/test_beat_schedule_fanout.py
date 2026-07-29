@@ -6,7 +6,7 @@ check it's easy for a new beat entry to silently land on the shared queue.
 """
 from __future__ import annotations
 
-from app.celery_app import celery_app
+from app.celery_app import _build_cache_warmup_beat_schedule, celery_app
 from app.config import settings
 from app.tasks.market_queues import (
     SUPPORTED_MARKETS,
@@ -38,8 +38,8 @@ def _market_entries(prefixes):
                 yield name, entry, suffix.upper()
 
 
-def _scheduled_market_entries():
-    schedule = celery_app.conf.beat_schedule or {}
+def _scheduled_market_entries(schedule=None):
+    schedule = schedule if schedule is not None else (celery_app.conf.beat_schedule or {})
     for name, entry in schedule.items():
         market = (entry.get("kwargs") or {}).get("market")
         if isinstance(market, str) and market.strip().upper() in SUPPORTED_MARKETS:
@@ -77,6 +77,22 @@ class TestBeatScheduleFanout:
         ]
 
         assert disabled_entries == []
+
+    def test_builder_limits_market_scoped_entries_to_explicit_enabled_subset(self):
+        schedule = _build_cache_warmup_beat_schedule(["US"])
+
+        market_scoped_entries = list(_scheduled_market_entries(schedule))
+        assert market_scoped_entries
+        assert [
+            name
+            for name, _entry, market in market_scoped_entries
+            if market != "US"
+        ] == []
+
+        for prefix in (*EXTERNAL_FETCH_PREFIXES, *MARKET_JOB_PREFIXES):
+            assert f"{prefix}us" in schedule
+            for market in (m.lower() for m in SUPPORTED_MARKETS if m != "US"):
+                assert f"{prefix}{market}" not in schedule
 
     def test_deployment_enabled_markets_are_covered_for_external_fetch_prefixes(self):
         schedule = celery_app.conf.beat_schedule or {}

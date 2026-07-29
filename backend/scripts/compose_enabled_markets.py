@@ -14,14 +14,18 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from app.domain.markets import market_registry, normalize_enabled_markets  # noqa: E402
+from app.deployment.enabled_markets import (  # noqa: E402
+    DEFAULT_DEPLOYMENT_ENABLED_MARKETS,
+    normalize_deployment_enabled_markets,
+)
+from app.domain.markets import market_registry  # noqa: E402
 
 
 SUPPORTED_MARKETS: tuple[str, ...] = market_registry.supported_market_codes()
 
 
 def normalize_markets(raw: str | None) -> list[str]:
-    return normalize_enabled_markets(raw)
+    return normalize_deployment_enabled_markets(raw)
 
 
 def compose_profiles_for_markets(markets: Sequence[str]) -> list[str]:
@@ -43,7 +47,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--markets",
-        default=os.environ.get("ENABLED_MARKETS", "US"),
+        default=os.environ.get(
+            "ENABLED_MARKETS",
+            ",".join(DEFAULT_DEPLOYMENT_ENABLED_MARKETS),
+        ),
         help="Comma-separated market codes. Defaults to ENABLED_MARKETS or US.",
     )
     return parser

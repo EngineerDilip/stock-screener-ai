@@ -26,11 +26,16 @@ def test_enabled_markets_list_defaults_blank_config_to_us() -> None:
     assert Settings(enabled_markets=" , ").enabled_markets_list == ["US"]
 
 
-def test_enabled_markets_list_rejects_unsupported_market() -> None:
-    settings = Settings(enabled_markets="US,ZZ")
+def test_enabled_markets_are_validated_and_canonicalized_on_construction() -> None:
+    settings = Settings(enabled_markets=" us, hk,US ")
 
+    assert settings.enabled_markets == "US,HK"
+    assert settings.enabled_markets_list == ["US", "HK"]
+
+
+def test_enabled_markets_rejects_unsupported_market_on_construction() -> None:
     try:
-        settings.enabled_markets_list
+        Settings(enabled_markets="US,ZZ")
     except ValueError as exc:
         assert "Unsupported market(s): ZZ" in str(exc)
     else:

@@ -337,12 +337,11 @@ celery_app.conf.task_routes['app.tasks.scan_tasks.run_bulk_scan'] = {
 # Optional: Configure result expiration
 celery_app.conf.result_expires = 86400  # Results expire after 24 hours
 
-# Celery Beat Schedule - Periodic Tasks
-if settings.cache_warmup_enabled:
-    _enabled_markets = settings.enabled_markets_list
+def _build_cache_warmup_beat_schedule(enabled_markets: list[str]) -> dict:
+    """Build cache warmup Beat entries for the explicitly enabled markets."""
     beat_schedule: dict = {}
 
-    for _market in _enabled_markets:
+    for _market in enabled_markets:
         _warm_h, _warm_m = settings.cache_warm_schedule_for(_market)
         _qname = data_fetch_queue_for_market(_market)
         _m_lower = _market.lower()
@@ -528,9 +527,16 @@ if settings.cache_warmup_enabled:
         },
     }
 
-    # Merge shared entries into the fanned-out schedule and install.
+    # Merge shared entries into the fanned-out schedule.
     beat_schedule.update(_shared_entries)
-    celery_app.conf.beat_schedule = beat_schedule
+    return beat_schedule
+
+
+# Celery Beat Schedule - Periodic Tasks
+if settings.cache_warmup_enabled:
+    celery_app.conf.beat_schedule = _build_cache_warmup_beat_schedule(
+        settings.enabled_markets_list
+    )
 
 if __name__ == '__main__':
     celery_app.start()

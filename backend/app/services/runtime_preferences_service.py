@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
+from ..domain.markets import normalize_market_codes
 from ..domain.markets.catalog import get_market_catalog
 from ..models.app_settings import AppSetting
 from .bootstrap_readiness_service import (
@@ -81,13 +82,11 @@ def _normalize_supported_market(value: str | None) -> str:
         ) from exc
 
 
-def _normalize_enabled_markets(markets: list[str] | tuple[str, ...] | None) -> list[str]:
+def _normalize_runtime_enabled_markets(
+    markets: list[str] | tuple[str, ...] | None,
+) -> list[str]:
     raw_markets = list(markets or DEFAULT_ENABLED_MARKETS)
-    normalized: list[str] = []
-    for market in raw_markets:
-        canonical = _normalize_supported_market(market)
-        if canonical not in normalized:
-            normalized.append(canonical)
+    normalized = normalize_market_codes(raw_markets)
     return normalized or [DEFAULT_PRIMARY_MARKET]
 
 
@@ -141,7 +140,7 @@ def get_runtime_preferences(db: Session) -> RuntimePreferences:
         if isinstance(parsed, list):
             enabled_markets_payload = [str(item).upper() for item in parsed if item]
 
-    enabled_markets = _normalize_enabled_markets(enabled_markets_payload)
+    enabled_markets = _normalize_runtime_enabled_markets(enabled_markets_payload)
     if primary_market not in enabled_markets:
         enabled_markets = [primary_market, *enabled_markets]
 
@@ -170,7 +169,7 @@ def save_runtime_preferences(
     bootstrap_state: str | None = None,
 ) -> RuntimePreferences:
     normalized_primary = _normalize_supported_market(primary_market)
-    normalized_enabled = _normalize_enabled_markets(enabled_markets)
+    normalized_enabled = _normalize_runtime_enabled_markets(enabled_markets)
     if normalized_primary not in normalized_enabled:
         normalized_enabled = [normalized_primary, *normalized_enabled]
 

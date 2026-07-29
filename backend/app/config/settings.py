@@ -461,6 +461,13 @@ class Settings(BaseSettings):
     # entirely (beat schedule skips it; its worker can be stopped).
     enabled_markets: str = "US"  # legacy env fallback; runtime preferences own the local-default market set
 
+    @field_validator("enabled_markets", mode="before")
+    @classmethod
+    def validate_enabled_markets(cls, v: object) -> str:
+        from ..deployment.enabled_markets import normalize_deployment_enabled_markets
+
+        return ",".join(normalize_deployment_enabled_markets(v))
+
     # Fundamental Data Caching
     fundamental_cache_enabled: bool = True  # Enable fundamental data caching
     fundamental_cache_ttl_days: int = 7  # Refresh weekly (7 days)
@@ -810,14 +817,8 @@ class Settings(BaseSettings):
 
     @property
     def enabled_markets_list(self) -> List[str]:
-        """Parse comma-separated enabled markets into a canonical upper-case list.
-
-        Uses the same deployment normalizer as the Docker Compose helper so
-        Beat schedules and worker profiles agree on blank and invalid config.
-        """
-        from ..domain.markets import normalize_enabled_markets
-
-        return normalize_enabled_markets(self.enabled_markets)
+        """Project the canonical comma-separated enabled markets to a list."""
+        return [market for market in self.enabled_markets.split(",") if market]
 
     def cache_warm_schedule_for(self, market: str) -> tuple[int, int]:
         """Return (hour, minute) cron tuple for a given market's cache warmup."""

@@ -15,12 +15,11 @@ from .catalog import (
     get_market_catalog,
 )
 from .market import (
-    DEFAULT_ENABLED_MARKET_CODES,
     SUPPORTED_MARKET_CODE_ORDER,
     SUPPORTED_MARKET_CODES,
     Market,
     UnsupportedMarketError,
-    normalize_enabled_markets,
+    normalize_market_codes,
 )
 from .mic import MicFacts
 
@@ -74,7 +73,6 @@ __all__ = [
     "MicAliasResolution",
     "MarketSymbolSuffixDefinition",
     "MarketSymbolSuffixRegistry",
-    "DEFAULT_ENABLED_MARKET_CODES",
     "SUPPORTED_MARKET_CODE_ORDER",
     "SUPPORTED_MARKET_CODES",
     "UnsupportedMarketError",
@@ -82,5 +80,5 @@ __all__ = [
     "market_registry",
     "mic_alias_registry",
     "market_symbol_suffix_registry",
-    "normalize_enabled_markets",
+    "normalize_market_codes",
 ]
