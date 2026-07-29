@@ -21,6 +21,27 @@ def test_zai_api_keys_list_falls_back_to_single_key() -> None:
     assert settings.zai_api_keys_list == ["single-key"]
 
 
+def test_enabled_markets_list_defaults_blank_config_to_us() -> None:
+    assert Settings(enabled_markets="").enabled_markets_list == ["US"]
+    assert Settings(enabled_markets=" , ").enabled_markets_list == ["US"]
+
+
+def test_enabled_markets_are_validated_and_canonicalized_on_construction() -> None:
+    settings = Settings(enabled_markets=" us, hk,US ")
+
+    assert settings.enabled_markets == "US,HK"
+    assert settings.enabled_markets_list == ["US", "HK"]
+
+
+def test_enabled_markets_rejects_unsupported_market_on_construction() -> None:
+    try:
+        Settings(enabled_markets="US,ZZ")
+    except ValueError as exc:
+        assert "Unsupported market(s): ZZ" in str(exc)
+    else:
+        raise AssertionError("Expected unsupported ENABLED_MARKETS entry to fail")
+
+
 def test_universe_source_timeout_seconds_must_be_positive() -> None:
     try:
         Settings(universe_source_timeout_seconds=0)

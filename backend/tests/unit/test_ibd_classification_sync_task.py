@@ -198,10 +198,10 @@ def test_task_does_not_raise_on_non_fatal(monkeypatch):
 
 def test_task_is_registered_routed_and_scheduled():
     """The sync task must be registered, routed to a market jobs queue, and have
-    one weekly beat entry per supported market."""
+    one weekly beat entry per deployment-enabled market."""
     import app.tasks.industry_tasks  # noqa: F401 - force task registration
     from app.celery_app import celery_app
-    from app.tasks.market_queues import SUPPORTED_MARKETS
+    from app.config import settings
 
     name = "app.tasks.industry_tasks.sync_ibd_classification"
     assert name in celery_app.tasks
@@ -211,7 +211,10 @@ def test_task_is_registered_routed_and_scheduled():
     entries = {k for k in beat if k.startswith("weekly-ibd-classification-sync-")}
     # cache_warmup_enabled gates the schedule; only assert when entries exist.
     if entries:
-        assert len(entries) == len(SUPPORTED_MARKETS)
+        assert entries == {
+            f"weekly-ibd-classification-sync-{market.lower()}"
+            for market in settings.enabled_markets_list
+        }
         sample = beat[next(iter(entries))]
         assert sample["task"] == name
         assert "market" in sample["kwargs"]

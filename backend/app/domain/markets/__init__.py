@@ -14,7 +14,13 @@ from .catalog import (
     MarketCatalogError,
     get_market_catalog,
 )
-from .market import Market, SUPPORTED_MARKET_CODES, UnsupportedMarketError
+from .market import (
+    SUPPORTED_MARKET_CODE_ORDER,
+    SUPPORTED_MARKET_CODES,
+    Market,
+    UnsupportedMarketError,
+    normalize_market_codes,
+)
 from .mic import MicFacts
 
 _LAZY_EXPORTS = {
@@ -67,10 +73,12 @@ __all__ = [
     "MicAliasResolution",
     "MarketSymbolSuffixDefinition",
     "MarketSymbolSuffixRegistry",
+    "SUPPORTED_MARKET_CODE_ORDER",
     "SUPPORTED_MARKET_CODES",
     "UnsupportedMarketError",
     "get_market_catalog",
     "market_registry",
     "mic_alias_registry",
     "market_symbol_suffix_registry",
+    "normalize_market_codes",
 ]

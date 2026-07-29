@@ -7,7 +7,12 @@ import dataclasses
 import pytest
 
 from app.domain.markets.catalog import get_market_catalog
-from app.domain.markets.market import Market, SUPPORTED_MARKET_CODES, UnsupportedMarketError
+from app.domain.markets.market import (
+    Market,
+    SUPPORTED_MARKET_CODES,
+    UnsupportedMarketError,
+    normalize_market_codes,
+)
 
 
 def test_market_from_str_normalizes_case_and_whitespace() -> None:
@@ -45,3 +50,11 @@ def test_supported_market_codes_are_current_supported_markets() -> None:
     assert SUPPORTED_MARKET_CODES == frozenset(
         get_market_catalog().supported_market_codes()
     )
+
+
+def test_normalize_market_codes_canonicalizes_deduplicates_and_preserves_order() -> None:
+    assert normalize_market_codes([" us ", "hk", "US"]) == ["US", "HK"]
+
+
+def test_normalize_market_codes_does_not_apply_deployment_default() -> None:
+    assert normalize_market_codes([]) == []

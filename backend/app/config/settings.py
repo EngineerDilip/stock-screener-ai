@@ -461,6 +461,13 @@ class Settings(BaseSettings):
     # entirely (beat schedule skips it; its worker can be stopped).
     enabled_markets: str = "US"  # legacy env fallback; runtime preferences own the local-default market set
 
+    @field_validator("enabled_markets", mode="before")
+    @classmethod
+    def validate_enabled_markets(cls, v: object) -> str:
+        from ..deployment.enabled_markets import normalize_deployment_enabled_markets
+
+        return ",".join(normalize_deployment_enabled_markets(v))
+
     # Fundamental Data Caching
     fundamental_cache_enabled: bool = True  # Enable fundamental data caching
     fundamental_cache_ttl_days: int = 7  # Refresh weekly (7 days)
@@ -810,22 +817,8 @@ class Settings(BaseSettings):
 
     @property
     def enabled_markets_list(self) -> List[str]:
-        """Parse comma-separated enabled markets into a canonical upper-case list.
-
-        Invalid markets are dropped with a warning so a typo in env config can't
-        take down the whole worker fleet.
-        """
-        from ..tasks.market_queues import SUPPORTED_MARKETS  # local import to avoid cycle
-        raw = [m.strip().upper() for m in (self.enabled_markets or "").split(",") if m.strip()]
-        valid = [m for m in raw if m in SUPPORTED_MARKETS]
-        dropped = [m for m in raw if m not in SUPPORTED_MARKETS]
-        if dropped:
-            logger.warning(
-                "Dropping unsupported markets from ENABLED_MARKETS: %s. Supported: %s",
-                dropped,
-                SUPPORTED_MARKETS,
-            )
-        return valid or list(SUPPORTED_MARKETS)
+        """Project the canonical comma-separated enabled markets to a list."""
+        return [market for market in self.enabled_markets.split(",") if market]
 
     def cache_warm_schedule_for(self, market: str) -> tuple[int, int]:
         """Return (hour, minute) cron tuple for a given market's cache warmup."""
