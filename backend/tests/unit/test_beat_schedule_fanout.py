@@ -6,8 +6,6 @@ check it's easy for a new beat entry to silently land on the shared queue.
 """
 from __future__ import annotations
 
-import pytest
-
 from app.celery_app import celery_app
 from app.config import settings
 from app.tasks.market_queues import (
@@ -40,6 +38,14 @@ def _market_entries(prefixes):
                 yield name, entry, suffix.upper()
 
 
+def _scheduled_market_entries():
+    schedule = celery_app.conf.beat_schedule or {}
+    for name, entry in schedule.items():
+        market = (entry.get("kwargs") or {}).get("market")
+        if isinstance(market, str) and market.strip().upper() in SUPPORTED_MARKETS:
+            yield name, entry, market.strip().upper()
+
+
 def _deployment_enabled_markets():
     return tuple(settings.enabled_markets_list)
 
@@ -63,22 +69,14 @@ class TestBeatScheduleFanout:
             )
 
     def test_market_scoped_entries_are_limited_to_deployment_enabled_markets(self):
-        schedule = celery_app.conf.beat_schedule or {}
         enabled = set(_deployment_enabled_markets())
-        disabled = set(SUPPORTED_MARKETS) - enabled
-        if not disabled:
-            pytest.skip("All supported markets are deployment-enabled in this environment")
+        disabled_entries = [
+            name
+            for name, _entry, market in _scheduled_market_entries()
+            if market not in enabled
+        ]
 
-        for prefix in (*EXTERNAL_FETCH_PREFIXES, *MARKET_JOB_PREFIXES):
-            present = {
-                name[len(prefix):].upper()
-                for name in schedule
-                if name.startswith(prefix)
-            }
-            assert present <= enabled, (
-                f"Disabled deployment markets scheduled for {prefix!r}: "
-                f"{sorted(present - enabled)}"
-            )
+        assert disabled_entries == []
 
     def test_deployment_enabled_markets_are_covered_for_external_fetch_prefixes(self):
         schedule = celery_app.conf.beat_schedule or {}

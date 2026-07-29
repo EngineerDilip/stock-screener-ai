@@ -14,32 +14,14 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from app.domain.markets import market_registry  # noqa: E402
+from app.domain.markets import market_registry, normalize_enabled_markets  # noqa: E402
 
 
 SUPPORTED_MARKETS: tuple[str, ...] = market_registry.supported_market_codes()
 
 
 def normalize_markets(raw: str | None) -> list[str]:
-    values = [part.strip().upper() for part in (raw or "").split(",") if part.strip()]
-    if not values:
-        values = ["US"]
-
-    normalized: list[str] = []
-    unsupported: list[str] = []
-    for market in values:
-        if market not in SUPPORTED_MARKETS:
-            unsupported.append(market)
-            continue
-        if market not in normalized:
-            normalized.append(market)
-
-    if unsupported:
-        supported = ", ".join(SUPPORTED_MARKETS)
-        invalid = ", ".join(unsupported)
-        raise ValueError(f"Unsupported market(s): {invalid}. Supported markets: {supported}")
-
-    return normalized
+    return normalize_enabled_markets(raw)
 
 
 def compose_profiles_for_markets(markets: Sequence[str]) -> list[str]:

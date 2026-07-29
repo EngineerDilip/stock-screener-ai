@@ -812,20 +812,12 @@ class Settings(BaseSettings):
     def enabled_markets_list(self) -> List[str]:
         """Parse comma-separated enabled markets into a canonical upper-case list.
 
-        Invalid markets are dropped with a warning so a typo in env config can't
-        take down the whole worker fleet.
+        Uses the same deployment normalizer as the Docker Compose helper so
+        Beat schedules and worker profiles agree on blank and invalid config.
         """
-        from ..tasks.market_queues import SUPPORTED_MARKETS  # local import to avoid cycle
-        raw = [m.strip().upper() for m in (self.enabled_markets or "").split(",") if m.strip()]
-        valid = [m for m in raw if m in SUPPORTED_MARKETS]
-        dropped = [m for m in raw if m not in SUPPORTED_MARKETS]
-        if dropped:
-            logger.warning(
-                "Dropping unsupported markets from ENABLED_MARKETS: %s. Supported: %s",
-                dropped,
-                SUPPORTED_MARKETS,
-            )
-        return valid or list(SUPPORTED_MARKETS)
+        from ..domain.markets import normalize_enabled_markets
+
+        return normalize_enabled_markets(self.enabled_markets)
 
     def cache_warm_schedule_for(self, market: str) -> tuple[int, int]:
         """Return (hour, minute) cron tuple for a given market's cache warmup."""
