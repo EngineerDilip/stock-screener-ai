@@ -208,26 +208,31 @@ class MarketRsActivationValidator:
         feature_run_id: int,
         static_staging_dir: Path,
         coverage_start_date: date | None = None,
+        required_dates: tuple[date, ...] | None = None,
     ) -> ActivationValidationReport:
         normalized = normalize_rollout_market(market)
         errors: list[str] = []
-        first_valid = self.backfill_service.earliest_backfillable_date(
-            db,
-            market=normalized,
-            through_date=through_date,
-            probe_start_date=coverage_start_date,
-        )
-        candidates = (
-            self.backfill_service.candidate_dates(
+        if required_dates is not None:
+            candidates = required_dates
+            first_valid = candidates[0] if candidates else None
+        else:
+            first_valid = self.backfill_service.earliest_backfillable_date(
                 db,
                 market=normalized,
                 through_date=through_date,
-                first_valid_date=first_valid,
-                coverage_start_date=coverage_start_date,
+                probe_start_date=coverage_start_date,
             )
-            if first_valid is not None
-            else ()
-        )
+            candidates = (
+                self.backfill_service.candidate_dates(
+                    db,
+                    market=normalized,
+                    through_date=through_date,
+                    first_valid_date=first_valid,
+                    coverage_start_date=coverage_start_date,
+                )
+                if first_valid is not None
+                else ()
+            )
         if not candidates:
             errors.append("No required balanced Market RS candidate dates were found.")
 

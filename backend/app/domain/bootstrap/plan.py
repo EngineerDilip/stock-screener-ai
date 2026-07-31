@@ -86,7 +86,7 @@ def _stage(
 def _build_market_plan(
     market: str,
     *,
-    fresh_install: bool = False,
+    activate_balanced_rs: bool = False,
 ) -> MarketBootstrapPlan:
     supports_group_rankings = (
         get_market_catalog().get(market).capabilities.group_rankings
@@ -140,7 +140,7 @@ def _build_market_plan(
                 key="market_rs",
                 operation=(
                     BootstrapOperation.BOOTSTRAP_BALANCED_MARKET_RS
-                    if fresh_install
+                    if activate_balanced_rs
                     else BootstrapOperation.CALCULATE_MARKET_RS_SNAPSHOT
                 ),
                 queue_kind=BootstrapQueueKind.MARKET_JOBS,
@@ -201,14 +201,20 @@ def build_bootstrap_plan(
     *,
     primary_market: str,
     enabled_markets: Iterable[str],
-    fresh_install: bool = False,
+    balanced_activation_markets: Iterable[str] = (),
 ) -> BootstrapPlan:
     markets = _normalize_markets(primary_market, enabled_markets)
+    activation_markets = {
+        get_market_catalog().get(market).code for market in balanced_activation_markets
+    }
     return BootstrapPlan(
         primary_market=markets[0],
         enabled_markets=markets,
         market_plans=tuple(
-            _build_market_plan(market, fresh_install=fresh_install)
+            _build_market_plan(
+                market,
+                activate_balanced_rs=market in activation_markets,
+            )
             for market in markets
         ),
     )

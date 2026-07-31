@@ -130,16 +130,21 @@ class MarketRsBackfillService:
         through_date: date,
         start_date: date | None = None,
         coverage_start_date: date | None = None,
+        required_dates: tuple[date, ...] | None = None,
     ) -> BackfillReport:
         normalized = normalize_rollout_market(market)
         groups_applicable = (
             get_market_catalog().get(normalized).capabilities.group_rankings
         )
-        first_valid = self.earliest_backfillable_date(
-            db,
-            market=normalized,
-            through_date=through_date,
-            probe_start_date=coverage_start_date,
+        first_valid = (
+            required_dates[0]
+            if required_dates
+            else self.earliest_backfillable_date(
+                db,
+                market=normalized,
+                through_date=through_date,
+                probe_start_date=coverage_start_date,
+            )
         )
         if first_valid is None:
             return BackfillReport(
@@ -159,7 +164,7 @@ class MarketRsBackfillService:
                 ),
             )
 
-        candidates = self.candidate_dates(
+        candidates = required_dates or self.candidate_dates(
             db,
             market=normalized,
             through_date=through_date,

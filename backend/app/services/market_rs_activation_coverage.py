@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, timedelta
 
+from app.services.market_calendar_service import MarketCalendarService
 from app.services.group_rank_history_policy import (
     DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS,
 )
+from app.services.market_rs_rollout_contracts import normalize_rollout_market
 from app.services.rrg_service import MIN_TAIL_WEEKS
 
 
@@ -23,7 +26,45 @@ def market_rs_activation_start_date(through_date: date) -> date:
     return through_date - timedelta(days=MARKET_RS_ACTIVATION_LOOKBACK_DAYS)
 
 
+@dataclass(frozen=True)
+class MarketRsActivationCoverage:
+    market: str
+    through_date: date
+    required_dates: tuple[date, ...]
+
+    @property
+    def start_date(self) -> date:
+        return self.required_dates[0]
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        calendar_service: MarketCalendarService,
+        market: str,
+        through_date: date,
+    ) -> "MarketRsActivationCoverage":
+        normalized = normalize_rollout_market(market)
+        required_dates = tuple(
+            calendar_service.trading_days(
+                normalized,
+                market_rs_activation_start_date(through_date),
+                through_date,
+            )
+        )
+        if not required_dates or required_dates[-1] != through_date:
+            raise ValueError(
+                "Guarded activation date must be a completed market trading day."
+            )
+        return cls(
+            market=normalized,
+            through_date=through_date,
+            required_dates=required_dates,
+        )
+
+
 __all__ = [
     "MARKET_RS_ACTIVATION_LOOKBACK_DAYS",
+    "MarketRsActivationCoverage",
     "market_rs_activation_start_date",
 ]

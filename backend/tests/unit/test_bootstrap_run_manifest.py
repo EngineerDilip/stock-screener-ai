@@ -33,7 +33,7 @@ def test_bootstrap_run_manifest_repository_round_trips_market_task_ids():
             },
         )
 
-        repository.save(db, manifest)
+        repository.begin_dispatch(db, manifest)
         loaded = repository.load(db)
 
         assert loaded == manifest
@@ -61,7 +61,7 @@ def test_bootstrap_run_manifest_repository_round_trips_queueing_manifest_without
             queue_state="queueing",
         )
 
-        repository.save(db, manifest)
+        repository.begin_dispatch(db, manifest)
         loaded = repository.load(db)
 
         assert loaded == BootstrapRunManifest(
@@ -112,7 +112,37 @@ def test_bootstrap_manifest_treats_legacy_payload_as_non_fresh() -> None:
     assert manifest.fresh_install is False
 
 
-def test_manifest_does_not_resurrect_consumed_fresh_marker_for_same_dispatch() -> None:
+def test_legacy_fresh_manifest_treats_all_enabled_markets_as_pending() -> None:
+    from app.services.bootstrap_run_manifest import BootstrapRunManifest
+
+    manifest = BootstrapRunManifest.from_payload(
+        {
+            "primary_market": "US",
+            "enabled_markets": ["US", "HK"],
+            "fresh_install": True,
+        }
+    )
+
+    assert manifest.pending_balanced_activation_markets == ("US", "HK")
+
+
+def test_manifest_round_trips_an_explicit_empty_pending_market_set() -> None:
+    from app.services.bootstrap_run_manifest import BootstrapRunManifest
+
+    manifest = BootstrapRunManifest.from_payload(
+        {
+            "primary_market": "US",
+            "enabled_markets": ["US", "HK"],
+            "fresh_install": True,
+            "pending_balanced_activation_markets": [],
+        }
+    )
+
+    assert manifest.pending_balanced_activation_markets == ()
+    assert manifest.to_payload()["pending_balanced_activation_markets"] == []
+
+
+def test_dispatch_update_preserves_consumed_pending_markets() -> None:
     from app.services.bootstrap_run_manifest import (
         BootstrapRunManifest,
         BootstrapRunManifestRepository,
@@ -130,12 +160,24 @@ def test_manifest_does_not_resurrect_consumed_fresh_marker_for_same_dispatch() -
             dispatch_id="dispatch-a",
             queue_state="queueing",
         )
-        repository.save(db, queueing)
-        repository.save(db, replace(queueing, fresh_install=False))
+        repository.begin_dispatch(db, queueing)
+        repository.update_dispatch(
+            db,
+            dispatch_id="dispatch-a",
+            transform=lambda current: replace(
+                current,
+                pending_balanced_activation_markets=("HK",),
+            ),
+        )
+        repository.update_dispatch(
+            db,
+            dispatch_id="dispatch-a",
+            transform=lambda current: replace(current, queue_state="queued"),
+        )
 
-        repository.save(db, replace(queueing, queue_state="queued"))
-
-        assert repository.load(db).fresh_install is False
+        loaded = repository.load(db)
+        assert loaded.fresh_install is True
+        assert loaded.pending_balanced_activation_markets == ("HK",)
     finally:
         db.close()
         engine.dispose()
@@ -152,7 +194,7 @@ def test_new_dispatch_can_record_a_new_fresh_classification() -> None:
     db = sessionmaker(bind=engine)()
     try:
         repository = BootstrapRunManifestRepository()
-        repository.save(
+        repository.begin_dispatch(
             db,
             BootstrapRunManifest.create(
                 primary_market="US",
@@ -162,7 +204,7 @@ def test_new_dispatch_can_record_a_new_fresh_classification() -> None:
             ),
         )
 
-        repository.save(
+        repository.begin_dispatch(
             db,
             BootstrapRunManifest.create(
                 primary_market="US",
@@ -173,6 +215,41 @@ def test_new_dispatch_can_record_a_new_fresh_classification() -> None:
         )
 
         assert repository.load(db).fresh_install is True
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_repository_rejects_update_from_an_older_dispatch_generation() -> None:
+    from app.services.bootstrap_run_manifest import (
+        BootstrapRunManifest,
+        BootstrapRunManifestRepository,
+        StaleBootstrapDispatch,
+    )
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    try:
+        repository = BootstrapRunManifestRepository()
+        first = BootstrapRunManifest.create(
+            primary_market="US",
+            enabled_markets=("US",),
+            dispatch_id="dispatch-a",
+            queue_state="queueing",
+        )
+        second = replace(first, dispatch_id="dispatch-b")
+        repository.begin_dispatch(db, first)
+        repository.begin_dispatch(db, second)
+
+        with pytest.raises(StaleBootstrapDispatch, match="dispatch-a"):
+            repository.update_dispatch(
+                db,
+                dispatch_id="dispatch-a",
+                transform=lambda manifest: replace(manifest, queue_state="queued"),
+            )
+
+        assert repository.load(db).dispatch_id == "dispatch-b"
     finally:
         db.close()
         engine.dispose()

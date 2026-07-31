@@ -285,6 +285,13 @@ def test_shared_executor_activates_exact_group_and_history_identity(
         failed_count=0,
         to_dict=lambda: {"failed_count": 0},
     )
+    monkeypatch.setattr(
+        service,
+        "activation_coverage",
+        lambda **_kwargs: SimpleNamespace(
+            required_dates=(date(2026, 4, 10),),
+        ),
+    )
     monkeypatch.setattr(service, "backfill", lambda *args, **kwargs: report)
 
     def _export_static(*, static_staging_dir, **_kwargs):

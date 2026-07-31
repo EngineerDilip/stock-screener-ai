@@ -1,4 +1,4 @@
-"""Lifecycle for the one-time fresh-install balanced RS activation marker."""
+"""Per-market lifecycle for fresh-install balanced RS activation."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
 from app.services.bootstrap_run_manifest import (
     BootstrapRunManifestRepository,
+    StaleBootstrapDispatch,
 )
 
 
@@ -18,7 +19,7 @@ class ActiveFormulaReader(Protocol):
 
 
 class FreshBalancedRsBootstrapLifecycle:
-    """Consume fresh-install identity once every enabled market is balanced."""
+    """Remove one market from the activation set after it becomes balanced."""
 
     def __init__(
         self,
@@ -29,24 +30,43 @@ class FreshBalancedRsBootstrapLifecycle:
         self.manifest_repository = manifest_repository
         self.formula_repository = formula_repository
 
-    def consume_if_complete(self, db: Session) -> bool:
-        manifest = self.manifest_repository.load(db)
-        if manifest is None or not manifest.fresh_install:
-            return False
+    def complete_market(
+        self,
+        db: Session,
+        *,
+        market: str,
+        dispatch_id: str,
+    ) -> bool:
+        normalized = str(market).upper()
         try:
-            all_balanced = all(
-                self.formula_repository.active_formula(db, market=market)
-                == BALANCED_RS_FORMULA_VERSION
-                for market in manifest.enabled_markets
+            active_formula = self.formula_repository.active_formula(
+                db,
+                market=normalized,
             )
         except LookupError:
             return False
-        if not all_balanced:
+        if active_formula != BALANCED_RS_FORMULA_VERSION:
             return False
-        self.manifest_repository.save(
-            db,
-            replace(manifest, fresh_install=False),
-        )
+
+        def _complete(manifest):
+            pending = tuple(
+                pending_market
+                for pending_market in manifest.pending_balanced_activation_markets
+                if pending_market != normalized
+            )
+            return replace(
+                manifest,
+                pending_balanced_activation_markets=pending,
+            )
+
+        try:
+            self.manifest_repository.update_dispatch(
+                db,
+                dispatch_id=dispatch_id,
+                transform=_complete,
+            )
+        except StaleBootstrapDispatch:
+            return False
         return True
 
 

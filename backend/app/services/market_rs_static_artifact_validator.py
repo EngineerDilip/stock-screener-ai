@@ -461,6 +461,10 @@ class MarketRsStaticArtifactValidator:
                 exc.reason_code
                 is StaticGroupsRRGUnavailableReason.INSUFFICIENT_HISTORY
             ):
+                errors.append(
+                    "Balanced RRG history is insufficient for guarded activation: "
+                    f"{exc.reason}"
+                )
                 if rrg_path.is_file():
                     payload = self._json_file(rrg_path)
                     if payload.get("available") or payload.get("payload"):

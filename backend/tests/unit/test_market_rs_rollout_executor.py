@@ -42,6 +42,10 @@ def test_executor_activates_only_after_bounded_publication_gates(
 ) -> None:
     events: list[str] = []
     rollout = MagicMock()
+    required_dates = (date(2026, 1, 23), date(2026, 7, 29))
+    rollout.activation_coverage.return_value = SimpleNamespace(
+        required_dates=required_dates
+    )
     rollout.backfill.side_effect = lambda *args, **kwargs: (
         events.append("backfill") or _report()
     )
@@ -78,11 +82,9 @@ def test_executor_activates_only_after_bounded_publication_gates(
         "activate",
         "publish_live",
     ]
-    expected_start = date(2026, 1, 23)
-    assert rollout.backfill.call_args.kwargs["coverage_start_date"] == expected_start
+    assert rollout.backfill.call_args.kwargs["required_dates"] == required_dates
     assert (
-        rollout.validate_activation.call_args.kwargs["coverage_start_date"]
-        == expected_start
+        rollout.validate_activation.call_args.kwargs["required_dates"] == required_dates
     )
     db.expire_all.assert_called_once_with()
 

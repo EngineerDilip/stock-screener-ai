@@ -14,6 +14,22 @@ from app.database import SessionLocal
 from app.domain.scanning.ports import StockDataProvider, TaskDispatcher
 from app.services.job_backend import JobBackend, CeleryJobBackend
 from app.services.redis_pool import get_redis_client
+from app.wiring.use_case_factories import (
+    get_build_daily_snapshot_use_case as get_build_daily_snapshot_use_case,
+    get_compare_feature_runs_use_case as get_compare_feature_runs_use_case,
+    get_create_scan_use_case as get_create_scan_use_case,
+    get_create_scan_use_case_without_freshness_gate as get_create_scan_use_case_without_freshness_gate,
+    get_explain_stock_use_case as get_explain_stock_use_case,
+    get_export_scan_results_use_case as get_export_scan_results_use_case,
+    get_get_filter_options_use_case as get_get_filter_options_use_case,
+    get_get_peers_use_case as get_get_peers_use_case,
+    get_get_scan_results_use_case as get_get_scan_results_use_case,
+    get_get_scan_symbols_use_case as get_get_scan_symbols_use_case,
+    get_get_setup_details_use_case as get_get_setup_details_use_case,
+    get_get_single_result_use_case as get_get_single_result_use_case,
+    get_list_feature_runs_use_case as get_list_feature_runs_use_case,
+    get_run_bulk_scan_use_case as get_run_bulk_scan_use_case,
+)
 
 if TYPE_CHECKING:
     from app.infra.db.uow import SqlUnitOfWork
@@ -60,21 +76,6 @@ if TYPE_CHECKING:
     from app.services.yfinance_service import YFinanceService
     from app.tasks.data_fetch_lock import DataFetchLock
     from app.tasks.workload_coordination import WorkloadCoordination
-    from app.use_cases.feature_store.build_daily_snapshot import (
-        BuildDailyFeatureSnapshotUseCase,
-    )
-    from app.use_cases.feature_store.compare_runs import CompareFeatureRunsUseCase
-    from app.use_cases.feature_store.list_runs import ListFeatureRunsUseCase
-    from app.use_cases.scanning.create_scan import CreateScanUseCase
-    from app.use_cases.scanning.explain_stock import ExplainStockUseCase
-    from app.use_cases.scanning.export_scan_results import ExportScanResultsUseCase
-    from app.use_cases.scanning.get_filter_options import GetFilterOptionsUseCase
-    from app.use_cases.scanning.get_peers import GetPeersUseCase
-    from app.use_cases.scanning.get_scan_results import GetScanResultsUseCase
-    from app.use_cases.scanning.get_scan_symbols import GetScanSymbolsUseCase
-    from app.use_cases.scanning.get_setup_details import GetSetupDetailsUseCase
-    from app.use_cases.scanning.get_single_result import GetSingleResultUseCase
-    from app.use_cases.scanning.run_bulk_scan import RunBulkScanUseCase
 
 
 SessionFactory: TypeAlias = Callable[[], Session]
@@ -883,141 +884,6 @@ def get_daily_price_bundle_service() -> DailyPriceBundleService:
 def get_hybrid_fundamentals_service() -> HybridFundamentalsService:
     """Return process-scoped hybrid fundamentals service."""
     return _resolve_runtime_services().hybrid_fundamentals_service()
-
-
-def get_create_scan_use_case() -> CreateScanUseCase:
-    """HTTP-bound factory: always enforces the staleness gate.
-
-    This function is used with ``Depends(get_create_scan_use_case)`` in the
-    FastAPI route. It intentionally has no parameters — FastAPI would expose
-    any kwarg as a client-controllable query parameter, which could let a
-    caller disable the gate with ``?with_freshness_gate=false``.
-
-    Internal non-HTTP callers (e.g. bootstrap scans that *populate* the cache
-    and therefore can't be gated on that data already existing) must use
-    :func:`get_create_scan_use_case_without_freshness_gate` instead.
-    """
-    from app.use_cases.scanning.create_scan import CreateScanUseCase
-    from app.services.market_data_freshness import evaluate_symbol_freshness
-
-    return CreateScanUseCase(
-        dispatcher=get_task_dispatcher(),
-        freshness_evaluator=evaluate_symbol_freshness,
-    )
-
-
-def get_create_scan_use_case_without_freshness_gate() -> CreateScanUseCase:
-    """Internal factory for callers that must bypass the staleness gate.
-
-    Only appropriate for scans that *create* the data the gate would check
-    (bootstrap scans, initial market provisioning). Must never be wired
-    through ``Depends(...)`` — use :func:`get_create_scan_use_case` there.
-    """
-    from app.use_cases.scanning.create_scan import CreateScanUseCase
-
-    return CreateScanUseCase(
-        dispatcher=get_task_dispatcher(),
-        freshness_evaluator=None,
-    )
-
-
-def get_get_scan_results_use_case() -> GetScanResultsUseCase:
-    """Build a GetScanResultsUseCase (no extra dependencies — reads via UoW)."""
-    from app.use_cases.scanning.get_scan_results import GetScanResultsUseCase
-
-    return GetScanResultsUseCase()
-
-
-def get_get_scan_symbols_use_case() -> GetScanSymbolsUseCase:
-    """Build a GetScanSymbolsUseCase (no extra dependencies — reads via UoW)."""
-    from app.use_cases.scanning.get_scan_symbols import GetScanSymbolsUseCase
-
-    return GetScanSymbolsUseCase()
-
-
-def get_get_filter_options_use_case() -> GetFilterOptionsUseCase:
-    """Build a GetFilterOptionsUseCase (no extra dependencies — reads via UoW)."""
-    from app.use_cases.scanning.get_filter_options import GetFilterOptionsUseCase
-
-    return GetFilterOptionsUseCase()
-
-
-def get_get_single_result_use_case() -> GetSingleResultUseCase:
-    """Build a GetSingleResultUseCase (no extra dependencies — reads via UoW)."""
-    from app.use_cases.scanning.get_single_result import GetSingleResultUseCase
-
-    return GetSingleResultUseCase()
-
-
-def get_get_setup_details_use_case() -> GetSetupDetailsUseCase:
-    """Build a GetSetupDetailsUseCase (no extra dependencies — reads via UoW)."""
-    from app.use_cases.scanning.get_setup_details import GetSetupDetailsUseCase
-
-    return GetSetupDetailsUseCase()
-
-
-def get_get_peers_use_case() -> GetPeersUseCase:
-    """Build a GetPeersUseCase (no extra dependencies — reads via UoW)."""
-    from app.use_cases.scanning.get_peers import GetPeersUseCase
-
-    return GetPeersUseCase()
-
-
-def get_export_scan_results_use_case() -> ExportScanResultsUseCase:
-    """Build an ExportScanResultsUseCase (no extra dependencies — reads via UoW)."""
-    from app.use_cases.scanning.export_scan_results import ExportScanResultsUseCase
-
-    return ExportScanResultsUseCase()
-
-
-def get_run_bulk_scan_use_case() -> RunBulkScanUseCase:
-    """Build a RunBulkScanUseCase wired with the scan orchestrator."""
-    from app.use_cases.scanning.run_bulk_scan import RunBulkScanUseCase
-
-    return RunBulkScanUseCase(
-        scanner=get_scan_orchestrator(),
-        data_provider=get_stock_data_provider(),
-        market_rs_reader=get_market_rs_reader(),
-    )
-
-
-def get_explain_stock_use_case() -> ExplainStockUseCase:
-    """Build an ExplainStockUseCase (no extra dependencies — reads via UoW)."""
-    from app.use_cases.scanning.explain_stock import ExplainStockUseCase
-
-    return ExplainStockUseCase()
-
-
-def get_list_feature_runs_use_case() -> ListFeatureRunsUseCase:
-    """Build a ListFeatureRunsUseCase (no extra dependencies — reads via UoW)."""
-    from app.use_cases.feature_store.list_runs import ListFeatureRunsUseCase
-
-    return ListFeatureRunsUseCase()
-
-
-def get_compare_feature_runs_use_case() -> CompareFeatureRunsUseCase:
-    """Build a CompareFeatureRunsUseCase (no extra dependencies — reads via UoW)."""
-    from app.use_cases.feature_store.compare_runs import CompareFeatureRunsUseCase
-
-    return CompareFeatureRunsUseCase()
-
-
-def get_build_daily_snapshot_use_case() -> BuildDailyFeatureSnapshotUseCase:
-    """Build a BuildDailyFeatureSnapshotUseCase wired with the scan orchestrator."""
-    from app.services.bootstrap_cache_coverage import (
-        evaluate_bootstrap_cache_coverage,
-    )
-    from app.use_cases.feature_store.build_daily_snapshot import (
-        BuildDailyFeatureSnapshotUseCase,
-    )
-
-    return BuildDailyFeatureSnapshotUseCase(
-        scanner=get_scan_orchestrator(),
-        data_provider=get_stock_data_provider(),
-        market_calendar=get_market_calendar_service(),
-        market_rs_reader=get_market_rs_reader(),
-        bootstrap_coverage_evaluator=evaluate_bootstrap_cache_coverage,
-    )
 
 
 # ── Providers ────────────────────────────────────────────────────────────

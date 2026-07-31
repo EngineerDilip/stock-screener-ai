@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy.orm import Session
 
@@ -33,12 +33,17 @@ class BootstrapQueueState(str, Enum):
             raise ValueError(f"invalid bootstrap queue_state: {value}") from exc
 
 
+class StaleBootstrapDispatch(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class BootstrapRunManifest:
     primary_market: str
     enabled_markets: tuple[str, ...]
     dispatch_id: str | None = None
     fresh_install: bool = False
+    pending_balanced_activation_markets: tuple[str, ...] = ()
     primary_task_id: str | None = None
     market_task_ids: Mapping[str, str | None] = field(default_factory=dict)
     queue_state: BootstrapQueueState | str = BootstrapQueueState.QUEUED
@@ -50,6 +55,23 @@ class BootstrapRunManifest:
             self,
             "enabled_markets",
             tuple(str(market).upper() for market in self.enabled_markets),
+        )
+        pending = tuple(
+            dict.fromkeys(
+                str(market).upper()
+                for market in self.pending_balanced_activation_markets
+            )
+        )
+        unknown_pending = set(pending) - set(self.enabled_markets)
+        if unknown_pending:
+            raise ValueError(
+                "pending balanced activation markets must be enabled: "
+                + ", ".join(sorted(unknown_pending))
+            )
+        object.__setattr__(
+            self,
+            "pending_balanced_activation_markets",
+            pending,
         )
         object.__setattr__(
             self,
@@ -65,15 +87,25 @@ class BootstrapRunManifest:
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> "BootstrapRunManifest":
+        enabled_markets = tuple(payload.get("enabled_markets") or ())
+        fresh_install = payload.get("fresh_install") is True
+        pending_markets = (
+            tuple(payload.get("pending_balanced_activation_markets") or ())
+            if "pending_balanced_activation_markets" in payload
+            else enabled_markets
+            if fresh_install
+            else ()
+        )
         return cls(
             primary_market=str(payload["primary_market"]),
-            enabled_markets=tuple(payload.get("enabled_markets") or ()),
+            enabled_markets=enabled_markets,
             dispatch_id=(
                 str(payload["dispatch_id"])
                 if payload.get("dispatch_id") is not None
                 else None
             ),
-            fresh_install=payload.get("fresh_install") is True,
+            fresh_install=fresh_install,
+            pending_balanced_activation_markets=pending_markets,
             primary_task_id=(
                 str(payload["primary_task_id"])
                 if payload.get("primary_task_id") is not None
@@ -98,16 +130,26 @@ class BootstrapRunManifest:
         enabled_markets: Iterable[str],
         dispatch_id: str | None = None,
         fresh_install: bool = False,
+        pending_balanced_activation_markets: Iterable[str] | None = None,
         primary_task_id: str | None = None,
         market_task_ids: Mapping[str, str | None] | None = None,
         queue_state: BootstrapQueueState | str = BootstrapQueueState.QUEUED,
         queued_at: str | None = None,
     ) -> "BootstrapRunManifest":
+        normalized_enabled = tuple(enabled_markets)
+        pending_markets = (
+            tuple(pending_balanced_activation_markets)
+            if pending_balanced_activation_markets is not None
+            else normalized_enabled
+            if fresh_install
+            else ()
+        )
         return cls(
             primary_market=primary_market,
-            enabled_markets=tuple(enabled_markets),
+            enabled_markets=normalized_enabled,
             dispatch_id=dispatch_id,
             fresh_install=fresh_install,
+            pending_balanced_activation_markets=pending_markets,
             primary_task_id=primary_task_id,
             market_task_ids=dict(market_task_ids or {}),
             queue_state=queue_state,
@@ -120,6 +162,9 @@ class BootstrapRunManifest:
             "enabled_markets": list(self.enabled_markets),
             "dispatch_id": self.dispatch_id,
             "fresh_install": self.fresh_install,
+            "pending_balanced_activation_markets": list(
+                self.pending_balanced_activation_markets
+            ),
             "primary_task_id": self.primary_task_id,
             "market_task_ids": dict(self.market_task_ids),
             "queue_state": self.queue_state.value,
@@ -144,43 +189,72 @@ class BootstrapRunManifestRepository:
             return None
         return BootstrapRunManifest.from_payload(payload)
 
-    def save(
-        self,
-        db: Session,
+    @staticmethod
+    def _write_setting(
+        setting: AppSetting | None,
         manifest: BootstrapRunManifest,
-    ) -> dict[str, Any]:
+        db: Session,
+    ) -> None:
         encoded = json.dumps(manifest.to_payload())
-        setting = (
+        if setting is None:
+            db.add(
+                AppSetting(
+                    key=BOOTSTRAP_RUN_KEY,
+                    value=encoded,
+                    category=RUNTIME_ACTIVITY_CATEGORY,
+                    description=BOOTSTRAP_RUN_DESCRIPTION,
+                )
+            )
+            return
+        setting.value = encoded
+        setting.category = RUNTIME_ACTIVITY_CATEGORY
+        setting.description = BOOTSTRAP_RUN_DESCRIPTION
+
+    @staticmethod
+    def _locked_setting(db: Session) -> AppSetting | None:
+        return (
             db.query(AppSetting)
             .filter(AppSetting.key == BOOTSTRAP_RUN_KEY)
             .with_for_update()
             .first()
         )
-        if setting is None:
-            setting = AppSetting(
-                key=BOOTSTRAP_RUN_KEY,
-                value=encoded,
-                category=RUNTIME_ACTIVITY_CATEGORY,
-                description=BOOTSTRAP_RUN_DESCRIPTION,
-            )
-            db.add(setting)
-        else:
-            try:
-                current_payload = json.loads(setting.value)
-                current = BootstrapRunManifest.from_payload(current_payload)
-            except (json.JSONDecodeError, TypeError, KeyError, ValueError):
-                current = None
-            if (
-                current is not None
-                and manifest.dispatch_id is not None
-                and current.dispatch_id == manifest.dispatch_id
-                and not current.fresh_install
-                and manifest.fresh_install
-            ):
-                manifest = replace(manifest, fresh_install=False)
-                encoded = json.dumps(manifest.to_payload())
-            setting.value = encoded
-            setting.category = RUNTIME_ACTIVITY_CATEGORY
-            setting.description = BOOTSTRAP_RUN_DESCRIPTION
+
+    def begin_dispatch(
+        self,
+        db: Session,
+        manifest: BootstrapRunManifest,
+    ) -> dict[str, Any]:
+        setting = self._locked_setting(db)
+        self._write_setting(setting, manifest, db)
         db.commit()
         return manifest.to_payload()
+
+    def update_dispatch(
+        self,
+        db: Session,
+        *,
+        dispatch_id: str,
+        transform: Callable[[BootstrapRunManifest], BootstrapRunManifest],
+    ) -> BootstrapRunManifest:
+        setting = self._locked_setting(db)
+        if setting is None:
+            raise StaleBootstrapDispatch(
+                f"Bootstrap dispatch {dispatch_id} has no persisted manifest."
+            )
+        try:
+            current = BootstrapRunManifest.from_payload(json.loads(setting.value))
+        except (json.JSONDecodeError, TypeError, KeyError, ValueError) as exc:
+            raise StaleBootstrapDispatch(
+                f"Bootstrap dispatch {dispatch_id} has an invalid manifest."
+            ) from exc
+        if current.dispatch_id != dispatch_id:
+            raise StaleBootstrapDispatch(
+                f"Bootstrap dispatch {dispatch_id} is stale; current dispatch is "
+                f"{current.dispatch_id}."
+            )
+        updated = transform(current)
+        if updated.dispatch_id != dispatch_id:
+            raise ValueError("Bootstrap dispatch updates cannot change dispatch_id.")
+        self._write_setting(setting, updated, db)
+        db.commit()
+        return updated

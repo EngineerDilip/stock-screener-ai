@@ -11,9 +11,6 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
-from app.services.market_rs_activation_coverage import (
-    market_rs_activation_start_date,
-)
 from app.services.market_rs_rollout_contracts import normalize_rollout_market
 from app.services.market_rs_rollout_service import MarketRsRolloutService
 
@@ -107,12 +104,15 @@ class MarketRsActivationExecutor:
     ) -> MarketRsActivationOutcome:
         market = normalize_rollout_market(request.market)
         staging_dir = validate_static_staging_directory(request.static_staging_dir)
-        coverage_start_date = market_rs_activation_start_date(request.through_date)
+        coverage = self.rollout_service.activation_coverage(
+            market=market,
+            through_date=request.through_date,
+        )
         report = self.rollout_service.backfill(
             db,
             market=market,
             through_date=request.through_date,
-            coverage_start_date=coverage_start_date,
+            required_dates=coverage.required_dates,
         )
         if not report.ok or report.failed_count:
             raise MarketRsActivationExecutionError(
@@ -136,7 +136,7 @@ class MarketRsActivationExecutor:
             through_date=request.through_date,
             feature_run_id=feature_run_id,
             static_staging_dir=staging_dir,
-            coverage_start_date=coverage_start_date,
+            required_dates=coverage.required_dates,
         )
         if not validation.ok:
             raise MarketRsActivationExecutionError(

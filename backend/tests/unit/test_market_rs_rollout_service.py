@@ -224,6 +224,66 @@ def test_backfill_labels_snapshot_rebuild_failure_as_stock_calculation(monkeypat
     groups.calculate_and_store.assert_not_called()
 
 
+def test_activation_backfill_attempts_every_required_date() -> None:
+    required_dates = (date(2026, 1, 23), date(2026, 7, 29))
+    latest_run = SimpleNamespace(id=42, eligible_symbol_count=2)
+    repository = MagicMock()
+    repository.get_completed_exact.return_value = None
+    snapshot = MagicMock()
+    snapshot.calculate.side_effect = [
+        MarketRsInputUnavailable(
+            "missing anchors",
+            reason_code="session_anchors_unavailable",
+            diagnostics={},
+        ),
+        latest_run,
+    ]
+    groups = MagicMock()
+    groups.calculate_and_store.return_value = [{"market_rs_run_id": 42}]
+    service = _service(repository=repository, snapshot=snapshot, groups=groups)
+
+    report = service.backfill(
+        MagicMock(),
+        market="US",
+        through_date=required_dates[-1],
+        required_dates=required_dates,
+    )
+
+    assert [result.as_of_date for result in report.results] == list(required_dates)
+    assert report.failed_count == 1
+    assert report.results[0].reason_code == "session_anchors_unavailable"
+    assert [
+        call.kwargs["as_of_date"] for call in snapshot.calculate.call_args_list
+    ] == list(required_dates)
+
+
+def test_activation_validation_checks_every_required_date(
+    monkeypatch, tmp_path
+) -> None:
+    required_dates = (date(2026, 1, 23), date(2026, 7, 29))
+    service = _service()
+    validate_run = MagicMock(side_effect=[None, SimpleNamespace(id=42)])
+    monkeypatch.setattr(service.validator, "_validate_run_and_groups", validate_run)
+    feature_repository = MagicMock()
+    feature_repository.get_run.side_effect = LookupError("not needed")
+    service.validator.feature_run_repository_factory = lambda _db: feature_repository
+
+    validation = service.validate_activation(
+        MagicMock(),
+        market="US",
+        through_date=required_dates[-1],
+        feature_run_id=99,
+        static_staging_dir=tmp_path,
+        required_dates=required_dates,
+    )
+
+    assert [
+        call.kwargs["calculation_date"] for call in validate_run.call_args_list
+    ] == list(required_dates)
+    assert validation.first_valid_date == required_dates[0]
+    assert validation.candidate_count == 2
+
+
 def test_backfill_completes_without_groups_when_market_lacks_capability(monkeypatch):
     calculation_date = date(2026, 4, 10)
     run = SimpleNamespace(id=42, eligible_symbol_count=2)

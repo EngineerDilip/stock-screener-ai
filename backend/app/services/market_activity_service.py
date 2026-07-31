@@ -6,6 +6,7 @@ import json
 import logging
 from collections.abc import Iterable
 from datetime import datetime, timezone
+from dataclasses import replace
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -163,23 +164,41 @@ def save_runtime_bootstrap_run(
     enabled_markets: Iterable[str],
     dispatch_id: str | None = None,
     fresh_install: bool = False,
+    pending_balanced_activation_markets: Iterable[str] | None = None,
     primary_task_id: str | None = None,
     market_task_ids: dict[str, str | None] | None = None,
     queue_state: str = "queued",
 ) -> dict[str, Any]:
-    return BootstrapRunManifestRepository().save(
+    repository = BootstrapRunManifestRepository()
+    manifest = BootstrapRunManifest.create(
+        primary_market=primary_market,
+        enabled_markets=enabled_markets,
+        dispatch_id=dispatch_id,
+        fresh_install=fresh_install,
+        pending_balanced_activation_markets=(pending_balanced_activation_markets),
+        primary_task_id=primary_task_id,
+        market_task_ids=market_task_ids or {},
+        queue_state=queue_state,
+        queued_at=_utcnow_iso(),
+    )
+    if queue_state == "queueing":
+        return repository.begin_dispatch(db, manifest)
+    if dispatch_id is None:
+        return repository.begin_dispatch(db, manifest)
+    updated = repository.update_dispatch(
         db,
-        BootstrapRunManifest.create(
-            primary_market=primary_market,
-            enabled_markets=enabled_markets,
-            dispatch_id=dispatch_id,
-            fresh_install=fresh_install,
-            primary_task_id=primary_task_id,
-            market_task_ids=market_task_ids or {},
-            queue_state=queue_state,
-            queued_at=_utcnow_iso(),
+        dispatch_id=dispatch_id,
+        transform=lambda current: replace(
+            current,
+            primary_market=manifest.primary_market,
+            enabled_markets=manifest.enabled_markets,
+            primary_task_id=manifest.primary_task_id,
+            market_task_ids=manifest.market_task_ids,
+            queue_state=manifest.queue_state,
+            queued_at=manifest.queued_at,
         ),
     )
+    return updated.to_payload()
 
 
 def _save_market_activity(

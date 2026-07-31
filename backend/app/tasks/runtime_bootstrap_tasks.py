@@ -87,6 +87,7 @@ class BootstrapQueueManifestRecorder:
     market_task_ids: dict[str, str]
     dispatch_id: str
     fresh_install: bool = False
+    pending_balanced_activation_markets: tuple[str, ...] = ()
     primary_task_id: str | None = None
 
     @classmethod
@@ -96,6 +97,7 @@ class BootstrapQueueManifestRecorder:
         primary_market: str,
         enabled_markets: Iterable[str],
         fresh_install: bool = False,
+        pending_balanced_activation_markets: Iterable[str] = (),
     ) -> "BootstrapQueueManifestRecorder":
         return cls(
             primary_market=primary_market,
@@ -103,6 +105,9 @@ class BootstrapQueueManifestRecorder:
             market_task_ids={},
             dispatch_id=uuid4().hex,
             fresh_install=fresh_install,
+            pending_balanced_activation_markets=tuple(
+                pending_balanced_activation_markets
+            ),
         )
 
     def record_queueing(self) -> None:
@@ -139,15 +144,20 @@ class BootstrapQueueManifestRecorder:
             )
 
     def _record(self, queue_state: BootstrapQueueState) -> None:
-        record_runtime_bootstrap_run(
-            primary_market=self.primary_market,
-            enabled_markets=self.enabled_markets,
-            dispatch_id=self.dispatch_id,
-            fresh_install=self.fresh_install,
-            primary_task_id=self.primary_task_id,
-            market_task_ids=self.market_task_ids,
-            queue_state=queue_state.value,
-        )
+        kwargs = {
+            "primary_market": self.primary_market,
+            "enabled_markets": self.enabled_markets,
+            "dispatch_id": self.dispatch_id,
+            "fresh_install": self.fresh_install,
+            "primary_task_id": self.primary_task_id,
+            "market_task_ids": self.market_task_ids,
+            "queue_state": queue_state.value,
+        }
+        if self.pending_balanced_activation_markets:
+            kwargs["pending_balanced_activation_markets"] = (
+                self.pending_balanced_activation_markets
+            )
+        record_runtime_bootstrap_run(**kwargs)
 
     def log_extra(self) -> dict:
         return {
@@ -342,6 +352,7 @@ def record_runtime_bootstrap_run(
     enabled_markets: Iterable[str],
     dispatch_id: str | None = None,
     fresh_install: bool = False,
+    pending_balanced_activation_markets: Iterable[str] = (),
     primary_task_id: str | None = None,
     market_task_ids: dict[str, str | None] | None = None,
     queue_state: BootstrapQueueState | str = BootstrapQueueState.QUEUED,
@@ -354,6 +365,7 @@ def record_runtime_bootstrap_run(
             enabled_markets=enabled_markets,
             dispatch_id=dispatch_id,
             fresh_install=fresh_install,
+            pending_balanced_activation_markets=(pending_balanced_activation_markets),
             primary_task_id=primary_task_id,
             market_task_ids=market_task_ids or {},
             queue_state=BootstrapQueueState.parse(queue_state).value,
@@ -426,20 +438,48 @@ def _mark_readiness_failure(db, completion: MarketReadinessCompletion) -> str:
     return failure.result_reason
 
 
-def _is_fresh_install_at_dispatch() -> bool:
+@dataclass(frozen=True)
+class BalancedActivationDispatchState:
+    fresh_install: bool
+    pending_markets: tuple[str, ...]
+
+
+def _balanced_activation_state_at_dispatch(
+    enabled_markets: Iterable[str],
+) -> BalancedActivationDispatchState:
     from ..services.bootstrap_readiness_service import BootstrapReadinessService
 
     db = SessionLocal()
     try:
         manifest = BootstrapRunManifestRepository().load(db)
-        if manifest is not None and manifest.fresh_install:
-            return True
-        return BootstrapReadinessService().is_pristine_installation(db)
+        enabled = tuple(
+            dict.fromkeys(normalize_market(market) for market in enabled_markets)
+        )
+        if manifest is not None:
+            pending = tuple(
+                market
+                for market in manifest.pending_balanced_activation_markets
+                if market in enabled
+            )
+            return BalancedActivationDispatchState(
+                fresh_install=manifest.fresh_install,
+                pending_markets=pending,
+            )
+        pristine = BootstrapReadinessService().is_pristine_installation(db)
+        return BalancedActivationDispatchState(
+            fresh_install=pristine,
+            pending_markets=enabled if pristine else (),
+        )
     finally:
         db.close()
 
 
-def _consume_fresh_install_if_complete(db) -> bool:
+def _complete_balanced_activation_market(
+    db,
+    *,
+    market: str,
+    dispatch_id: str,
+) -> bool:
     from ..infra.db.repositories.market_rs_repo import MarketRsRunRepository
     from ..services.fresh_balanced_rs_bootstrap_lifecycle import (
         FreshBalancedRsBootstrapLifecycle,
@@ -448,25 +488,23 @@ def _consume_fresh_install_if_complete(db) -> bool:
     return FreshBalancedRsBootstrapLifecycle(
         manifest_repository=BootstrapRunManifestRepository(),
         formula_repository=MarketRsRunRepository(),
-    ).consume_if_complete(db)
+    ).complete_market(db, market=market, dispatch_id=dispatch_id)
 
 
 def queue_local_runtime_bootstrap(
     *, primary_market: str, enabled_markets: Iterable[str]
 ) -> str:
-    fresh_install = _is_fresh_install_at_dispatch()
+    requested_markets = tuple(enabled_markets)
+    activation_state = _balanced_activation_state_at_dispatch(
+        (primary_market, *requested_markets)
+    )
     plan = build_bootstrap_plan(
         primary_market=primary_market,
-        enabled_markets=enabled_markets,
-        fresh_install=fresh_install,
+        enabled_markets=requested_markets,
+        balanced_activation_markets=activation_state.pending_markets,
     )
     primary = plan.primary_market
     enabled = list(plan.enabled_markets)
-    completion_formula_kwargs = (
-        {"expected_formula_version": BALANCED_RS_FORMULA_VERSION}
-        if fresh_install
-        else {}
-    )
 
     market_plans_by_code = {
         market_plan.market: market_plan for market_plan in plan.market_plans
@@ -475,7 +513,8 @@ def queue_local_runtime_bootstrap(
     manifest_recorder = BootstrapQueueManifestRecorder.create(
         primary_market=primary,
         enabled_markets=enabled,
-        fresh_install=fresh_install,
+        fresh_install=activation_state.fresh_install,
+        pending_balanced_activation_markets=activation_state.pending_markets,
     )
     manifest_recorder.record_queueing()
 
@@ -485,7 +524,12 @@ def queue_local_runtime_bootstrap(
             completion_task=complete_local_runtime_bootstrap,
             completion_kwargs={
                 "primary_market": primary,
-                **completion_formula_kwargs,
+                "dispatch_id": manifest_recorder.dispatch_id,
+                **(
+                    {"expected_formula_version": BALANCED_RS_FORMULA_VERSION}
+                    if primary in activation_state.pending_markets
+                    else {}
+                ),
             },
             errback_task=fail_local_runtime_bootstrap,
             errback_kwargs={"primary_market": primary},
@@ -503,7 +547,12 @@ def queue_local_runtime_bootstrap(
                 completion_task=complete_background_market_bootstrap,
                 completion_kwargs={
                     "market": market_plan.market,
-                    **completion_formula_kwargs,
+                    "dispatch_id": manifest_recorder.dispatch_id,
+                    **(
+                        {"expected_formula_version": BALANCED_RS_FORMULA_VERSION}
+                        if market_plan.market in activation_state.pending_markets
+                        else {}
+                    ),
                 },
                 errback_task=fail_background_market_bootstrap,
                 errback_kwargs={"market": market_plan.market},
@@ -545,6 +594,7 @@ def complete_local_runtime_bootstrap(
     primary_market: str,
     enabled_markets: Iterable[str] | None = None,
     expected_formula_version: str | None = None,
+    dispatch_id: str | None = None,
 ) -> dict:
     from ..services.runtime_preferences_service import (
         get_runtime_preferences,
@@ -573,8 +623,15 @@ def complete_local_runtime_bootstrap(
                 "market": completion.market,
                 "reason": reason,
             }
-        if expected_formula_version == BALANCED_RS_FORMULA_VERSION:
-            _consume_fresh_install_if_complete(db)
+        if (
+            expected_formula_version == BALANCED_RS_FORMULA_VERSION
+            and dispatch_id is not None
+        ):
+            _complete_balanced_activation_market(
+                db,
+                market=primary_market,
+                dispatch_id=dispatch_id,
+            )
         set_bootstrap_state(db, "ready")
     finally:
         db.close()
@@ -599,6 +656,7 @@ def complete_local_runtime_bootstrap(
 def complete_background_market_bootstrap(
     market: str,
     expected_formula_version: str | None = None,
+    dispatch_id: str | None = None,
 ) -> dict:
     from ..services.runtime_preferences_service import get_runtime_preferences
 
@@ -612,8 +670,15 @@ def complete_background_market_bootstrap(
             expected_formula_version=expected_formula_version,
         )
         if completion.ready:
-            if expected_formula_version == BALANCED_RS_FORMULA_VERSION:
-                _consume_fresh_install_if_complete(db)
+            if (
+                expected_formula_version == BALANCED_RS_FORMULA_VERSION
+                and dispatch_id is not None
+            ):
+                _complete_balanced_activation_market(
+                    db,
+                    market=completion.market,
+                    dispatch_id=dispatch_id,
+                )
             return {
                 "status": "ready",
                 "market": completion.market,
