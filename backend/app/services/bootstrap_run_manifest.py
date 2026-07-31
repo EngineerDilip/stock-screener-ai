@@ -38,6 +38,11 @@ class BootstrapQueueState(str, Enum):
             raise ValueError(f"invalid bootstrap queue_state: {value}") from exc
 
 
+class BootstrapMarketOutcome(str, Enum):
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class StaleBootstrapDispatch(RuntimeError):
     pass
 
@@ -106,6 +111,21 @@ class BootstrapRunManifest:
             "failed_markets",
             tuple(dict.fromkeys(str(market).upper() for market in self.failed_markets)),
         )
+        enabled = set(self.enabled_markets)
+        completed = set(self.completed_markets)
+        failed = set(self.failed_markets)
+        unknown_terminal = (completed | failed) - enabled
+        if unknown_terminal:
+            raise ValueError(
+                "terminal bootstrap markets must be enabled: "
+                + ", ".join(sorted(unknown_terminal))
+            )
+        conflicting = completed & failed
+        if conflicting:
+            raise ValueError(
+                "bootstrap markets cannot be both completed and failed: "
+                + ", ".join(sorted(conflicting))
+            )
         object.__setattr__(
             self, "queue_state", BootstrapQueueState.parse(self.queue_state)
         )
@@ -284,6 +304,12 @@ class BootstrapRunManifest:
         balanced_activation_completed: bool = False,
     ) -> BootstrapRunManifest:
         normalized = str(market).upper()
+        if normalized not in self.enabled_markets:
+            raise ValueError(
+                f"Bootstrap completion requires an enabled market: {normalized}."
+            )
+        if self.market_outcome(normalized) is not None:
+            return self
         completed = self.completed_markets
         failed = self.failed_markets
         if succeeded:
@@ -299,6 +325,14 @@ class BootstrapRunManifest:
             failed_markets=failed,
             pending_balanced_activation_markets=pending,
         ).reconcile_terminal_state()
+
+    def market_outcome(self, market: str) -> BootstrapMarketOutcome | None:
+        normalized = str(market).upper()
+        if normalized in self.completed_markets:
+            return BootstrapMarketOutcome.COMPLETED
+        if normalized in self.failed_markets:
+            return BootstrapMarketOutcome.FAILED
+        return None
 
 
 class BootstrapRunManifestRepository:
@@ -364,13 +398,9 @@ class BootstrapRunManifestRepository:
         self._write_setting(setting, manifest, db)
         return manifest.to_payload()
 
-    def owns_dispatch(self, db: Session, *, dispatch_id: str) -> bool:
+    def is_current_dispatch(self, db: Session, *, dispatch_id: str) -> bool:
         current = self.load(db)
-        return bool(
-            current
-            and current.dispatch_id == dispatch_id
-            and current.has_active_ownership()
-        )
+        return bool(current and current.dispatch_id == dispatch_id)
 
     def finish_market(
         self,

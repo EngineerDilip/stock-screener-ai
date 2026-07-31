@@ -10,6 +10,10 @@ import pytest
 
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
 from app.services.market_rs_inputs import MarketRsInputUnavailable
+from app.services.market_rs_rollout_contracts import (
+    ActivationValidationReport,
+    BackfillReport,
+)
 from app.services.market_rs_rollout_executor import (
     MarketRsActivationExecutionError,
     MarketRsActivationOutcome,
@@ -183,12 +187,37 @@ def test_bootstrap_balanced_market_rs_requires_successful_activation(monkeypatch
         completed,
         failed,
     ) = _patch_bootstrap_rollout_dependencies(monkeypatch)
+    through_date = date(2026, 7, 29)
     executor.execute.return_value = MarketRsActivationOutcome(
-        backfill={"failed_count": 0},
+        backfill=BackfillReport(
+            market="US",
+            formula_version=BALANCED_RS_FORMULA_VERSION,
+            requested_start_date=through_date,
+            through_date=through_date,
+            first_valid_date=through_date,
+            candidate_count=1,
+            completed_count=1,
+            failed_count=0,
+            latest_run_id=99,
+            group_row_count=1,
+            results=(),
+        ),
         market="US",
         formula_version=BALANCED_RS_FORMULA_VERSION,
         feature_run_id=99,
-        validation={"ok": True},
+        validation=ActivationValidationReport(
+            market="US",
+            formula_version=BALANCED_RS_FORMULA_VERSION,
+            through_date=through_date,
+            first_valid_date=through_date,
+            candidate_count=1,
+            latest_market_rs_run_id=99,
+            latest_universe_hash="universe",
+            feature_run_id=99,
+            feature_universe_hash="universe",
+            static_bundle_sha256="bundle",
+            errors=(),
+        ),
         static_staging_dir="/tmp/stage",
     )
 

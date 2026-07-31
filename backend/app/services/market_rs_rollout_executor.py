@@ -5,14 +5,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
-from app.services.market_rs_rollout_contracts import normalize_rollout_market
-from app.services.market_rs_rollout_service import MarketRsRolloutService
+from app.domain.relative_strength import (
+    BALANCED_RS_FORMULA_VERSION,
+    GroupSnapshotIdentity,
+)
+from app.services.market_rs_activation_coverage import MarketRsActivationCoverage
+from app.services.market_rs_rollout_contracts import (
+    ActivationValidationReport,
+    BackfillReport,
+    normalize_rollout_market,
+)
 
 
 class MarketRsActivationExecutionError(RuntimeError):
@@ -34,7 +41,43 @@ class StaticExporter(Protocol):
 
 
 class LiveGroupPublisher(Protocol):
-    def __call__(self, market: str) -> None: ...
+    def __call__(self, identity: GroupSnapshotIdentity) -> None: ...
+
+
+class MarketRsRollout(Protocol):
+    def activation_coverage(
+        self,
+        *,
+        market: str,
+        through_date: date,
+    ) -> MarketRsActivationCoverage: ...
+
+    def backfill_activation(
+        self,
+        db: Session,
+        *,
+        coverage: MarketRsActivationCoverage,
+    ) -> BackfillReport: ...
+
+    def validate_activation(
+        self,
+        db: Session,
+        *,
+        coverage: MarketRsActivationCoverage,
+        feature_run_id: int,
+        static_staging_dir: Path,
+    ) -> ActivationValidationReport: ...
+
+    def activate(
+        self,
+        db: Session,
+        *,
+        market: str,
+        formula_version: str,
+        feature_run_id: int,
+        validation: ActivationValidationReport,
+        static_staging_dir: Path,
+    ) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -46,21 +89,21 @@ class MarketRsActivationRequest:
 
 @dataclass(frozen=True)
 class MarketRsActivationOutcome:
-    backfill: dict[str, Any]
+    backfill: BackfillReport
     market: str
     formula_version: str
     feature_run_id: int
-    validation: dict[str, Any]
+    validation: ActivationValidationReport
     static_staging_dir: str
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, object]:
         return {
-            "backfill": dict(self.backfill),
+            "backfill": self.backfill.to_dict(),
             "activated": True,
             "market": self.market,
             "formula_version": self.formula_version,
             "feature_run_id": self.feature_run_id,
-            "validation": dict(self.validation),
+            "validation": self.validation.to_dict(),
             "static_staging_dir": self.static_staging_dir,
         }
 
@@ -86,7 +129,7 @@ class MarketRsActivationExecutor:
     def __init__(
         self,
         *,
-        rollout_service: MarketRsRolloutService,
+        rollout_service: MarketRsRollout,
         feature_snapshot_builder: FeatureSnapshotBuilder,
         static_exporter: StaticExporter,
         live_group_publisher: LiveGroupPublisher,
@@ -146,13 +189,19 @@ class MarketRsActivationExecutor:
             validation=validation,
             static_staging_dir=staging_dir,
         )
-        self.live_group_publisher(market)
+        self.live_group_publisher(
+            GroupSnapshotIdentity(
+                market=market,
+                as_of_date=request.through_date,
+                formula_version=BALANCED_RS_FORMULA_VERSION,
+            )
+        )
         return MarketRsActivationOutcome(
-            backfill=report.to_dict(),
+            backfill=report,
             market=market,
             formula_version=BALANCED_RS_FORMULA_VERSION,
             feature_run_id=feature_run_id,
-            validation=validation.to_dict(),
+            validation=validation,
             static_staging_dir=str(staging_dir),
         )
 
@@ -162,5 +211,6 @@ __all__ = [
     "MarketRsActivationExecutor",
     "MarketRsActivationOutcome",
     "MarketRsActivationRequest",
+    "MarketRsRollout",
     "validate_static_staging_directory",
 ]

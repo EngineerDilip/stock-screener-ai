@@ -9,6 +9,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from app.domain.relative_strength import (
+    BALANCED_RS_FORMULA_VERSION,
+    GroupSnapshotIdentity,
+)
+from app.services.market_rs_rollout_contracts import (
+    ActivationValidationReport,
+    BackfillReport,
+)
 from app.services.market_rs_rollout_executor import (
     MarketRsActivationExecutionError,
     MarketRsActivationOutcome,
@@ -22,6 +30,42 @@ def _options(tmp_path: Path, *, activate: bool) -> Namespace:
         start_date=None,
         static_staging_dir=tmp_path / "stage",
         activate=activate,
+    )
+
+
+def _activation_outcome(tmp_path: Path, *, formula_version: str):
+    through_date = date(2026, 4, 10)
+    return MarketRsActivationOutcome(
+        backfill=BackfillReport(
+            market="US",
+            formula_version=formula_version,
+            requested_start_date=through_date,
+            through_date=through_date,
+            first_valid_date=through_date,
+            candidate_count=1,
+            completed_count=1,
+            failed_count=0,
+            latest_run_id=99,
+            group_row_count=1,
+            results=(),
+        ),
+        market="US",
+        formula_version=formula_version,
+        feature_run_id=99,
+        validation=ActivationValidationReport(
+            market="US",
+            formula_version=formula_version,
+            through_date=through_date,
+            first_valid_date=through_date,
+            candidate_count=1,
+            latest_market_rs_run_id=99,
+            latest_universe_hash="universe",
+            feature_run_id=99,
+            feature_universe_hash="universe",
+            static_bundle_sha256="bundle",
+            errors=(),
+        ),
+        static_staging_dir=str((tmp_path / "stage").resolve()),
     )
 
 
@@ -49,13 +93,9 @@ def test_activate_delegates_once_and_preserves_outcome(monkeypatch, tmp_path):
     from app.scripts import backfill_market_rs as module
 
     executor = MagicMock()
-    executor.execute.return_value = MarketRsActivationOutcome(
-        backfill={"ok": True, "failed_count": 0},
-        market="US",
+    executor.execute.return_value = _activation_outcome(
+        tmp_path,
         formula_version="balanced-percentile-v1",
-        feature_run_id=99,
-        validation={"ok": True},
-        static_staging_dir=str((tmp_path / "stage").resolve()),
     )
     monkeypatch.setattr(module, "get_market_rs_activation_executor", lambda: executor)
     db = MagicMock()
@@ -86,8 +126,8 @@ def test_activate_rejects_shadow_resume_start_date(tmp_path: Path) -> None:
 def test_publish_live_groups_does_not_duplicate_activation_cache_invalidation(
     monkeypatch,
 ):
-    from app.wiring import market_rs_activation as module
     from app.services import group_rankings_cache, ui_snapshot_service
+    from app.wiring import market_rs_activation as module
 
     bump_epoch = MagicMock()
     publish_bootstrap = MagicMock()
@@ -98,10 +138,19 @@ def test_publish_live_groups_does_not_duplicate_activation_cache_invalidation(
         publish_bootstrap,
     )
 
-    module.publish_live_groups("US")
+    module.publish_live_groups(
+        GroupSnapshotIdentity(
+            market="US",
+            as_of_date=date(2026, 4, 10),
+            formula_version=BALANCED_RS_FORMULA_VERSION,
+        )
+    )
 
     bump_epoch.assert_not_called()
-    publish_bootstrap.assert_called_once_with()
+    publish_bootstrap.assert_called_once_with(
+        expected_formula_version=BALANCED_RS_FORMULA_VERSION,
+        expected_through_date=date(2026, 4, 10),
+    )
 
 
 def test_executor_failure_is_exposed_as_command_failure(monkeypatch, tmp_path):

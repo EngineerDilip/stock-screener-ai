@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
 from app.services.bootstrap_run_manifest import (
     BootstrapAlreadyRunning,
+    BootstrapMarketOutcome,
     BootstrapQueueState,
     BootstrapRunManifest,
     BootstrapRunManifestRepository,
@@ -134,6 +135,7 @@ class BootstrapDispatchLifecycle:
         completion: BootstrapMarketCompletion,
     ) -> BootstrapRunManifest:
         market = str(completion.market).upper()
+        previous_outcome: BootstrapMarketOutcome | None = None
         balanced_activation_completed = False
         if completion.expected_formula_version == BALANCED_RS_FORMULA_VERSION:
             if self.formula_reader is None:
@@ -149,24 +151,41 @@ class BootstrapDispatchLifecycle:
                 balanced_activation_completed = False
 
         try:
-            updated = self.repository.update_dispatch(
-                db,
-                dispatch_id=dispatch_id,
-                transform=lambda current: current.finish_market(
+            def finish(current: BootstrapRunManifest) -> BootstrapRunManifest:
+                nonlocal previous_outcome
+                previous_outcome = current.market_outcome(market)
+                return current.finish_market(
                     market=market,
                     succeeded=completion.succeeded,
                     balanced_activation_completed=balanced_activation_completed,
-                ),
+                )
+
+            updated = self.repository.update_dispatch(
+                db,
+                dispatch_id=dispatch_id,
+                transform=finish,
             )
-            if completion.primary:
+            effective_outcome = updated.market_outcome(market)
+            if effective_outcome is None:
+                raise RuntimeError(
+                    f"Bootstrap market {market} has no terminal outcome after completion."
+                )
+            if completion.primary and previous_outcome is None:
                 preferences = get_runtime_preferences(db)
                 stage_runtime_preferences(
                     db,
                     primary_market=preferences.primary_market,
                     enabled_markets=preferences.enabled_markets,
-                    bootstrap_state="ready" if completion.succeeded else "failed",
+                    bootstrap_state=(
+                        "ready"
+                        if effective_outcome == BootstrapMarketOutcome.COMPLETED
+                        else "failed"
+                    ),
                 )
-            if not completion.succeeded:
+            if (
+                previous_outcome is None
+                and effective_outcome == BootstrapMarketOutcome.FAILED
+            ):
                 failure_kwargs = {
                     "market": market,
                     "lifecycle": "bootstrap",

@@ -13,6 +13,7 @@ from app.domain.feature_store.models import RunStatus
 from app.domain.relative_strength import (
     BALANCED_RS_FORMULA_VERSION,
     LEGACY_RS_FORMULA_VERSION,
+    GroupSnapshotIdentity,
 )
 from app.infra.db.models.feature_store import FeatureRun, FeatureRunPointer
 from app.infra.db.models.relative_strength import MarketRsFormulaPointer, MarketRsRun
@@ -393,4 +394,10 @@ def test_shared_executor_activates_exact_group_and_history_identity(
     assert target.formula_version == BALANCED_RS_FORMULA_VERSION
     assert target.through_date == date(2026, 4, 10)
     invalidations.assert_called_once_with("US")
-    live_publish.assert_called_once_with("US")
+    live_publish.assert_called_once_with(
+        GroupSnapshotIdentity(
+            market="US",
+            as_of_date=date(2026, 4, 10),
+            formula_version=BALANCED_RS_FORMULA_VERSION,
+        )
+    )

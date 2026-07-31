@@ -276,7 +276,7 @@ def _bootstrap_dispatch_lifecycle() -> BootstrapDispatchLifecycle:
 def _is_current_bootstrap_dispatch(db, *, dispatch_id: str | None) -> bool:
     return bool(
         dispatch_id
-        and BootstrapRunManifestRepository().owns_dispatch(
+        and BootstrapRunManifestRepository().is_current_dispatch(
             db,
             dispatch_id=dispatch_id,
         )
@@ -432,7 +432,7 @@ def complete_local_runtime_bootstrap(
         )
         if not completion.ready:
             failure = completion.failure or _readiness_failure(None)
-            _finish_bootstrap_market(
+            finished = _finish_bootstrap_market(
                 db,
                 dispatch_id=dispatch_id,
                 completion=BootstrapMarketCompletion.failed(
@@ -442,13 +442,19 @@ def complete_local_runtime_bootstrap(
                     message=failure.activity_message,
                 ),
             )
+            if not finished:
+                return {
+                    "status": "stale",
+                    "primary_market": primary_market,
+                    "market": completion.market,
+                }
             return {
                 "status": "failed",
                 "primary_market": primary_market,
                 "market": completion.market,
                 "reason": failure.result_reason,
             }
-        _finish_bootstrap_market(
+        finished = _finish_bootstrap_market(
             db,
             dispatch_id=dispatch_id,
             completion=BootstrapMarketCompletion.ready(
@@ -457,6 +463,12 @@ def complete_local_runtime_bootstrap(
                 expected_formula_version=expected_formula_version,
             ),
         )
+        if not finished:
+            return {
+                "status": "stale",
+                "primary_market": primary_market,
+                "market": completion.market,
+            }
     finally:
         db.close()
 
@@ -497,7 +509,7 @@ def complete_background_market_bootstrap(
             expected_formula_version=expected_formula_version,
         )
         if completion.ready:
-            _finish_bootstrap_market(
+            finished = _finish_bootstrap_market(
                 db,
                 dispatch_id=dispatch_id,
                 completion=BootstrapMarketCompletion.ready(
@@ -506,12 +518,14 @@ def complete_background_market_bootstrap(
                     expected_formula_version=expected_formula_version,
                 ),
             )
+            if not finished:
+                return {"status": "stale", "market": completion.market}
             return {
                 "status": "ready",
                 "market": completion.market,
             }
         failure = completion.failure or _readiness_failure(None)
-        _finish_bootstrap_market(
+        finished = _finish_bootstrap_market(
             db,
             dispatch_id=dispatch_id,
             completion=BootstrapMarketCompletion.failed(
@@ -521,6 +535,8 @@ def complete_background_market_bootstrap(
                 message=failure.activity_message,
             ),
         )
+        if not finished:
+            return {"status": "stale", "market": completion.market}
         return {
             "status": "failed",
             "market": completion.market,
@@ -548,7 +564,7 @@ def fail_local_runtime_bootstrap(
                 "primary_market": primary_market,
                 "market": str(primary_market).upper(),
             }
-        _finish_bootstrap_market(
+        finished = _finish_bootstrap_market(
             db,
             dispatch_id=dispatch_id,
             completion=BootstrapMarketCompletion.failed(
@@ -558,6 +574,12 @@ def fail_local_runtime_bootstrap(
                 message="Bootstrap failed",
             ),
         )
+        if not finished:
+            return {
+                "status": "stale",
+                "primary_market": primary_market,
+                "market": str(primary_market).upper(),
+            }
     finally:
         db.close()
 
@@ -589,7 +611,7 @@ def fail_background_market_bootstrap(
     try:
         if not _is_current_bootstrap_dispatch(db, dispatch_id=dispatch_id):
             return {"status": "stale", "market": str(market).upper()}
-        _finish_bootstrap_market(
+        finished = _finish_bootstrap_market(
             db,
             dispatch_id=dispatch_id,
             completion=BootstrapMarketCompletion.failed(
@@ -599,6 +621,8 @@ def fail_background_market_bootstrap(
                 message="Bootstrap failed",
             ),
         )
+        if not finished:
+            return {"status": "stale", "market": str(market).upper()}
     finally:
         db.close()
 

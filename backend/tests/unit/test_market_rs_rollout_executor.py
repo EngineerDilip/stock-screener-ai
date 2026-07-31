@@ -4,12 +4,19 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
+from app.domain.relative_strength import (
+    BALANCED_RS_FORMULA_VERSION,
+    GroupSnapshotIdentity,
+)
+from app.services.market_rs_activation_coverage import MarketRsActivationCoverage
+from app.services.market_rs_rollout_contracts import (
+    ActivationValidationReport,
+    BackfillReport,
+)
 from app.services.market_rs_rollout_executor import (
     MarketRsActivationExecutionError,
     MarketRsActivationExecutor,
@@ -18,45 +25,112 @@ from app.services.market_rs_rollout_executor import (
 
 
 def _report(*, ok: bool = True, failed_count: int = 0):
-    return SimpleNamespace(
-        ok=ok,
+    validation_errors = () if ok else ("backfill failed",)
+    return BackfillReport(
+        market="US",
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+        requested_start_date=date(2026, 1, 23),
+        through_date=date(2026, 7, 29),
+        first_valid_date=date(2026, 1, 23),
+        candidate_count=1,
+        completed_count=0 if failed_count else 1,
         failed_count=failed_count,
-        to_dict=lambda: {
-            "ok": ok,
-            "failed_count": failed_count,
-        },
+        latest_run_id=99 if not failed_count else None,
+        group_row_count=1 if not failed_count else 0,
+        results=(),
+        validation_errors=validation_errors,
     )
 
 
 def _validation(*, ok: bool = True):
     errors = () if ok else ("static mismatch",)
-    return SimpleNamespace(
-        ok=ok,
+    return ActivationValidationReport(
+        market="US",
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+        through_date=date(2026, 7, 29),
+        first_valid_date=date(2026, 1, 23),
+        candidate_count=1,
+        latest_market_rs_run_id=99,
+        latest_universe_hash="universe",
+        feature_run_id=99,
+        feature_universe_hash="universe",
+        static_bundle_sha256="bundle",
         errors=errors,
-        to_dict=lambda: {"ok": ok, "errors": list(errors)},
     )
+
+
+class _RolloutFake:
+    def __init__(
+        self,
+        *,
+        report: BackfillReport | None = None,
+        validation: ActivationValidationReport | None = None,
+        events: list[str] | None = None,
+    ) -> None:
+        self.coverage = MarketRsActivationCoverage(
+            market="US",
+            through_date=date(2026, 7, 29),
+            required_dates=(date(2026, 1, 23), date(2026, 7, 29)),
+        )
+        self.report = report or _report()
+        self.validation = validation or _validation()
+        self.events = events
+        self.coverage_requested = False
+        self.backfill_requested = False
+        self.validation_requested = False
+        self.activation_requested = False
+
+    def activation_coverage(self, *, market: str, through_date: date):
+        assert market == "US"
+        assert through_date == self.coverage.through_date
+        self.coverage_requested = True
+        return self.coverage
+
+    def backfill_activation(self, _db, *, coverage):
+        assert coverage is self.coverage
+        self.backfill_requested = True
+        if self.events is not None:
+            self.events.append("backfill")
+        return self.report
+
+    def validate_activation(
+        self,
+        _db,
+        *,
+        coverage,
+        feature_run_id,
+        static_staging_dir,
+    ):
+        assert coverage is self.coverage
+        assert feature_run_id == 99
+        assert static_staging_dir.is_absolute()
+        self.validation_requested = True
+        if self.events is not None:
+            self.events.append("validate")
+        return self.validation
+
+    def activate(self, _db, **_kwargs) -> None:
+        self.activation_requested = True
+        if self.events is not None:
+            self.events.append("activate")
 
 
 def test_executor_activates_only_after_bounded_publication_gates(
     tmp_path: Path,
 ) -> None:
     events: list[str] = []
-    rollout = MagicMock()
-    required_dates = (date(2026, 1, 23), date(2026, 7, 29))
-    coverage = SimpleNamespace(required_dates=required_dates)
-    rollout.activation_coverage.return_value = coverage
-    rollout.backfill_activation.side_effect = lambda *args, **kwargs: (
-        events.append("backfill") or _report()
-    )
-    rollout.validate_activation.side_effect = lambda *args, **kwargs: (
-        events.append("validate") or _validation()
-    )
-    rollout.activate.side_effect = lambda *args, **kwargs: events.append("activate")
+    report = _report()
+    validation = _validation()
+    rollout = _RolloutFake(report=report, validation=validation, events=events)
+    published_identities: list[GroupSnapshotIdentity] = []
     executor = MarketRsActivationExecutor(
         rollout_service=rollout,
         feature_snapshot_builder=(lambda **kwargs: events.append("feature") or 99),
         static_exporter=lambda **kwargs: events.append("static"),
-        live_group_publisher=lambda market: events.append("publish_live"),
+        live_group_publisher=lambda identity: (
+            published_identities.append(identity),
+            events.append("publish_live"),
+        ),
     )
     db = MagicMock()
 
@@ -73,6 +147,15 @@ def test_executor_activates_only_after_bounded_publication_gates(
     assert outcome.formula_version == BALANCED_RS_FORMULA_VERSION
     assert outcome.feature_run_id == 99
     assert outcome.static_staging_dir == str((tmp_path / "stage").resolve())
+    assert outcome.backfill is report
+    assert outcome.validation is validation
+    assert published_identities == [
+        GroupSnapshotIdentity(
+            market="US",
+            as_of_date=date(2026, 7, 29),
+            formula_version=BALANCED_RS_FORMULA_VERSION,
+        )
+    ]
     assert events == [
         "backfill",
         "feature",
@@ -81,14 +164,15 @@ def test_executor_activates_only_after_bounded_publication_gates(
         "activate",
         "publish_live",
     ]
-    assert rollout.backfill_activation.call_args.kwargs["coverage"] is coverage
-    assert rollout.validate_activation.call_args.kwargs["coverage"] is coverage
+    assert rollout.coverage_requested
+    assert rollout.backfill_requested
+    assert rollout.validation_requested
+    assert rollout.activation_requested
     db.expire_all.assert_called_once_with()
 
 
 def test_executor_stops_before_publication_when_backfill_failed(tmp_path: Path) -> None:
-    rollout = MagicMock()
-    rollout.backfill_activation.return_value = _report(ok=False, failed_count=1)
+    rollout = _RolloutFake(report=_report(ok=False, failed_count=1))
     feature_builder = MagicMock()
     executor = MarketRsActivationExecutor(
         rollout_service=rollout,
@@ -111,12 +195,12 @@ def test_executor_stops_before_publication_when_backfill_failed(tmp_path: Path) 
         )
 
     feature_builder.assert_not_called()
-    rollout.validate_activation.assert_not_called()
-    rollout.activate.assert_not_called()
+    assert not rollout.validation_requested
+    assert not rollout.activation_requested
 
 
 def test_executor_rejects_invalid_staging_before_backfill(tmp_path: Path) -> None:
-    rollout = MagicMock()
+    rollout = _RolloutFake()
     executor = MarketRsActivationExecutor(
         rollout_service=rollout,
         feature_snapshot_builder=MagicMock(),
@@ -137,4 +221,5 @@ def test_executor_rejects_invalid_staging_before_backfill(tmp_path: Path) -> Non
             ),
         )
 
-    rollout.backfill_activation.assert_not_called()
+    assert not rollout.coverage_requested
+    assert not rollout.backfill_requested

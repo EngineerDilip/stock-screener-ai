@@ -103,6 +103,50 @@ def test_stale_primary_errback_has_no_activity_or_state_side_effects(monkeypatch
     }
 
 
+def test_primary_completion_reports_stale_when_generation_changes_during_readiness(
+    monkeypatch,
+):
+    from app.tasks import runtime_bootstrap_tasks as module
+
+    class _FakeSession:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(module, "SessionLocal", lambda: _FakeSession())
+    monkeypatch.setattr(
+        module, "_is_current_bootstrap_dispatch", lambda *_args, **_kwargs: True
+    )
+    monkeypatch.setattr(
+        "app.services.runtime_preferences_service.get_runtime_preferences",
+        lambda _db: type("Prefs", (), {"bootstrap_started_at": None})(),
+    )
+    monkeypatch.setattr(
+        module,
+        "_evaluate_market_readiness",
+        lambda *_args, **_kwargs: type(
+            "Completion",
+            (),
+            {"market": "US", "ready": True, "failure": None},
+        )(),
+    )
+    monkeypatch.setattr(
+        module,
+        "_finish_bootstrap_market",
+        lambda *_args, **_kwargs: False,
+    )
+
+    result = module.complete_local_runtime_bootstrap.run(
+        primary_market="US",
+        dispatch_id="dispatch-replaced",
+    )
+
+    assert result == {
+        "status": "stale",
+        "primary_market": "US",
+        "market": "US",
+    }
+
+
 def test_complete_local_runtime_bootstrap_evaluates_only_primary_market(monkeypatch):
     from app.services.bootstrap_readiness_service import (
         BootstrapReadiness,

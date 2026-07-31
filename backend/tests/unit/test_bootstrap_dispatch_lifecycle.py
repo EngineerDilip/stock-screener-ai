@@ -66,6 +66,39 @@ def test_expired_dispatch_ownership_can_be_reclaimed(db_session) -> None:
     assert current.ownership_expires_at is not None
 
 
+def test_expired_dispatch_remains_current_until_it_is_reclaimed(db_session) -> None:
+    repository = BootstrapRunManifestRepository()
+    expired_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    repository.begin_dispatch(
+        db_session,
+        BootstrapRunManifest.create(
+            primary_market="US",
+            enabled_markets=("US",),
+            dispatch_id="dispatch-current",
+            queue_state="queued",
+            ownership_expires_at=expired_at.isoformat(),
+        ),
+    )
+    db_session.commit()
+
+    assert repository.is_current_dispatch(
+        db_session,
+        dispatch_id="dispatch-current",
+    )
+
+    updated = BootstrapDispatchLifecycle(repository=repository).finish_market(
+        db_session,
+        dispatch_id="dispatch-current",
+        completion=BootstrapMarketCompletion.ready(
+            market="US",
+            primary=True,
+        ),
+    )
+
+    assert updated.queue_state.value == "completed"
+    assert get_runtime_preferences(db_session).bootstrap_state == "ready"
+
+
 def test_primary_failure_is_one_atomic_dispatch_transition(
     db_session, monkeypatch
 ) -> None:
@@ -146,6 +179,67 @@ def test_balanced_completion_consumes_pending_activation_in_same_transition(
     assert manifest is not None
     assert manifest.pending_balanced_activation_markets == ("HK",)
     assert manifest.completed_markets == ("US",)
+
+
+def test_first_terminal_market_outcome_wins_on_contradictory_redelivery(
+    db_session,
+) -> None:
+    repository = BootstrapRunManifestRepository()
+    lifecycle = BootstrapDispatchLifecycle(repository=repository)
+    lifecycle.claim(
+        db_session,
+        manifest=BootstrapRunManifest.create(
+            primary_market="US",
+            enabled_markets=("US",),
+            dispatch_id="dispatch-current",
+            queue_state="queued",
+        ),
+    )
+
+    lifecycle.finish_market(
+        db_session,
+        dispatch_id="dispatch-current",
+        completion=BootstrapMarketCompletion.ready(market="US", primary=True),
+    )
+    updated = lifecycle.finish_market(
+        db_session,
+        dispatch_id="dispatch-current",
+        completion=BootstrapMarketCompletion.failed(
+            market="US",
+            primary=True,
+            stage_key="core",
+            message="late contradictory callback",
+        ),
+    )
+
+    assert updated.completed_markets == ("US",)
+    assert updated.failed_markets == ()
+    assert updated.queue_state.value == "completed"
+    assert get_runtime_preferences(db_session).bootstrap_state == "ready"
+
+
+def test_market_completion_rejects_a_market_outside_the_dispatch(db_session) -> None:
+    repository = BootstrapRunManifestRepository()
+    lifecycle = BootstrapDispatchLifecycle(repository=repository)
+    lifecycle.claim(
+        db_session,
+        manifest=BootstrapRunManifest.create(
+            primary_market="US",
+            enabled_markets=("US",),
+            dispatch_id="dispatch-current",
+            queue_state="queued",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="enabled market"):
+        lifecycle.finish_market(
+            db_session,
+            dispatch_id="dispatch-current",
+            completion=BootstrapMarketCompletion.ready(
+                market="HK",
+                primary=False,
+            ),
+        )
 
 
 def test_terminal_transition_rolls_back_every_staged_change(

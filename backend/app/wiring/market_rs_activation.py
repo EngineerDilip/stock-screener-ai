@@ -5,7 +5,10 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
-from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
+from app.domain.relative_strength import (
+    BALANCED_RS_FORMULA_VERSION,
+    GroupSnapshotIdentity,
+)
 from app.services.market_rs_rollout_executor import (
     MarketRsActivationExecutionError,
     MarketRsActivationExecutor,
@@ -56,11 +59,14 @@ def export_static_v3(
     )
 
 
-def publish_live_groups(market: str) -> None:
+def publish_live_groups(identity: GroupSnapshotIdentity) -> None:
     from app.services.ui_snapshot_service import safe_publish_groups_bootstrap
 
-    if market == "US":
-        safe_publish_groups_bootstrap()
+    if identity.market == "US":
+        safe_publish_groups_bootstrap(
+            expected_formula_version=identity.formula_version,
+            expected_through_date=identity.as_of_date,
+        )
 
 
 def create_market_rs_activation_executor(
