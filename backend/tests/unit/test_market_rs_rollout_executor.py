@@ -281,6 +281,36 @@ def test_executor_wraps_invalid_market_as_activation_error(tmp_path: Path) -> No
         )
 
 
+def test_executor_wraps_invalid_activation_date_as_activation_error(
+    tmp_path: Path,
+) -> None:
+    rollout = MagicMock()
+    rollout.activation_coverage.side_effect = ValueError(
+        "Guarded activation date must be a completed market trading day."
+    )
+    executor = MarketRsActivationExecutor(
+        rollout_service=rollout,
+        feature_snapshot_builder=MagicMock(),
+        static_exporter=MagicMock(),
+        live_group_publisher=MagicMock(),
+    )
+
+    with pytest.raises(
+        MarketRsActivationExecutionError,
+        match="completed market trading day",
+    ):
+        executor.execute(
+            MagicMock(),
+            request=MarketRsActivationRequest(
+                market="US",
+                through_date=date(2026, 7, 26),
+                static_staging_dir=tmp_path / "stage",
+            ),
+        )
+
+    rollout.backfill_activation.assert_not_called()
+
+
 def test_executor_stops_before_activation_when_validation_failed(
     tmp_path: Path,
 ) -> None:

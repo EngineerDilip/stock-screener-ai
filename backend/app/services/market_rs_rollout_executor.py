@@ -153,10 +153,13 @@ class MarketRsActivationExecutor:
         except ValueError as exc:
             raise MarketRsActivationExecutionError(str(exc)) from exc
         staging_dir = validate_static_staging_directory(request.static_staging_dir)
-        coverage = self.rollout_service.activation_coverage(
-            market=market,
-            through_date=request.through_date,
-        )
+        try:
+            coverage = self.rollout_service.activation_coverage(
+                market=market,
+                through_date=request.through_date,
+            )
+        except ValueError as exc:
+            raise MarketRsActivationExecutionError(str(exc)) from exc
         report = self.rollout_service.backfill_activation(
             db,
             coverage=coverage,

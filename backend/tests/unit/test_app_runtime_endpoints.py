@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
 import httpx
 import pytest
 import pytest_asyncio
@@ -34,6 +37,18 @@ class _FakeDb:
 
     def expire_all(self) -> None:
         self.expire_all_calls += 1
+
+
+def _patch_bootstrap_manifest_repository(
+    monkeypatch,
+    module,
+    *,
+    ownership_version: int,
+) -> None:
+    repository = SimpleNamespace(
+        load=lambda _db: SimpleNamespace(ownership_version=ownership_version)
+    )
+    monkeypatch.setattr(module, "BootstrapRunManifestRepository", lambda: repository)
 
 
 class _FakeBootstrapStatus:
@@ -598,6 +613,11 @@ async def test_runtime_bootstrap_start_keeps_running_state_after_partial_dispatc
 
     monkeypatch.setattr(module, "get_runtime_bootstrap_status", lambda _db: statuses[0])
     monkeypatch.setattr(module, "save_runtime_preferences", _save)
+    _patch_bootstrap_manifest_repository(
+        monkeypatch,
+        module,
+        ownership_version=1,
+    )
     monkeypatch.setattr(module, "queue_local_runtime_bootstrap", _queue)
     db = _FakeDb()
     app.dependency_overrides[get_db] = lambda: db
@@ -616,6 +636,50 @@ async def test_runtime_bootstrap_start_keeps_running_state_after_partial_dispatc
     assert payload["task_id"] == "primary-task-123"
     assert payload["bootstrap_state"] == "running"
     assert db.expire_all_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_bootstrap_start_rejects_unfenced_running_bootstrap(
+    client, monkeypatch
+):
+    from app.api.v1 import app_runtime as module
+    from app.services import server_auth
+
+    monkeypatch.setattr(server_auth.settings, "server_auth_enabled", False)
+    status = type(
+        "BootstrapStatus",
+        (),
+        {
+            "bootstrap_required": True,
+            "empty_system": True,
+            "primary_market": "US",
+            "enabled_markets": ["US"],
+            "bootstrap_state": "running",
+            "supported_markets": ["US", "HK", "JP", "TW"],
+        },
+    )()
+    monkeypatch.setattr(module, "get_runtime_bootstrap_status", lambda _db: status)
+    _patch_bootstrap_manifest_repository(
+        monkeypatch,
+        module,
+        ownership_version=0,
+    )
+    queue = MagicMock(return_value="unexpected-task")
+    monkeypatch.setattr(module, "queue_local_runtime_bootstrap", queue)
+    db = _FakeDb()
+    app.dependency_overrides[get_db] = lambda: db
+
+    try:
+        response = await client.post(
+            "/api/v1/runtime/bootstrap",
+            json={"primary_market": "US", "enabled_markets": ["US"]},
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "bootstrap_already_running"
+    queue.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -643,6 +707,11 @@ async def test_runtime_bootstrap_start_rejects_duplicate_running_bootstrap(
                 "supported_markets": ["US", "HK", "JP", "TW"],
             },
         )(),
+    )
+    _patch_bootstrap_manifest_repository(
+        monkeypatch,
+        module,
+        ownership_version=1,
     )
     monkeypatch.setattr(
         module,

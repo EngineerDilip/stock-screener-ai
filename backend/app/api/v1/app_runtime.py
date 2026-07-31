@@ -21,7 +21,11 @@ from ...schemas.app_runtime import (
     RuntimeMarketsUpdateRequest,
     ScanDefaultsResponse,
 )
-from ...services.bootstrap_run_manifest import BootstrapAlreadyRunning
+from ...services.bootstrap_run_manifest import (
+    CURRENT_BOOTSTRAP_OWNERSHIP_VERSION,
+    BootstrapAlreadyRunning,
+    BootstrapRunManifestRepository,
+)
 from ...services.market_activity_service import get_runtime_activity_status
 from ...services.runtime_activity_contract import bootstrap_stage_metadata
 from ...services.runtime_preferences_service import (
@@ -57,6 +61,32 @@ def _refresh_runtime_bootstrap_status(db: Session) -> RuntimeBootstrapStatus:
     """Discard request-session identities changed by bootstrap orchestration."""
     db.expire_all()
     return get_runtime_bootstrap_status(db)
+
+
+def _has_unfenced_running_bootstrap(
+    db: Session,
+    status: RuntimeBootstrapStatus,
+) -> bool:
+    if status.bootstrap_state != "running":
+        return False
+    manifest = BootstrapRunManifestRepository().load(db)
+    return bool(
+        manifest is None
+        or manifest.ownership_version < CURRENT_BOOTSTRAP_OWNERSHIP_VERSION
+    )
+
+
+def _bootstrap_already_running_error(status: RuntimeBootstrapStatus) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "bootstrap_already_running",
+            "message": "Local bootstrap is already running.",
+            "bootstrap_state": status.bootstrap_state,
+            "primary_market": status.primary_market,
+            "enabled_markets": status.enabled_markets,
+        },
+    )
 
 
 @router.get("/app-capabilities", response_model=AppCapabilitiesResponse)
@@ -119,6 +149,8 @@ async def start_runtime_bootstrap(
 ) -> RuntimeBootstrapStartResponse:
     """Persist local bootstrap choices and queue the primary-market sync."""
     previous_status = get_runtime_bootstrap_status(db)
+    if _has_unfenced_running_bootstrap(db, previous_status):
+        raise _bootstrap_already_running_error(previous_status)
     try:
         task_id = queue_local_runtime_bootstrap(
             primary_market=request.primary_market,
@@ -126,16 +158,7 @@ async def start_runtime_bootstrap(
         )
     except BootstrapAlreadyRunning:
         status = _refresh_runtime_bootstrap_status(db)
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "bootstrap_already_running",
-                "message": "Local bootstrap is already running.",
-                "bootstrap_state": status.bootstrap_state,
-                "primary_market": status.primary_market,
-                "enabled_markets": status.enabled_markets,
-            },
-        ) from None
+        raise _bootstrap_already_running_error(status) from None
     except BootstrapDispatchError as exc:
         if not exc.dispatched_any:
             save_runtime_preferences(
