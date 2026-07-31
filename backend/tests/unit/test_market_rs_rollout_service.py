@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from celery.exceptions import SoftTimeLimitExceeded
+from sqlalchemy.exc import OperationalError
 
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
 from app.services.market_rs_activation_coverage import MarketRsActivationCoverage
@@ -204,6 +206,46 @@ def test_backfill_labels_snapshot_rebuild_failure_as_stock_calculation(monkeypat
 
     assert report.results[0].reason_code == "stock_calculation_runtime_error"
     groups.calculate_and_store.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(SoftTimeLimitExceeded(), id="soft-timeout"),
+        pytest.param(
+            OperationalError(
+                "select 1",
+                {},
+                Exception("database system is not yet accepting connections"),
+            ),
+            id="transient-database-error",
+        ),
+    ],
+)
+def test_backfill_propagates_infrastructure_interruption(monkeypatch, error):
+    calculation_date = date(2026, 4, 10)
+    repository = MagicMock()
+    repository.get_completed_exact.return_value = None
+    snapshot = MagicMock()
+    snapshot.calculate.side_effect = error
+    service = _service(repository=repository, snapshot=snapshot)
+    monkeypatch.setattr(
+        service.backfill_service,
+        "earliest_backfillable_date",
+        lambda *a, **k: calculation_date,
+    )
+    monkeypatch.setattr(
+        service.backfill_service,
+        "candidate_dates",
+        lambda *a, **k: (calculation_date,),
+    )
+    db = MagicMock()
+
+    with pytest.raises(type(error)) as raised:
+        service.backfill(db, market="US", through_date=calculation_date)
+
+    assert raised.value is error
+    db.rollback.assert_called_once_with()
 
 
 def test_activation_backfill_attempts_every_required_date() -> None:

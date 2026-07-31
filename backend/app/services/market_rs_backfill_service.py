@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from datetime import date
 
+from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import func
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from app.domain.markets import get_market_catalog
@@ -271,6 +273,9 @@ class MarketRsBackfillService:
                         group_row_count=len(groups),
                     )
                 )
+            except (SoftTimeLimitExceeded, DBAPIError):
+                db.rollback()
+                raise
             except Exception as exc:
                 db.rollback()
                 reason_code = self._reason_code(exc, stage=stage)
