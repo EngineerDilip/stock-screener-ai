@@ -5,19 +5,27 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextvars import ContextVar, Token
 from threading import RLock
-from typing import Any
+from typing import TYPE_CHECKING
 
 from fastapi import Request
 
-_runtime_services_ctx: ContextVar[Any | None] = ContextVar(
+if TYPE_CHECKING:
+    from app.wiring.bootstrap import RuntimeServices
+
+
+_runtime_services_ctx: ContextVar[RuntimeServices | None] = ContextVar(
     "runtime_services_ctx",
     default=None,
 )
 _process_runtime_services_lock = RLock()
-_process_runtime_services: Any | None = None
+_process_runtime_services: RuntimeServices | None = None
 
 
-def set_runtime_services(runtime: Any, *, bind_process: bool = False) -> Token:
+def set_runtime_services(
+    runtime: RuntimeServices,
+    *,
+    bind_process: bool = False,
+) -> Token[RuntimeServices | None]:
     global _process_runtime_services
     if bind_process:
         with _process_runtime_services_lock:
@@ -25,15 +33,15 @@ def set_runtime_services(runtime: Any, *, bind_process: bool = False) -> Token:
     return _runtime_services_ctx.set(runtime)
 
 
-def reset_runtime_services(token: Token) -> None:
+def reset_runtime_services(token: Token[RuntimeServices | None]) -> None:
     _runtime_services_ctx.reset(token)
 
 
 def initialize_process_runtime_services(
-    factory: Callable[[], Any],
+    factory: Callable[[], RuntimeServices],
     *,
     force: bool = False,
-) -> Any:
+) -> RuntimeServices:
     global _process_runtime_services
     with _process_runtime_services_lock:
         if _process_runtime_services is None or force:
@@ -50,7 +58,7 @@ def clear_runtime_services() -> None:
     _runtime_services_ctx.set(None)
 
 
-def request_runtime_services(request: Request) -> Any:
+def request_runtime_services(request: Request) -> RuntimeServices:
     runtime = getattr(request.app.state, "runtime_services", None)
     if runtime is None:
         raise RuntimeError(
@@ -59,7 +67,7 @@ def request_runtime_services(request: Request) -> Any:
     return runtime
 
 
-def resolve_runtime_services(request: Request | None = None) -> Any:
+def resolve_runtime_services(request: Request | None = None) -> RuntimeServices:
     if request is not None:
         request_runtime = getattr(request.app.state, "runtime_services", None)
         if request_runtime is not None:
@@ -76,7 +84,7 @@ def resolve_runtime_services(request: Request | None = None) -> Any:
     )
 
 
-def current_runtime_services() -> Any | None:
+def current_runtime_services() -> RuntimeServices | None:
     return _runtime_services_ctx.get()
 
 

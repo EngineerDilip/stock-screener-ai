@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterable
-from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -13,7 +11,6 @@ from sqlalchemy.orm import Session
 
 from ..models.app_settings import AppSetting
 from ..services.bootstrap_run_manifest import (
-    BootstrapRunManifest,
     BootstrapRunManifestRepository,
 )
 from ..services.runtime_activity_contract import (
@@ -157,55 +154,7 @@ def _load_runtime_bootstrap_run(db: Session) -> dict[str, Any] | None:
     return manifest.to_payload()
 
 
-def save_runtime_bootstrap_run(
-    db: Session,
-    *,
-    primary_market: str,
-    enabled_markets: Iterable[str],
-    dispatch_id: str | None = None,
-    fresh_install: bool = False,
-    pending_balanced_activation_markets: Iterable[str] | None = None,
-    primary_task_id: str | None = None,
-    market_task_ids: dict[str, str | None] | None = None,
-    queue_state: str = "queued",
-) -> dict[str, Any]:
-    repository = BootstrapRunManifestRepository()
-    manifest = BootstrapRunManifest.create(
-        primary_market=primary_market,
-        enabled_markets=enabled_markets,
-        dispatch_id=dispatch_id,
-        fresh_install=fresh_install,
-        pending_balanced_activation_markets=(pending_balanced_activation_markets),
-        primary_task_id=primary_task_id,
-        market_task_ids=market_task_ids or {},
-        queue_state=queue_state,
-        queued_at=_utcnow_iso(),
-    )
-    if queue_state == "queueing":
-        from app.services.bootstrap_dispatch_lifecycle import (
-            claim_runtime_bootstrap_dispatch,
-        )
-
-        return claim_runtime_bootstrap_dispatch(db, manifest=manifest)
-    if dispatch_id is None:
-        return repository.begin_dispatch(db, manifest)
-    updated = repository.update_dispatch(
-        db,
-        dispatch_id=dispatch_id,
-        transform=lambda current: replace(
-            current,
-            primary_market=manifest.primary_market,
-            enabled_markets=manifest.enabled_markets,
-            primary_task_id=manifest.primary_task_id,
-            market_task_ids=manifest.market_task_ids,
-            queue_state=manifest.queue_state,
-            queued_at=manifest.queued_at,
-        ),
-    )
-    return updated.to_payload()
-
-
-def _save_market_activity(
+def _stage_market_activity(
     db: Session,
     market: str,
     payload: RuntimeActivityUpdate | RuntimeActivityRecord | dict[str, Any],
@@ -248,8 +197,17 @@ def _save_market_activity(
         setting.value = encoded
         setting.category = RUNTIME_ACTIVITY_CATEGORY
         setting.description = f"Latest runtime activity state for {market.upper()}"
-    db.commit()
     return record.to_payload()
+
+
+def _save_market_activity(
+    db: Session,
+    market: str,
+    payload: RuntimeActivityUpdate | RuntimeActivityRecord | dict[str, Any],
+) -> dict[str, Any]:
+    result = _stage_market_activity(db, market, payload)
+    db.commit()
+    return result
 
 
 def _activity_payload(
@@ -429,6 +387,31 @@ def mark_market_activity_failed(
     )
 
 
+def stage_market_activity_failed(
+    db: Session,
+    *,
+    market: str,
+    stage_key: str,
+    lifecycle: str | None = None,
+    task_name: str | None = None,
+    task_id: str | None = None,
+    message: str | None = None,
+) -> dict[str, Any]:
+    return _stage_market_activity(
+        db,
+        market,
+        _activity_payload(
+            market=market,
+            stage_key=stage_key,
+            lifecycle=lifecycle,
+            status="failed",
+            task_name=task_name,
+            task_id=task_id,
+            message=message,
+        ),
+    )
+
+
 def mark_current_market_activity_failed(
     db: Session,
     *,
@@ -439,6 +422,30 @@ def mark_current_market_activity_failed(
     message: str | None = None,
 ) -> dict[str, Any]:
     return _save_market_activity(
+        db,
+        market,
+        _activity_payload(
+            market=market,
+            stage_key=None,
+            lifecycle=lifecycle,
+            status="failed",
+            task_name=task_name,
+            task_id=task_id,
+            message=message,
+        ),
+    )
+
+
+def stage_current_market_activity_failed(
+    db: Session,
+    *,
+    market: str,
+    lifecycle: str | None = None,
+    task_name: str | None = None,
+    task_id: str | None = None,
+    message: str | None = None,
+) -> dict[str, Any]:
+    return _stage_market_activity(
         db,
         market,
         _activity_payload(

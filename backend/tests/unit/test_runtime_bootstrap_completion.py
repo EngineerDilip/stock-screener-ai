@@ -10,7 +10,7 @@ def test_fail_local_runtime_bootstrap_preserves_active_task_owner(monkeypatch):
         def close(self):
             pass
 
-    calls = []
+    completions = []
 
     monkeypatch.setattr(module, "SessionLocal", lambda: _FakeSession())
     monkeypatch.setattr(
@@ -19,16 +19,9 @@ def test_fail_local_runtime_bootstrap_preserves_active_task_owner(monkeypatch):
         lambda _db, *, dispatch_id: dispatch_id == "dispatch-current",
     )
     monkeypatch.setattr(
-        module, "_finish_bootstrap_market", lambda *_args, **_kwargs: True
-    )
-    monkeypatch.setattr(
-        "app.services.runtime_preferences_service.set_bootstrap_state",
-        lambda _db, _state: None,
-    )
-    monkeypatch.setattr(
         module,
-        "mark_current_market_activity_failed",
-        lambda _db, **kwargs: calls.append(kwargs),
+        "_finish_bootstrap_market",
+        lambda *_args, **kwargs: completions.append(kwargs["completion"]) or True,
     )
 
     result = module.fail_local_runtime_bootstrap.run(
@@ -37,13 +30,11 @@ def test_fail_local_runtime_bootstrap_preserves_active_task_owner(monkeypatch):
     )
 
     assert result["status"] == "failed"
-    assert calls == [
-        {
-            "market": "US",
-            "lifecycle": "bootstrap",
-            "message": "Bootstrap failed",
-        }
-    ]
+    assert len(completions) == 1
+    assert completions[0].market == "US"
+    assert completions[0].primary is True
+    assert completions[0].succeeded is False
+    assert completions[0].failure_stage_key is None
 
 
 def test_stale_primary_completion_has_no_readiness_or_state_side_effects(monkeypatch):
@@ -94,9 +85,9 @@ def test_stale_primary_errback_has_no_activity_or_state_side_effects(monkeypatch
     )
     monkeypatch.setattr(
         module,
-        "mark_current_market_activity_failed",
+        "_finish_bootstrap_market",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("stale callback changed activity")
+            AssertionError("stale callback finished a market")
         ),
     )
 
@@ -149,15 +140,15 @@ def test_complete_local_runtime_bootstrap_evaluates_only_primary_market(monkeypa
         module, "_is_current_bootstrap_dispatch", lambda *_args, **_kwargs: True
     )
     monkeypatch.setattr(
-        module, "_finish_bootstrap_market", lambda *_args, **_kwargs: True
+        module,
+        "_finish_bootstrap_market",
+        lambda *_args, **kwargs: (
+            calls.setdefault("completion", kwargs["completion"]) or True
+        ),
     )
     monkeypatch.setattr(
         "app.services.bootstrap_readiness_service.BootstrapReadinessService",
         _FakeReadinessService,
-    )
-    monkeypatch.setattr(
-        "app.services.runtime_preferences_service.set_bootstrap_state",
-        lambda db, state: calls.setdefault("set_bootstrap_state", (db, state)),
     )
     monkeypatch.setattr(
         "app.services.runtime_preferences_service.get_runtime_preferences",
@@ -178,7 +169,8 @@ def test_complete_local_runtime_bootstrap_evaluates_only_primary_market(monkeypa
     )
 
     assert calls["evaluate"] == (session, ["US"], "bootstrap-started-at")
-    assert calls["set_bootstrap_state"] == (session, "ready")
+    assert calls["completion"].primary is True
+    assert calls["completion"].succeeded is True
     assert result == {
         "status": "ready",
         "primary_market": "US",
@@ -214,14 +206,16 @@ def test_complete_local_runtime_bootstrap_reports_primary_readiness_failure(
                 },
             )
 
-    failed_markets = []
+    completions = []
 
     monkeypatch.setattr(module, "SessionLocal", lambda: _FakeSession())
     monkeypatch.setattr(
         module, "_is_current_bootstrap_dispatch", lambda *_args, **_kwargs: True
     )
     monkeypatch.setattr(
-        module, "_finish_bootstrap_market", lambda *_args, **_kwargs: True
+        module,
+        "_finish_bootstrap_market",
+        lambda *_args, **kwargs: completions.append(kwargs["completion"]) or True,
     )
     monkeypatch.setattr(
         "app.services.bootstrap_readiness_service.BootstrapReadinessService",
@@ -230,15 +224,6 @@ def test_complete_local_runtime_bootstrap_reports_primary_readiness_failure(
     monkeypatch.setattr(
         "app.services.runtime_preferences_service.get_runtime_preferences",
         lambda _db: type("Prefs", (), {"bootstrap_started_at": None})(),
-    )
-    monkeypatch.setattr(
-        "app.services.runtime_preferences_service.set_bootstrap_state",
-        lambda _db, _state: None,
-    )
-    monkeypatch.setattr(
-        module,
-        "mark_market_activity_failed",
-        lambda _db, **kwargs: failed_markets.append(kwargs),
     )
 
     result = module.complete_local_runtime_bootstrap.run(
@@ -251,16 +236,10 @@ def test_complete_local_runtime_bootstrap_reports_primary_readiness_failure(
         "market": "HK",
         "reason": "missing core market data",
     }
-    assert failed_markets == [
-        {
-            "market": "HK",
-            "stage_key": "core",
-            "lifecycle": "bootstrap",
-            "task_name": "runtime_bootstrap",
-            "task_id": None,
-            "message": "Bootstrap core data incomplete",
-        },
-    ]
+    assert len(completions) == 1
+    assert completions[0].primary is True
+    assert completions[0].failure_stage_key == "core"
+    assert completions[0].failure_message == "Bootstrap core data incomplete"
 
 
 def test_complete_local_runtime_bootstrap_uses_requested_market_readiness(monkeypatch):
@@ -300,7 +279,11 @@ def test_complete_local_runtime_bootstrap_uses_requested_market_readiness(monkey
         module, "_is_current_bootstrap_dispatch", lambda *_args, **_kwargs: True
     )
     monkeypatch.setattr(
-        module, "_finish_bootstrap_market", lambda *_args, **_kwargs: True
+        module,
+        "_finish_bootstrap_market",
+        lambda *_args, **kwargs: (
+            calls.setdefault("completion", kwargs["completion"]) or True
+        ),
     )
     monkeypatch.setattr(
         "app.services.bootstrap_readiness_service.BootstrapReadinessService",
@@ -309,10 +292,6 @@ def test_complete_local_runtime_bootstrap_uses_requested_market_readiness(monkey
     monkeypatch.setattr(
         "app.services.runtime_preferences_service.get_runtime_preferences",
         lambda _db: type("Prefs", (), {"bootstrap_started_at": "started-at"})(),
-    )
-    monkeypatch.setattr(
-        "app.services.runtime_preferences_service.set_bootstrap_state",
-        lambda db, state: calls.setdefault("set_bootstrap_state", (db, state)),
     )
     monkeypatch.setattr(
         module,
@@ -325,7 +304,8 @@ def test_complete_local_runtime_bootstrap_uses_requested_market_readiness(monkey
     )
 
     assert calls["evaluate"][1] == ["US"]
-    assert calls["set_bootstrap_state"][1] == "ready"
+    assert calls["completion"].primary is True
+    assert calls["completion"].succeeded is True
     assert "mark_failed" not in calls
     assert result == {
         "status": "ready",

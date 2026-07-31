@@ -8,7 +8,19 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
-from app.services.bootstrap_run_manifest import BootstrapRunManifest
+
+
+class _RecordingStore:
+    def __init__(self) -> None:
+        self.manifests = []
+
+    def claim(self, manifest):
+        self.manifests.append(manifest)
+        return manifest
+
+    def update(self, manifest):
+        self.manifests.append(manifest)
+        return manifest
 
 
 def test_fresh_dispatch_identity_survives_partial_bootstrap(monkeypatch) -> None:
@@ -42,69 +54,6 @@ def test_fresh_dispatch_identity_survives_partial_bootstrap(monkeypatch) -> None
     db.close.assert_called_once_with()
 
 
-def test_completed_market_is_removed_from_pending_activation_set() -> None:
-    from app.services.fresh_balanced_rs_bootstrap_lifecycle import (
-        FreshBalancedRsBootstrapLifecycle,
-    )
-
-    manifest_repository = MagicMock()
-    manifest_repository.load.return_value = BootstrapRunManifest.create(
-        primary_market="US",
-        enabled_markets=("US", "HK"),
-        fresh_install=True,
-        dispatch_id="dispatch-a",
-    )
-    formula_repository = MagicMock()
-    formula_repository.active_formula.return_value = BALANCED_RS_FORMULA_VERSION
-    lifecycle = FreshBalancedRsBootstrapLifecycle(
-        manifest_repository=manifest_repository,
-        formula_repository=formula_repository,
-    )
-    db = MagicMock()
-
-    updated_manifests = []
-
-    def _update(_db, *, dispatch_id, transform):
-        assert dispatch_id == "dispatch-a"
-        updated = transform(manifest_repository.load.return_value)
-        updated_manifests.append(updated)
-        return updated
-
-    manifest_repository.update_dispatch.side_effect = _update
-
-    assert lifecycle.complete_market(db, market="US", dispatch_id="dispatch-a")
-
-    updated = updated_manifests[0]
-    assert updated.fresh_install is True
-    assert updated.pending_balanced_activation_markets == ("HK",)
-    formula_repository.active_formula.assert_called_once_with(db, market="US")
-
-
-def test_market_remains_pending_when_balanced_formula_is_not_active() -> None:
-    from app.services.fresh_balanced_rs_bootstrap_lifecycle import (
-        FreshBalancedRsBootstrapLifecycle,
-    )
-
-    manifest_repository = MagicMock()
-    manifest_repository.load.return_value = BootstrapRunManifest.create(
-        primary_market="US",
-        enabled_markets=("US", "HK"),
-        fresh_install=True,
-    )
-    formula_repository = MagicMock()
-    formula_repository.active_formula.return_value = "legacy-linear-v1"
-    lifecycle = FreshBalancedRsBootstrapLifecycle(
-        manifest_repository=manifest_repository,
-        formula_repository=formula_repository,
-    )
-
-    assert (
-        lifecycle.complete_market(MagicMock(), market="HK", dispatch_id="dispatch-a")
-        is False
-    )
-    manifest_repository.update_dispatch.assert_not_called()
-
-
 @pytest.mark.parametrize("fresh_install", [True, False])
 def test_queue_bootstrap_captures_pristine_installation_once(
     monkeypatch,
@@ -117,7 +66,7 @@ def test_queue_bootstrap_captures_pristine_installation_once(
             self.id = task_id
 
     classifications = []
-    saved = []
+    store = _RecordingStore()
     queued_operations = []
     completion_payloads = []
 
@@ -134,11 +83,7 @@ def test_queue_bootstrap_captures_pristine_installation_once(
         return _FakeAsyncResult(f"task-{market_plan.market.lower()}")
 
     monkeypatch.setattr(module, "_balanced_activation_state_at_dispatch", _classify)
-    monkeypatch.setattr(
-        module,
-        "record_runtime_bootstrap_run",
-        lambda **payload: saved.append(payload) or payload,
-    )
+    monkeypatch.setattr(module, "_bootstrap_dispatch_store", lambda: store)
     monkeypatch.setattr(module, "_queue_market_bootstrap_workflow", _queue)
 
     module.queue_local_runtime_bootstrap(
@@ -147,8 +92,8 @@ def test_queue_bootstrap_captures_pristine_installation_once(
     )
 
     assert classifications == [fresh_install]
-    assert saved
-    assert {record["fresh_install"] for record in saved} == {fresh_install}
+    assert store.manifests
+    assert {record.fresh_install for record in store.manifests} == {fresh_install}
     expected_operation = (
         module.BootstrapOperation.BOOTSTRAP_BALANCED_MARKET_RS
         if fresh_install
@@ -175,7 +120,7 @@ def test_partial_retry_activates_only_the_pending_market(monkeypatch) -> None:
             self.id = task_id
 
     queued = {}
-    recorded = []
+    store = _RecordingStore()
 
     monkeypatch.setattr(
         module,
@@ -185,11 +130,7 @@ def test_partial_retry_activates_only_the_pending_market(monkeypatch) -> None:
             pending_markets=("HK",),
         ),
     )
-    monkeypatch.setattr(
-        module,
-        "record_runtime_bootstrap_run",
-        lambda **payload: recorded.append(payload) or payload,
-    )
+    monkeypatch.setattr(module, "_bootstrap_dispatch_store", lambda: store)
 
     def _queue(market_plan, **kwargs):
         queued[market_plan.market] = {
@@ -218,7 +159,7 @@ def test_partial_retry_activates_only_the_pending_market(monkeypatch) -> None:
         queued["HK"]["completion"]["expected_formula_version"]
         == BALANCED_RS_FORMULA_VERSION
     )
-    assert recorded[0]["pending_balanced_activation_markets"] == ("HK",)
+    assert store.manifests[0].pending_balanced_activation_markets == ("HK",)
 
 
 def test_fresh_bootstrap_signature_routes_activation_to_market_queue() -> None:
@@ -308,14 +249,15 @@ def test_fresh_bootstrap_completion_rejects_legacy_formula_pointer(
             )
 
     calls = {}
-    bootstrap_states = []
-    failed_markets = []
+    completions = []
     monkeypatch.setattr(module, "SessionLocal", lambda: _FakeSession())
     monkeypatch.setattr(
         module, "_is_current_bootstrap_dispatch", lambda *_args, **_kwargs: True
     )
     monkeypatch.setattr(
-        module, "_finish_bootstrap_market", lambda *_args, **_kwargs: True
+        module,
+        "_finish_bootstrap_market",
+        lambda *_args, **kwargs: completions.append(kwargs["completion"]) or True,
     )
     monkeypatch.setattr(
         "app.services.bootstrap_readiness_service.BootstrapReadinessService",
@@ -324,15 +266,6 @@ def test_fresh_bootstrap_completion_rejects_legacy_formula_pointer(
     monkeypatch.setattr(
         "app.services.runtime_preferences_service.get_runtime_preferences",
         lambda _db: type("Prefs", (), {"bootstrap_started_at": None})(),
-    )
-    monkeypatch.setattr(
-        "app.services.runtime_preferences_service.set_bootstrap_state",
-        lambda _db, state: bootstrap_states.append(state),
-    )
-    monkeypatch.setattr(
-        module,
-        "mark_market_activity_failed",
-        lambda _db, **kwargs: failed_markets.append(kwargs),
     )
 
     task = getattr(module, completion_task_name)
@@ -346,9 +279,10 @@ def test_fresh_bootstrap_completion_rejects_legacy_formula_pointer(
     assert calls["expectations"] == {
         "US": BALANCED_RS_FORMULA_VERSION,
     }
-    assert failed_markets[0]["stage_key"] == "market_rs"
-    assert failed_markets[0]["message"] == ("Balanced Market RS activation incomplete")
-    if completion_task_name == "complete_local_runtime_bootstrap":
-        assert bootstrap_states == ["failed"]
-    else:
-        assert bootstrap_states == []
+    assert completions[0].failure_stage_key == "market_rs"
+    assert completions[0].failure_message == (
+        "Balanced Market RS activation incomplete"
+    )
+    assert completions[0].primary is (
+        completion_task_name == "complete_local_runtime_bootstrap"
+    )

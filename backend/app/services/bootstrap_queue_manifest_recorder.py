@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import Protocol
 from uuid import uuid4
 
-from app.services.bootstrap_run_manifest import BootstrapQueueState
+from app.services.bootstrap_run_manifest import (
+    BootstrapQueueState,
+    BootstrapRunManifest,
+)
 from app.tasks.market_queues import normalize_market
 
 logger = logging.getLogger(__name__)
-RecordBootstrapRun = Callable[..., dict]
+
+
+class BootstrapDispatchStore(Protocol):
+    def claim(self, manifest: BootstrapRunManifest) -> BootstrapRunManifest: ...
+
+    def update(self, manifest: BootstrapRunManifest) -> BootstrapRunManifest: ...
 
 
 class BootstrapDispatchError(RuntimeError):
@@ -40,8 +49,7 @@ class BootstrapQueueManifestRecorder:
     primary_market: str
     enabled_markets: list[str]
     dispatch_id: str
-    record_run: RecordBootstrapRun = field(repr=False)
-    mark_bootstrap_failed: Callable[[], None] = field(repr=False)
+    store: BootstrapDispatchStore = field(repr=False)
     market_task_ids: dict[str, str] = field(default_factory=dict)
     fresh_install: bool = False
     pending_balanced_activation_markets: tuple[str, ...] = ()
@@ -53,8 +61,7 @@ class BootstrapQueueManifestRecorder:
         *,
         primary_market: str,
         enabled_markets: Iterable[str],
-        record_run: RecordBootstrapRun,
-        mark_bootstrap_failed: Callable[[], None],
+        store: BootstrapDispatchStore,
         fresh_install: bool = False,
         pending_balanced_activation_markets: Iterable[str] = (),
     ) -> BootstrapQueueManifestRecorder:
@@ -62,8 +69,7 @@ class BootstrapQueueManifestRecorder:
             primary_market=primary_market,
             enabled_markets=list(enabled_markets),
             dispatch_id=uuid4().hex,
-            record_run=record_run,
-            mark_bootstrap_failed=mark_bootstrap_failed,
+            store=store,
             fresh_install=fresh_install,
             pending_balanced_activation_markets=tuple(
                 pending_balanced_activation_markets
@@ -89,7 +95,6 @@ class BootstrapQueueManifestRecorder:
     def record_dispatch_failed_safely(self) -> None:
         try:
             if self.primary_task_id is None and not self.market_task_ids:
-                self.mark_bootstrap_failed()
                 self._record(BootstrapQueueState.FAILED)
             else:
                 self._record(BootstrapQueueState.DISPATCH_FAILED)
@@ -112,20 +117,22 @@ class BootstrapQueueManifestRecorder:
             logger.warning(warning, extra=self.log_extra(), exc_info=True)
 
     def _record(self, queue_state: BootstrapQueueState) -> None:
-        kwargs = {
-            "primary_market": self.primary_market,
-            "enabled_markets": self.enabled_markets,
-            "dispatch_id": self.dispatch_id,
-            "fresh_install": self.fresh_install,
-            "primary_task_id": self.primary_task_id,
-            "market_task_ids": self.market_task_ids,
-            "queue_state": queue_state.value,
-        }
-        if self.pending_balanced_activation_markets:
-            kwargs["pending_balanced_activation_markets"] = (
+        manifest = BootstrapRunManifest.create(
+            primary_market=self.primary_market,
+            enabled_markets=self.enabled_markets,
+            dispatch_id=self.dispatch_id,
+            fresh_install=self.fresh_install,
+            pending_balanced_activation_markets=(
                 self.pending_balanced_activation_markets
-            )
-        self.record_run(**kwargs)
+            ),
+            primary_task_id=self.primary_task_id,
+            market_task_ids=self.market_task_ids,
+            queue_state=queue_state,
+        )
+        if queue_state == BootstrapQueueState.QUEUEING:
+            self.store.claim(manifest)
+        else:
+            self.store.update(manifest)
 
     def log_extra(self) -> dict:
         return {
@@ -144,4 +151,8 @@ class BootstrapQueueManifestRecorder:
         )
 
 
-__all__ = ["BootstrapDispatchError", "BootstrapQueueManifestRecorder"]
+__all__ = [
+    "BootstrapDispatchError",
+    "BootstrapDispatchStore",
+    "BootstrapQueueManifestRecorder",
+]

@@ -201,7 +201,7 @@ def test_repository_rejects_a_new_dispatch_while_the_current_one_is_active() -> 
                 enabled_markets=("US",),
                 fresh_install=False,
                 dispatch_id="dispatch-a",
-            ),
+            ).with_renewed_ownership(),
         )
 
         with pytest.raises(BootstrapAlreadyRunning, match="dispatch-a"):

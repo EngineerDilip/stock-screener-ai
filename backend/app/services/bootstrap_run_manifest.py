@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
@@ -15,6 +16,8 @@ from ..models.app_settings import AppSetting
 BOOTSTRAP_RUN_KEY = "runtime.activity.bootstrap_run"
 RUNTIME_ACTIVITY_CATEGORY = "runtime_activity"
 BOOTSTRAP_RUN_DESCRIPTION = "Latest local runtime bootstrap run task manifest."
+BOOTSTRAP_DISPATCH_LEASE = timedelta(hours=24)
+CURRENT_BOOTSTRAP_OWNERSHIP_VERSION = 1
 
 
 class BootstrapQueueState(str, Enum):
@@ -48,7 +51,7 @@ class BootstrapRunManifest:
     primary_market: str
     enabled_markets: tuple[str, ...]
     dispatch_id: str | None = None
-    ownership_version: int = 1
+    ownership_version: int = CURRENT_BOOTSTRAP_OWNERSHIP_VERSION
     fresh_install: bool = False
     pending_balanced_activation_markets: tuple[str, ...] = ()
     primary_task_id: str | None = None
@@ -57,6 +60,7 @@ class BootstrapRunManifest:
     failed_markets: tuple[str, ...] = ()
     queue_state: BootstrapQueueState | str = BootstrapQueueState.QUEUED
     queued_at: str | None = None
+    ownership_expires_at: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "primary_market", str(self.primary_market).upper())
@@ -144,6 +148,11 @@ class BootstrapRunManifest:
                 if payload.get("queued_at") is not None
                 else None
             ),
+            ownership_expires_at=(
+                str(payload["ownership_expires_at"])
+                if payload.get("ownership_expires_at") is not None
+                else None
+            ),
         )
 
     @classmethod
@@ -161,6 +170,7 @@ class BootstrapRunManifest:
         failed_markets: Iterable[str] = (),
         queue_state: BootstrapQueueState | str = BootstrapQueueState.QUEUED,
         queued_at: str | None = None,
+        ownership_expires_at: str | None = None,
     ) -> BootstrapRunManifest:
         normalized_enabled = tuple(enabled_markets)
         pending_markets = (
@@ -182,6 +192,7 @@ class BootstrapRunManifest:
             failed_markets=tuple(failed_markets),
             queue_state=queue_state,
             queued_at=queued_at,
+            ownership_expires_at=ownership_expires_at,
         )
 
     def to_payload(self) -> dict[str, Any]:
@@ -202,7 +213,46 @@ class BootstrapRunManifest:
         }
         if self.queued_at is not None:
             payload["queued_at"] = self.queued_at
+        if self.ownership_expires_at is not None:
+            payload["ownership_expires_at"] = self.ownership_expires_at
         return payload
+
+    def with_renewed_ownership(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> BootstrapRunManifest:
+        current_time = now or datetime.now(timezone.utc)
+        return replace(
+            self,
+            ownership_expires_at=(current_time + BOOTSTRAP_DISPATCH_LEASE).isoformat(),
+        )
+
+    def has_active_ownership(self, *, now: datetime | None = None) -> bool:
+        if self.queue_state in {
+            BootstrapQueueState.COMPLETED,
+            BootstrapQueueState.FAILED,
+        }:
+            return False
+        if self.ownership_version < CURRENT_BOOTSTRAP_OWNERSHIP_VERSION:
+            return False
+        raw_deadline = self.ownership_expires_at
+        if raw_deadline is None and self.queued_at is not None:
+            try:
+                queued_at = datetime.fromisoformat(self.queued_at)
+            except ValueError:
+                queued_at = None
+            if queued_at is not None:
+                raw_deadline = (queued_at + BOOTSTRAP_DISPATCH_LEASE).isoformat()
+        if raw_deadline is None:
+            return False
+        try:
+            deadline = datetime.fromisoformat(raw_deadline)
+        except ValueError:
+            return False
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=timezone.utc)
+        return deadline > (now or datetime.now(timezone.utc))
 
     def reconcile_terminal_state(self) -> BootstrapRunManifest:
         if self.queue_state == BootstrapQueueState.QUEUED:
@@ -225,6 +275,30 @@ class BootstrapRunManifest:
             else BootstrapQueueState.COMPLETED
         )
         return replace(self, queue_state=terminal_state)
+
+    def finish_market(
+        self,
+        *,
+        market: str,
+        succeeded: bool,
+        balanced_activation_completed: bool = False,
+    ) -> BootstrapRunManifest:
+        normalized = str(market).upper()
+        completed = self.completed_markets
+        failed = self.failed_markets
+        if succeeded:
+            completed = tuple(dict.fromkeys((*completed, normalized)))
+        else:
+            failed = tuple(dict.fromkeys((*failed, normalized)))
+        pending = self.pending_balanced_activation_markets
+        if balanced_activation_completed:
+            pending = tuple(item for item in pending if item != normalized)
+        return replace(
+            self,
+            completed_markets=completed,
+            failed_markets=failed,
+            pending_balanced_activation_markets=pending,
+        ).reconcile_terminal_state()
 
 
 class BootstrapRunManifestRepository:
@@ -276,8 +350,6 @@ class BootstrapRunManifestRepository:
         self,
         db: Session,
         manifest: BootstrapRunManifest,
-        *,
-        commit: bool = True,
     ) -> dict[str, Any]:
         setting = self._locked_setting(db)
         if setting is not None:
@@ -285,21 +357,11 @@ class BootstrapRunManifestRepository:
                 current = BootstrapRunManifest.from_payload(json.loads(setting.value))
             except (json.JSONDecodeError, TypeError, KeyError, ValueError):
                 current = None
-            if (
-                current is not None
-                and current.ownership_version >= 1
-                and current.queue_state
-                not in {
-                    BootstrapQueueState.COMPLETED,
-                    BootstrapQueueState.FAILED,
-                }
-            ):
+            if current is not None and current.has_active_ownership():
                 raise BootstrapAlreadyRunning(
                     f"Bootstrap dispatch {current.dispatch_id} is still active."
                 )
         self._write_setting(setting, manifest, db)
-        if commit:
-            db.commit()
         return manifest.to_payload()
 
     def owns_dispatch(self, db: Session, *, dispatch_id: str) -> bool:
@@ -307,8 +369,7 @@ class BootstrapRunManifestRepository:
         return bool(
             current
             and current.dispatch_id == dispatch_id
-            and current.queue_state
-            not in {BootstrapQueueState.COMPLETED, BootstrapQueueState.FAILED}
+            and current.has_active_ownership()
         )
 
     def finish_market(
@@ -319,22 +380,14 @@ class BootstrapRunManifestRepository:
         market: str,
         succeeded: bool,
     ) -> BootstrapRunManifest:
-        normalized = str(market).upper()
-
-        def _finish(current: BootstrapRunManifest) -> BootstrapRunManifest:
-            completed = current.completed_markets
-            failed = current.failed_markets
-            if succeeded:
-                completed = tuple(dict.fromkeys((*completed, normalized)))
-            else:
-                failed = tuple(dict.fromkeys((*failed, normalized)))
-            return replace(
-                current,
-                completed_markets=completed,
-                failed_markets=failed,
-            ).reconcile_terminal_state()
-
-        return self.update_dispatch(db, dispatch_id=dispatch_id, transform=_finish)
+        return self.update_dispatch(
+            db,
+            dispatch_id=dispatch_id,
+            transform=lambda current: current.finish_market(
+                market=market,
+                succeeded=succeeded,
+            ),
+        )
 
     def update_dispatch(
         self,
@@ -363,5 +416,4 @@ class BootstrapRunManifestRepository:
         if updated.dispatch_id != dispatch_id:
             raise ValueError("Bootstrap dispatch updates cannot change dispatch_id.")
         self._write_setting(setting, updated, db)
-        db.commit()
         return updated

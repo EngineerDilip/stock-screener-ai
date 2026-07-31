@@ -7,7 +7,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from celery import chain
-from celery.exceptions import Retry
 
 from ..celery_app import celery_app
 from ..database import SessionLocal
@@ -18,25 +17,24 @@ from ..domain.bootstrap.plan import (
     build_bootstrap_plan,
 )
 from ..domain.relative_strength import BALANCED_RS_FORMULA_VERSION
+from ..services.bootstrap_dispatch_lifecycle import (
+    BootstrapDispatchLifecycle,
+    BootstrapMarketCompletion,
+    PersistedBootstrapDispatchStore,
+)
 from ..services.bootstrap_price_readiness import evaluate_bootstrap_price_warmup_wait
 from ..services.bootstrap_queue_manifest_recorder import (
     BootstrapDispatchError,  # noqa: F401 - compatibility export
     BootstrapQueueManifestRecorder,
 )
 from ..services.bootstrap_run_manifest import (
-    BootstrapQueueState,
     BootstrapRunManifestRepository,
     StaleBootstrapDispatch,
 )
 from ..services.market_activity_service import (
-    mark_current_market_activity_failed,
     mark_market_activity_completed,
     mark_market_activity_failed,
     mark_market_activity_progress,
-    save_runtime_bootstrap_run,
-)
-from ..services.runtime_bootstrap_readiness import (
-    MarketReadinessCompletion,
 )
 from ..services.runtime_bootstrap_readiness import (
     evaluate_market_readiness as _evaluate_market_readiness,
@@ -202,8 +200,6 @@ def wait_for_bootstrap_price_warmup(
             countdown=BOOTSTRAP_PRICE_WARMUP_RETRY_COUNTDOWN_SECONDS,
             max_retries=BOOTSTRAP_PRICE_WARMUP_MAX_RETRIES,
         )
-    except Retry:
-        raise
     finally:
         db.close()
 
@@ -228,56 +224,8 @@ def _queue_market_bootstrap_workflow(
     )
 
 
-def record_runtime_bootstrap_run(
-    *,
-    primary_market: str,
-    enabled_markets: Iterable[str],
-    dispatch_id: str | None = None,
-    fresh_install: bool = False,
-    pending_balanced_activation_markets: Iterable[str] = (),
-    primary_task_id: str | None = None,
-    market_task_ids: dict[str, str | None] | None = None,
-    queue_state: BootstrapQueueState | str = BootstrapQueueState.QUEUED,
-) -> dict:
-    db = SessionLocal()
-    try:
-        return save_runtime_bootstrap_run(
-            db,
-            primary_market=primary_market,
-            enabled_markets=enabled_markets,
-            dispatch_id=dispatch_id,
-            fresh_install=fresh_install,
-            pending_balanced_activation_markets=(pending_balanced_activation_markets),
-            primary_task_id=primary_task_id,
-            market_task_ids=market_task_ids or {},
-            queue_state=BootstrapQueueState.parse(queue_state).value,
-        )
-    finally:
-        db.close()
-
-
-def _mark_runtime_bootstrap_dispatch_failed() -> None:
-    from app.services.runtime_preferences_service import set_bootstrap_state
-
-    db = SessionLocal()
-    try:
-        set_bootstrap_state(db, "failed")
-    finally:
-        db.close()
-
-
-def _mark_readiness_failure(db, completion: MarketReadinessCompletion) -> str:
-    failure = completion.failure or _readiness_failure(None)
-    mark_market_activity_failed(
-        db,
-        market=completion.market,
-        stage_key=failure.stage_key,
-        lifecycle="bootstrap",
-        task_name="runtime_bootstrap",
-        task_id=None,
-        message=failure.activity_message,
-    )
-    return failure.result_reason
+def _bootstrap_dispatch_store() -> PersistedBootstrapDispatchStore:
+    return PersistedBootstrapDispatchStore(SessionLocal)
 
 
 @dataclass(frozen=True)
@@ -316,21 +264,13 @@ def _balanced_activation_state_at_dispatch(
         db.close()
 
 
-def _complete_balanced_activation_market(
-    db,
-    *,
-    market: str,
-    dispatch_id: str,
-) -> bool:
+def _bootstrap_dispatch_lifecycle() -> BootstrapDispatchLifecycle:
     from ..infra.db.repositories.market_rs_repo import MarketRsRunRepository
-    from ..services.fresh_balanced_rs_bootstrap_lifecycle import (
-        FreshBalancedRsBootstrapLifecycle,
-    )
 
-    return FreshBalancedRsBootstrapLifecycle(
-        manifest_repository=BootstrapRunManifestRepository(),
-        formula_repository=MarketRsRunRepository(),
-    ).complete_market(db, market=market, dispatch_id=dispatch_id)
+    return BootstrapDispatchLifecycle(
+        repository=BootstrapRunManifestRepository(),
+        formula_reader=MarketRsRunRepository(),
+    )
 
 
 def _is_current_bootstrap_dispatch(db, *, dispatch_id: str | None) -> bool:
@@ -347,15 +287,13 @@ def _finish_bootstrap_market(
     db,
     *,
     dispatch_id: str,
-    market: str,
-    succeeded: bool,
+    completion: BootstrapMarketCompletion,
 ) -> bool:
     try:
-        BootstrapRunManifestRepository().finish_market(
+        _bootstrap_dispatch_lifecycle().finish_market(
             db,
             dispatch_id=dispatch_id,
-            market=market,
-            succeeded=succeeded,
+            completion=completion,
         )
     except StaleBootstrapDispatch:
         return False
@@ -384,8 +322,7 @@ def queue_local_runtime_bootstrap(
     manifest_recorder = BootstrapQueueManifestRecorder.create(
         primary_market=primary,
         enabled_markets=enabled,
-        record_run=record_runtime_bootstrap_run,
-        mark_bootstrap_failed=_mark_runtime_bootstrap_dispatch_failed,
+        store=_bootstrap_dispatch_store(),
         fresh_install=activation_state.fresh_install,
         pending_balanced_activation_markets=activation_state.pending_markets,
     )
@@ -447,12 +384,9 @@ def queue_local_runtime_bootstrap(
 
     try:
         manifest_recorder.record_queued()
-    except Exception:
-        logger.warning(
-            "Queued bootstrap tasks but failed to record task manifest",
-            extra=manifest_recorder.log_extra(),
-            exc_info=True,
-        )
+    except Exception as exc:
+        manifest_recorder.record_dispatch_failed_safely()
+        raise manifest_recorder.dispatch_error(exc) from exc
 
     logger.info(
         "Queued local runtime bootstrap",
@@ -475,10 +409,7 @@ def complete_local_runtime_bootstrap(
     expected_formula_version: str | None = None,
     dispatch_id: str | None = None,
 ) -> dict:
-    from ..services.runtime_preferences_service import (
-        get_runtime_preferences,
-        set_bootstrap_state,
-    )
+    from ..services.runtime_preferences_service import get_runtime_preferences
 
     del (
         enabled_markets
@@ -500,35 +431,31 @@ def complete_local_runtime_bootstrap(
             expected_formula_version=expected_formula_version,
         )
         if not completion.ready:
-            reason = _mark_readiness_failure(db, completion)
-            set_bootstrap_state(db, "failed")
+            failure = completion.failure or _readiness_failure(None)
             _finish_bootstrap_market(
                 db,
                 dispatch_id=dispatch_id,
-                market=completion.market,
-                succeeded=False,
+                completion=BootstrapMarketCompletion.failed(
+                    market=completion.market,
+                    primary=True,
+                    stage_key=failure.stage_key,
+                    message=failure.activity_message,
+                ),
             )
             return {
                 "status": "failed",
                 "primary_market": primary_market,
                 "market": completion.market,
-                "reason": reason,
+                "reason": failure.result_reason,
             }
-        if (
-            expected_formula_version == BALANCED_RS_FORMULA_VERSION
-            and dispatch_id is not None
-        ):
-            _complete_balanced_activation_market(
-                db,
-                market=primary_market,
-                dispatch_id=dispatch_id,
-            )
-        set_bootstrap_state(db, "ready")
         _finish_bootstrap_market(
             db,
             dispatch_id=dispatch_id,
-            market=completion.market,
-            succeeded=True,
+            completion=BootstrapMarketCompletion.ready(
+                market=completion.market,
+                primary=True,
+                expected_formula_version=expected_formula_version,
+            ),
         )
     finally:
         db.close()
@@ -570,36 +497,34 @@ def complete_background_market_bootstrap(
             expected_formula_version=expected_formula_version,
         )
         if completion.ready:
-            if (
-                expected_formula_version == BALANCED_RS_FORMULA_VERSION
-                and dispatch_id is not None
-            ):
-                _complete_balanced_activation_market(
-                    db,
-                    market=completion.market,
-                    dispatch_id=dispatch_id,
-                )
             _finish_bootstrap_market(
                 db,
                 dispatch_id=dispatch_id,
-                market=completion.market,
-                succeeded=True,
+                completion=BootstrapMarketCompletion.ready(
+                    market=completion.market,
+                    primary=False,
+                    expected_formula_version=expected_formula_version,
+                ),
             )
             return {
                 "status": "ready",
                 "market": completion.market,
             }
-        reason = _mark_readiness_failure(db, completion)
+        failure = completion.failure or _readiness_failure(None)
         _finish_bootstrap_market(
             db,
             dispatch_id=dispatch_id,
-            market=completion.market,
-            succeeded=False,
+            completion=BootstrapMarketCompletion.failed(
+                market=completion.market,
+                primary=False,
+                stage_key=failure.stage_key,
+                message=failure.activity_message,
+            ),
         )
         return {
             "status": "failed",
             "market": completion.market,
-            "reason": reason,
+            "reason": failure.result_reason,
         }
     finally:
         db.close()
@@ -614,8 +539,6 @@ def fail_local_runtime_bootstrap(
     primary_market: str,
     dispatch_id: str | None = None,
 ) -> dict:
-    from ..services.runtime_preferences_service import set_bootstrap_state
-
     primary_market = normalize_market(primary_market)
     db = SessionLocal()
     try:
@@ -625,18 +548,15 @@ def fail_local_runtime_bootstrap(
                 "primary_market": primary_market,
                 "market": str(primary_market).upper(),
             }
-        set_bootstrap_state(db, "failed")
-        mark_current_market_activity_failed(
-            db,
-            market=str(primary_market).upper(),
-            lifecycle="bootstrap",
-            message="Bootstrap failed",
-        )
         _finish_bootstrap_market(
             db,
             dispatch_id=dispatch_id,
-            market=primary_market,
-            succeeded=False,
+            completion=BootstrapMarketCompletion.failed(
+                market=primary_market,
+                primary=True,
+                stage_key=None,
+                message="Bootstrap failed",
+            ),
         )
     finally:
         db.close()
@@ -669,17 +589,15 @@ def fail_background_market_bootstrap(
     try:
         if not _is_current_bootstrap_dispatch(db, dispatch_id=dispatch_id):
             return {"status": "stale", "market": str(market).upper()}
-        mark_current_market_activity_failed(
-            db,
-            market=str(market).upper(),
-            lifecycle="bootstrap",
-            message="Bootstrap failed",
-        )
         _finish_bootstrap_market(
             db,
             dispatch_id=dispatch_id,
-            market=market,
-            succeeded=False,
+            completion=BootstrapMarketCompletion.failed(
+                market=market,
+                primary=False,
+                stage_key=None,
+                message="Bootstrap failed",
+            ),
         )
     finally:
         db.close()

@@ -111,18 +111,6 @@ async def start_runtime_bootstrap(
     db: Session = Depends(get_db),
 ) -> RuntimeBootstrapStartResponse:
     """Persist local bootstrap choices and queue the primary-market sync."""
-    current_status = get_runtime_bootstrap_status(db)
-    if current_status.bootstrap_state == "running":
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "bootstrap_already_running",
-                "message": "Local bootstrap is already running.",
-                "bootstrap_state": current_status.bootstrap_state,
-                "primary_market": current_status.primary_market,
-                "enabled_markets": current_status.enabled_markets,
-            },
-        )
     try:
         task_id = queue_local_runtime_bootstrap(
             primary_market=request.primary_market,

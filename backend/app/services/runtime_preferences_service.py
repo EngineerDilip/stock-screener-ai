@@ -170,7 +170,7 @@ def save_runtime_preferences(
     enabled_markets: list[str],
     bootstrap_state: str | None = None,
 ) -> RuntimePreferences:
-    _stage_runtime_preferences(
+    stage_runtime_preferences(
         db,
         primary_market=primary_market,
         enabled_markets=enabled_markets,
@@ -180,7 +180,7 @@ def save_runtime_preferences(
     return get_runtime_preferences(db)
 
 
-def _stage_runtime_preferences(
+def stage_runtime_preferences(
     db: Session,
     *,
     primary_market: str,

@@ -34,14 +34,16 @@ def test_background_completion_marks_market_failure_without_global_state(
 
     session = _FakeSession()
     calls = {}
-    failed_markets = []
+    completions = []
 
     monkeypatch.setattr(module, "SessionLocal", lambda: session)
     monkeypatch.setattr(
         module, "_is_current_bootstrap_dispatch", lambda *_args, **_kwargs: True
     )
     monkeypatch.setattr(
-        module, "_finish_bootstrap_market", lambda *_args, **_kwargs: True
+        module,
+        "_finish_bootstrap_market",
+        lambda *_args, **kwargs: completions.append(kwargs["completion"]) or True,
     )
     monkeypatch.setattr(
         "app.services.bootstrap_readiness_service.BootstrapReadinessService",
@@ -57,11 +59,6 @@ def test_background_completion_marks_market_failure_without_global_state(
             "background completion must not mutate global bootstrap state"
         ),
     )
-    monkeypatch.setattr(
-        module,
-        "mark_market_activity_failed",
-        lambda _db, **kwargs: failed_markets.append(kwargs),
-    )
 
     result = module.complete_background_market_bootstrap.run(
         market="HK", dispatch_id="dispatch-current"
@@ -73,13 +70,7 @@ def test_background_completion_marks_market_failure_without_global_state(
         "market": "HK",
         "reason": "missing published auto scan",
     }
-    assert failed_markets == [
-        {
-            "market": "HK",
-            "stage_key": "scan",
-            "lifecycle": "bootstrap",
-            "task_name": "runtime_bootstrap",
-            "task_id": None,
-            "message": "Bootstrap scan did not publish",
-        }
-    ]
+    assert len(completions) == 1
+    assert completions[0].primary is False
+    assert completions[0].failure_stage_key == "scan"
+    assert completions[0].failure_message == "Bootstrap scan did not publish"

@@ -101,19 +101,26 @@ def test_runtime_activity_status_exposes_bootstrap_run_task_manifest(
     db_session, monkeypatch
 ):
     from app.services import market_activity_service as module
-
-    module.save_runtime_bootstrap_run(
-        db_session,
-        primary_market="US",
-        enabled_markets=["US", "HK", "TW"],
-        fresh_install=True,
-        primary_task_id="primary-task-123",
-        market_task_ids={
-            "US": "primary-task-123",
-            "HK": "background-task-2",
-            "TW": "background-task-3",
-        },
+    from app.services.bootstrap_run_manifest import (
+        BootstrapRunManifest,
+        BootstrapRunManifestRepository,
     )
+
+    BootstrapRunManifestRepository().begin_dispatch(
+        db_session,
+        BootstrapRunManifest.create(
+            primary_market="US",
+            enabled_markets=["US", "HK", "TW"],
+            fresh_install=True,
+            primary_task_id="primary-task-123",
+            market_task_ids={
+                "US": "primary-task-123",
+                "HK": "background-task-2",
+                "TW": "background-task-3",
+            },
+        ),
+    )
+    db_session.commit()
     monkeypatch.setattr(
         module,
         "get_runtime_bootstrap_status",
@@ -135,38 +142,6 @@ def test_runtime_activity_status_exposes_bootstrap_run_task_manifest(
     }
     hk_market = next(item for item in payload["markets"] if item["market"] == "HK")
     assert hk_market["task_id"] == "background-task-2"
-
-
-def test_queueing_manifest_atomically_claims_runtime_preferences(db_session) -> None:
-    from app.services.bootstrap_run_manifest import BootstrapAlreadyRunning
-    from app.services.market_activity_service import save_runtime_bootstrap_run
-    from app.services.runtime_preferences_service import get_runtime_preferences
-
-    save_runtime_bootstrap_run(
-        db_session,
-        primary_market="HK",
-        enabled_markets=["HK", "US"],
-        dispatch_id="dispatch-a",
-        queue_state="queueing",
-    )
-
-    prefs = get_runtime_preferences(db_session)
-    assert prefs.primary_market == "HK"
-    assert prefs.enabled_markets == ["HK", "US"]
-    assert prefs.bootstrap_state == "running"
-
-    with pytest.raises(BootstrapAlreadyRunning):
-        save_runtime_bootstrap_run(
-            db_session,
-            primary_market="JP",
-            enabled_markets=["JP"],
-            dispatch_id="dispatch-b",
-            queue_state="queueing",
-        )
-
-    unchanged = get_runtime_preferences(db_session)
-    assert unchanged.primary_market == "HK"
-    assert unchanged.enabled_markets == ["HK", "US"]
 
 
 def test_runtime_activity_status_marks_running_stage_without_real_percent_as_indeterminate(

@@ -7,6 +7,45 @@ import pytest
 from tests.unit.runtime_bootstrap_test_fakes import FakeSignature, FakeTask
 
 
+class _RecordingStore:
+    def __init__(self, *, fail_on: str | None = None, events=None) -> None:
+        self.fail_on = fail_on
+        self.events = events
+        self.manifests = []
+
+    def _record(self, manifest):
+        if self.events is not None:
+            self.events.append(
+                (
+                    "record",
+                    manifest.queue_state.value,
+                    manifest.primary_task_id,
+                    dict(manifest.market_task_ids),
+                )
+            )
+        self.manifests.append(manifest)
+        if manifest.queue_state.value == self.fail_on:
+            raise RuntimeError("manifest write failed")
+        return manifest
+
+    def claim(self, manifest):
+        return self._record(manifest)
+
+    def update(self, manifest):
+        return self._record(manifest)
+
+
+def _manifest_payload(manifest):
+    return {
+        "primary_market": manifest.primary_market,
+        "enabled_markets": tuple(manifest.enabled_markets),
+        "fresh_install": manifest.fresh_install,
+        "primary_task_id": manifest.primary_task_id,
+        "market_task_ids": dict(manifest.market_task_ids),
+        "queue_state": manifest.queue_state.value,
+    }
+
+
 @pytest.fixture(autouse=True)
 def classify_unit_test_bootstraps_as_non_fresh(monkeypatch):
     from app.tasks import runtime_bootstrap_tasks as module
@@ -32,8 +71,8 @@ def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chai
 
     market_chains = []
     applied_chains = []
-    recorded_runs = []
     events = []
+    store = _RecordingStore(events=events)
 
     class _FakeChain:
         def __init__(self, *signatures) -> None:
@@ -86,25 +125,7 @@ def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chai
         "_build_market_bootstrap_signatures",
         lambda market_plan: [FakeSignature(f"task:{market_plan.market}")],
     )
-    monkeypatch.setattr(
-        module,
-        "record_runtime_bootstrap_run",
-        lambda *, primary_market, enabled_markets, dispatch_id, fresh_install, primary_task_id, market_task_ids, queue_state: (
-            events.append(
-                ("record", queue_state, primary_task_id, dict(market_task_ids))
-            ),
-            recorded_runs.append(
-                {
-                    "primary_market": primary_market,
-                    "enabled_markets": tuple(enabled_markets),
-                    "fresh_install": fresh_install,
-                    "primary_task_id": primary_task_id,
-                    "market_task_ids": dict(market_task_ids),
-                    "queue_state": queue_state,
-                }
-            ),
-        ),
-    )
+    monkeypatch.setattr(module, "_bootstrap_dispatch_store", lambda: store)
 
     result = module.queue_local_runtime_bootstrap(
         primary_market="US",
@@ -155,7 +176,7 @@ def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chai
         dispatch_id,
         dispatch_id,
     ]
-    assert recorded_runs == [
+    assert [_manifest_payload(item) for item in store.manifests] == [
         {
             "primary_market": "US",
             "enabled_markets": ("US", "HK", "TW"),
@@ -230,8 +251,8 @@ def test_queue_local_runtime_bootstrap_does_not_dispatch_when_initial_manifest_f
     monkeypatch.setattr(module, "_queue_market_bootstrap_workflow", _queue)
     monkeypatch.setattr(
         module,
-        "record_runtime_bootstrap_run",
-        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("manifest write failed")),
+        "_bootstrap_dispatch_store",
+        lambda: _RecordingStore(fail_on="queueing"),
     )
 
     with pytest.raises(RuntimeError, match="manifest write failed"):
@@ -243,51 +264,31 @@ def test_queue_local_runtime_bootstrap_does_not_dispatch_when_initial_manifest_f
     assert applied == []
 
 
-def test_queue_local_runtime_bootstrap_logs_late_manifest_update_failure(monkeypatch):
+def test_queue_local_runtime_bootstrap_surfaces_late_manifest_update_failure(
+    monkeypatch,
+):
     from app.tasks import runtime_bootstrap_tasks as module
 
     class _FakeAsyncResult:
         def __init__(self, task_id: str) -> None:
             self.id = task_id
 
-    recorded_runs = []
+    store = _RecordingStore(fail_on="queued")
 
     def _queue(market_plan, **_kwargs):
         return _FakeAsyncResult(f"task-{market_plan.market.lower()}")
 
-    def _record(
-        *,
-        primary_market,
-        enabled_markets,
-        dispatch_id,
-        fresh_install,
-        primary_task_id,
-        market_task_ids,
-        queue_state,
-    ):
-        recorded_runs.append(
-            {
-                "primary_market": primary_market,
-                "enabled_markets": tuple(enabled_markets),
-                "fresh_install": fresh_install,
-                "primary_task_id": primary_task_id,
-                "market_task_ids": dict(market_task_ids),
-                "queue_state": queue_state,
-            }
-        )
-        if queue_state == "queued":
-            raise RuntimeError("late manifest write failed")
-
     monkeypatch.setattr(module, "_queue_market_bootstrap_workflow", _queue)
-    monkeypatch.setattr(module, "record_runtime_bootstrap_run", _record)
+    monkeypatch.setattr(module, "_bootstrap_dispatch_store", lambda: store)
 
-    result = module.queue_local_runtime_bootstrap(
-        primary_market="US",
-        enabled_markets=["US", "HK"],
-    )
+    with pytest.raises(module.BootstrapDispatchError) as raised:
+        module.queue_local_runtime_bootstrap(
+            primary_market="US",
+            enabled_markets=["US", "HK"],
+        )
 
-    assert result == "task-us"
-    assert recorded_runs == [
+    assert raised.value.primary_task_id == "task-us"
+    assert [_manifest_payload(item) for item in store.manifests] == [
         {
             "primary_market": "US",
             "enabled_markets": ("US", "HK"),
@@ -320,6 +321,14 @@ def test_queue_local_runtime_bootstrap_logs_late_manifest_update_failure(monkeyp
             "market_task_ids": {"US": "task-us", "HK": "task-hk"},
             "queue_state": "queued",
         },
+        {
+            "primary_market": "US",
+            "enabled_markets": ("US", "HK"),
+            "fresh_install": False,
+            "primary_task_id": "task-us",
+            "market_task_ids": {"US": "task-us", "HK": "task-hk"},
+            "queue_state": "dispatch_failed",
+        },
     ]
 
 
@@ -332,7 +341,7 @@ def test_queue_local_runtime_bootstrap_records_partial_manifest_when_background_
         def __init__(self, task_id: str) -> None:
             self.id = task_id
 
-    recorded_runs = []
+    store = _RecordingStore()
 
     def _queue(market_plan, **_kwargs):
         if market_plan.market == "US":
@@ -340,22 +349,7 @@ def test_queue_local_runtime_bootstrap_records_partial_manifest_when_background_
         raise RuntimeError(f"queue failed for {market_plan.market}")
 
     monkeypatch.setattr(module, "_queue_market_bootstrap_workflow", _queue)
-    monkeypatch.setattr(
-        module,
-        "record_runtime_bootstrap_run",
-        lambda *, primary_market, enabled_markets, dispatch_id, fresh_install, primary_task_id, market_task_ids, queue_state: (
-            recorded_runs.append(
-                {
-                    "primary_market": primary_market,
-                    "enabled_markets": tuple(enabled_markets),
-                    "fresh_install": fresh_install,
-                    "primary_task_id": primary_task_id,
-                    "market_task_ids": dict(market_task_ids),
-                    "queue_state": queue_state,
-                }
-            )
-        ),
-    )
+    monkeypatch.setattr(module, "_bootstrap_dispatch_store", lambda: store)
 
     with pytest.raises(RuntimeError, match="queue failed for HK"):
         module.queue_local_runtime_bootstrap(
@@ -363,7 +357,7 @@ def test_queue_local_runtime_bootstrap_records_partial_manifest_when_background_
             enabled_markets=["US", "HK"],
         )
 
-    assert recorded_runs == [
+    assert [_manifest_payload(item) for item in store.manifests] == [
         {
             "primary_market": "US",
             "enabled_markets": ("US", "HK"),
@@ -404,8 +398,8 @@ def test_queue_local_runtime_bootstrap_surfaces_manifest_recording_failure(monke
     monkeypatch.setattr(module, "_queue_market_bootstrap_workflow", _queue)
     monkeypatch.setattr(
         module,
-        "record_runtime_bootstrap_run",
-        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("manifest write failed")),
+        "_bootstrap_dispatch_store",
+        lambda: _RecordingStore(fail_on="queueing"),
     )
 
     with pytest.raises(RuntimeError, match="manifest write failed"):
