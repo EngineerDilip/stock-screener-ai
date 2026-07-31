@@ -480,6 +480,7 @@ def test_queue_bootstrap_captures_pristine_installation_once(
 
     classifications = []
     saved = []
+    queued_operations = []
 
     def _classify():
         classifications.append(fresh_install)
@@ -491,13 +492,13 @@ def test_queue_bootstrap_captures_pristine_installation_once(
         "record_runtime_bootstrap_run",
         lambda **payload: saved.append(payload) or payload,
     )
-    monkeypatch.setattr(
-        module,
-        "_queue_market_bootstrap_workflow",
-        lambda market_plan, **_kwargs: _FakeAsyncResult(
-            f"task-{market_plan.market.lower()}"
-        ),
-    )
+    def _queue(market_plan, **_kwargs):
+        queued_operations.append(
+            [stage.operation for stage in market_plan.stages]
+        )
+        return _FakeAsyncResult(f"task-{market_plan.market.lower()}")
+
+    monkeypatch.setattr(module, "_queue_market_bootstrap_workflow", _queue)
 
     module.queue_local_runtime_bootstrap(
         primary_market="US",
@@ -507,6 +508,38 @@ def test_queue_bootstrap_captures_pristine_installation_once(
     assert classifications == [fresh_install]
     assert saved
     assert {record["fresh_install"] for record in saved} == {fresh_install}
+    expected_operation = (
+        module.BootstrapOperation.BOOTSTRAP_BALANCED_MARKET_RS
+        if fresh_install
+        else module.BootstrapOperation.CALCULATE_MARKET_RS_SNAPSHOT
+    )
+    assert queued_operations
+    assert all(expected_operation in operations for operations in queued_operations)
+
+
+def test_fresh_bootstrap_signature_routes_activation_to_market_queue() -> None:
+    from app.domain.bootstrap.plan import build_bootstrap_plan
+    from app.tasks.runtime_bootstrap_tasks import _build_market_bootstrap_signatures
+
+    market_plan = build_bootstrap_plan(
+        primary_market="HK",
+        enabled_markets=("HK",),
+        fresh_install=True,
+    ).market_plans[0]
+
+    signatures = _build_market_bootstrap_signatures(market_plan)
+    activation = next(
+        signature
+        for signature in signatures
+        if signature.task
+        == "app.tasks.market_rs_tasks.bootstrap_balanced_market_rs"
+    )
+
+    assert activation.kwargs == {
+        "market": "HK",
+        "activity_lifecycle": "bootstrap",
+    }
+    assert activation.options["queue"] == "market_jobs_hk"
 
 
 def test_queue_local_runtime_bootstrap_does_not_dispatch_when_initial_manifest_fails(monkeypatch):

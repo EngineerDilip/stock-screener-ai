@@ -23,6 +23,7 @@ class BootstrapOperation(str, Enum):
     WAIT_FOR_BOOTSTRAP_PRICE_WARMUP = "wait_for_bootstrap_price_warmup"
     REFRESH_ALL_FUNDAMENTALS = "refresh_all_fundamentals"
     CALCULATE_MARKET_RS_SNAPSHOT = "calculate_market_rs_snapshot"
+    BOOTSTRAP_BALANCED_MARKET_RS = "bootstrap_balanced_market_rs"
     CALCULATE_DAILY_BREADTH_WITH_GAPFILL = "calculate_daily_breadth_with_gapfill"
     CALCULATE_MARKET_EXPOSURE = "calculate_market_exposure"
     CALCULATE_DAILY_GROUP_RANKINGS_WITH_GAPFILL = "calculate_daily_group_rankings_with_gapfill"
@@ -82,7 +83,11 @@ def _stage(
     )
 
 
-def _build_market_plan(market: str) -> MarketBootstrapPlan:
+def _build_market_plan(
+    market: str,
+    *,
+    fresh_install: bool = False,
+) -> MarketBootstrapPlan:
     supports_group_rankings = (
         get_market_catalog().get(market).capabilities.group_rankings
     )
@@ -133,7 +138,11 @@ def _build_market_plan(market: str) -> MarketBootstrapPlan:
             ),
             _stage(
                 key="market_rs",
-                operation=BootstrapOperation.CALCULATE_MARKET_RS_SNAPSHOT,
+                operation=(
+                    BootstrapOperation.BOOTSTRAP_BALANCED_MARKET_RS
+                    if fresh_install
+                    else BootstrapOperation.CALCULATE_MARKET_RS_SNAPSHOT
+                ),
                 queue_kind=BootstrapQueueKind.MARKET_JOBS,
                 market=market,
             ),
@@ -189,11 +198,17 @@ def _build_market_plan(market: str) -> MarketBootstrapPlan:
 
 
 def build_bootstrap_plan(
-    *, primary_market: str, enabled_markets: Iterable[str]
+    *,
+    primary_market: str,
+    enabled_markets: Iterable[str],
+    fresh_install: bool = False,
 ) -> BootstrapPlan:
     markets = _normalize_markets(primary_market, enabled_markets)
     return BootstrapPlan(
         primary_market=markets[0],
         enabled_markets=markets,
-        market_plans=tuple(_build_market_plan(market) for market in markets),
+        market_plans=tuple(
+            _build_market_plan(market, fresh_install=fresh_install)
+            for market in markets
+        ),
     )

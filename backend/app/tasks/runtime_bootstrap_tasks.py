@@ -190,7 +190,10 @@ def _build_market_bootstrap_signatures(market_plan: MarketBootstrapPlan) -> list
         calculate_daily_group_rankings_with_gapfill,
     )
     from app.tasks.industry_tasks import load_tracked_ibd_industry_groups
-    from app.tasks.market_rs_tasks import calculate_market_rs_snapshot
+    from app.tasks.market_rs_tasks import (
+        bootstrap_balanced_market_rs,
+        calculate_market_rs_snapshot,
+    )
     from app.tasks.universe_tasks import (
         refresh_official_market_universe,
         refresh_stock_universe,
@@ -204,6 +207,7 @@ def _build_market_bootstrap_signatures(market_plan: MarketBootstrapPlan) -> list
         BootstrapOperation.WAIT_FOR_BOOTSTRAP_PRICE_WARMUP: wait_for_bootstrap_price_warmup,
         BootstrapOperation.REFRESH_ALL_FUNDAMENTALS: refresh_all_fundamentals,
         BootstrapOperation.CALCULATE_MARKET_RS_SNAPSHOT: calculate_market_rs_snapshot,
+        BootstrapOperation.BOOTSTRAP_BALANCED_MARKET_RS: bootstrap_balanced_market_rs,
         BootstrapOperation.CALCULATE_DAILY_BREADTH_WITH_GAPFILL: (
             calculate_daily_breadth_with_gapfill
         ),
@@ -416,6 +420,7 @@ def queue_local_runtime_bootstrap(*, primary_market: str, enabled_markets: Itera
     plan = build_bootstrap_plan(
         primary_market=primary_market,
         enabled_markets=enabled_markets,
+        fresh_install=fresh_install,
     )
     primary = plan.primary_market
     enabled = list(plan.enabled_markets)
