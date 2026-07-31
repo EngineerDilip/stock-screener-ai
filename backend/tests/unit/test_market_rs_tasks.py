@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
 from app.services.market_rs_inputs import MarketRsInputUnavailable
@@ -279,5 +280,48 @@ def test_bootstrap_balanced_market_rs_retries_transient_connection_failure(
     db.rollback.assert_called_once_with()
     retry.assert_called_once()
     assert retry.call_args.args[1] is error
+    failed.assert_not_called()
+    db.close.assert_called_once_with()
+
+
+def test_bootstrap_balanced_market_rs_marks_integrity_error_failed(monkeypatch):
+    module, db, _calendar, executor, _started, completed, failed = (
+        _patch_bootstrap_rollout_dependencies(monkeypatch)
+    )
+    error = IntegrityError(
+        "insert market activity",
+        {},
+        Exception("not null constraint failed"),
+    )
+    executor.execute.side_effect = error
+
+    with pytest.raises(IntegrityError):
+        module.bootstrap_balanced_market_rs.run(market="US")
+
+    db.rollback.assert_called_once_with()
+    completed.assert_not_called()
+    failed.assert_called_once()
+    assert "not null constraint failed" in failed.call_args.kwargs["message"]
+    db.close.assert_called_once_with()
+
+
+def test_bootstrap_balanced_market_rs_retries_transient_database_error(monkeypatch):
+    module, db, _calendar, executor, _started, _completed, failed = (
+        _patch_bootstrap_rollout_dependencies(monkeypatch)
+    )
+    error = OperationalError(
+        "select 1",
+        {},
+        Exception("database system is not yet accepting connections"),
+    )
+    executor.execute.side_effect = error
+    retry = MagicMock(side_effect=RuntimeError("retry requested"))
+    monkeypatch.setattr(module, "_retry_connection_failure", retry)
+
+    with pytest.raises(RuntimeError, match="retry requested"):
+        module.bootstrap_balanced_market_rs.run(market="US")
+
+    db.rollback.assert_called_once_with()
+    retry.assert_called_once_with(module.bootstrap_balanced_market_rs, error)
     failed.assert_not_called()
     db.close.assert_called_once_with()

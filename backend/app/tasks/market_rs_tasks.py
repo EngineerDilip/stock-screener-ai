@@ -20,7 +20,10 @@ from app.services.market_activity_service import (
 from app.services.market_rs_inputs import MarketRsInputUnavailable
 from app.services.market_rs_rollout_executor import MarketRsActivationRequest
 from app.tasks.market_queues import normalize_market
-from app.tasks.transient_database import retry_transient_database_error
+from app.tasks.transient_database import (
+    is_transient_database_error,
+    retry_transient_database_error,
+)
 from app.wiring.bootstrap import (
     get_market_calendar_service,
     get_market_rs_activation_executor,
@@ -29,7 +32,6 @@ from app.wiring.bootstrap import (
 
 logger = logging.getLogger(__name__)
 _TRANSIENT_CONNECTION_ERRORS = (ConnectionError, TimeoutError)
-_TRANSIENT_BOOTSTRAP_ERRORS = (DBAPIError, ConnectionError, TimeoutError)
 BOOTSTRAP_BALANCED_MARKET_RS_TASK_NAME = (
     "app.tasks.market_rs_tasks.bootstrap_balanced_market_rs"
 )
@@ -105,12 +107,13 @@ def bootstrap_balanced_market_rs(
             message="Balanced Market RS activated",
         )
         return {"status": "activated", **outcome.to_dict()}
-    except _TRANSIENT_BOOTSTRAP_ERRORS as exc:
-        db.rollback()
-        _retry_connection_failure(self, exc)
-        raise AssertionError("unreachable") from exc
     except Exception as exc:
         db.rollback()
+        if isinstance(exc, _TRANSIENT_CONNECTION_ERRORS) or (
+            is_transient_database_error(exc)
+        ):
+            _retry_connection_failure(self, exc)
+            raise AssertionError("unreachable") from exc
         mark_market_activity_failed(
             db,
             market=market_code,
