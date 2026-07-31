@@ -71,12 +71,13 @@ Bootstrap stages:
 1. **Universe refresh** — seeds the market symbol list. US uses S&P 500 / Russell / NDX via `refresh_stock_universe`; HK / IN / JP / KR / TW / CN / CA / DE / SG / MY / AU use official exchange feeds via `refresh_official_market_universe`.
 2. **Benchmark + price refresh** — imports the GitHub daily price bundle first, accepts recent stale bundles during bootstrap, then live-fetches missing/current-session gaps (`7d` top-up for stale symbols, `2y` for no-history symbols). Under `live_only` this stage skips the bundle and fetches live — see [Market Data Source Mode](#market-data-source-mode).
 3. **Fundamentals refresh** — loads quarterly and annual financials.
-4. **Market RS snapshot** — computes the canonical balanced-horizon percentile RS snapshot after prices and fundamentals are ready. During a guarded rollout, the new formula can remain in shadow mode until that market's formula pointer is activated.
+4. **Market RS publication** — on a pristine installation, backfills the canonical balanced-horizon percentile RS history, validates a staged static export, and atomically activates the Market and Feature pointers. A database with any durable market, scan, Feature, Group, or Market RS data keeps the balanced calculation in shadow mode until an operator activates it.
 5. **Breadth calculation** — computes StockBee-style advance/decline data with gap-fill.
 6. **Market exposure** — derives the market-regime exposure state from the refreshed breadth data.
 7. **Group rankings** — averages canonical constituent RS values for each group, using the active formula for that market.
 8. **Feature snapshot** — US-only daily feature rollup for the Setup Engine.
-9. **Initial autoscan** — publishes the first default-profile scan.
+9. **Group history** — after activation, seeds formula-compatible history used by 1W/1M/3M/6M rank changes, movers, and RRG.
+10. **Initial autoscan** — publishes the first default-profile scan.
 
 Selecting many enabled markets multiplies this work. On smaller hosts, start with one primary market and add markets after the workspace is ready.
 
@@ -201,6 +202,34 @@ The dialog shows each task's display name and description, schedule, last run ti
 ## Balanced Market RS Rollout
 
 `balanced-horizon-percentile-v2` is activated independently for each Market. Its five same-set excess-return percentiles are weighted **1M 20%**, **3M 30%**, **6M 20%**, **9M 15%**, and **12M 15%** before the composite is re-ranked. Keep the prior `legacy-linear-v1` Market formula pointer and legacy Feature-run ID until the rollout is accepted.
+
+### Fresh database activation
+
+Runtime bootstrap classifies a pristine installation once, before dispatch, and records that decision in the bootstrap manifest. Formula-pointer and application-setting provisioning are allowed; any universe, price, fundamental, scan, Feature run, Group rank, or Market RS run makes the database non-pristine.
+
+A pristine installation runs balanced Market RS backfill and guarded activation as a required stage for every enabled Market. Backfill, balanced Feature publication, staged static parity validation, and the two-pointer transaction must all succeed. The primary Market is not marked ready unless its formula pointer is `balanced-horizon-percentile-v2`. A failure leaves both active pointers unchanged and marks that bootstrap chain failed; correct the reported input or coverage problem and resume bootstrap.
+
+Group history runs after activation, so its 1W/1M/3M/6M rank changes, movers, and RRG snapshots use the same balanced formula identity. The bootstrap may use the current active universe for historical dates when point-in-time membership is unavailable; this avoids an empty 12-week window but carries the documented survivor-bias tradeoff.
+
+After bootstrap reports ready, verify the pointer and populated Group components:
+
+```sql
+SELECT market, formula_version
+FROM market_rs_formula_pointers
+WHERE market = 'US';
+
+SELECT rs_formula_version,
+       MAX(date) AS latest_date,
+       COUNT(*) FILTER (WHERE avg_rs_rating_1m IS NOT NULL) AS rows_with_1m,
+       COUNT(*) FILTER (WHERE avg_rs_rating_3m IS NOT NULL) AS rows_with_3m
+FROM ibd_group_ranks
+WHERE market = 'US'
+GROUP BY rs_formula_version;
+```
+
+Non-pristine databases are never auto-activated, including databases that contain only inactive or historical rows. Use the explicit shadow backfill and activation procedure below. This preserves existing data and pointers until every guard passes.
+
+### Existing database rollout
 
 ### 1. Record the rollback state
 

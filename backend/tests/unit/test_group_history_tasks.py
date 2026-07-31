@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
 from app.services.group_history_bootstrap_service import GroupHistoryBootstrapStatus
 
 
@@ -91,7 +92,7 @@ def test_group_history_target_uses_active_formula_pointer(monkeypatch):
     from app.tasks import group_history_tasks as module
 
     repository = Mock()
-    repository.active_formula.return_value = "balanced-percentile-v1"
+    repository.active_formula.return_value = BALANCED_RS_FORMULA_VERSION
     monkeypatch.setattr(
         market_rs_repo,
         "MarketRsRunRepository",
@@ -105,7 +106,7 @@ def test_group_history_target_uses_active_formula_pointer(monkeypatch):
     target = module._resolve_current_group_history_target(db, market="us")
 
     assert target.market == "US"
-    assert target.formula_version == "balanced-percentile-v1"
+    assert target.formula_version == BALANCED_RS_FORMULA_VERSION
     assert target.through_date == date(2026, 6, 30)
     repository.active_formula.assert_called_once_with(db, market="US")
 
