@@ -427,6 +427,9 @@ def _is_fresh_install_at_dispatch() -> bool:
 
     db = SessionLocal()
     try:
+        manifest = BootstrapRunManifestRepository().load(db)
+        if manifest is not None and manifest.fresh_install:
+            return True
         return BootstrapReadinessService().is_pristine_installation(db)
     finally:
         db.close()
