@@ -29,7 +29,11 @@ class _FakeUISnapshotService:
 
 
 class _FakeDb:
-    pass
+    def __init__(self) -> None:
+        self.expire_all_calls = 0
+
+    def expire_all(self) -> None:
+        self.expire_all_calls += 1
 
 
 class _FakeBootstrapStatus:
@@ -316,27 +320,44 @@ async def test_runtime_bootstrap_start_delegates_atomic_claim_to_orchestration(
             },
         )()
 
-    statuses = [
-        type(
-            "BootstrapStatus",
-            (),
-            {
-                "bootstrap_required": True,
-                "empty_system": True,
-                "primary_market": "HK",
-                "enabled_markets": ["HK", "US"],
-                "bootstrap_state": "running",
-                "supported_markets": ["US", "HK", "JP", "TW"],
-            },
-        )()
-    ]
+    statuses = iter(
+        [
+            type(
+                "BootstrapStatus",
+                (),
+                {
+                    "bootstrap_required": False,
+                    "empty_system": False,
+                    "primary_market": "US",
+                    "enabled_markets": ["US"],
+                    "bootstrap_state": "ready",
+                    "supported_markets": ["US", "HK", "JP", "TW"],
+                },
+            )(),
+            type(
+                "BootstrapStatus",
+                (),
+                {
+                    "bootstrap_required": True,
+                    "empty_system": True,
+                    "primary_market": "HK",
+                    "enabled_markets": ["HK", "US"],
+                    "bootstrap_state": "running",
+                    "supported_markets": ["US", "HK", "JP", "TW"],
+                },
+            )(),
+        ]
+    )
+    db = _FakeDb()
 
     monkeypatch.setattr(module, "save_runtime_preferences", _save)
     monkeypatch.setattr(
         module, "queue_local_runtime_bootstrap", lambda **_kwargs: "task-bootstrap-123"
     )
-    monkeypatch.setattr(module, "get_runtime_bootstrap_status", lambda _db: statuses[0])
-    app.dependency_overrides[get_db] = lambda: _FakeDb()
+    monkeypatch.setattr(
+        module, "get_runtime_bootstrap_status", lambda _db: next(statuses)
+    )
+    app.dependency_overrides[get_db] = lambda: db
 
     try:
         response = await client.post(
@@ -353,6 +374,7 @@ async def test_runtime_bootstrap_start_delegates_atomic_claim_to_orchestration(
     assert payload["primary_market"] == "HK"
     assert payload["enabled_markets"] == ["HK", "US"]
     assert payload["bootstrap_state"] == "running"
+    assert db.expire_all_calls == 1
 
 
 @pytest.mark.asyncio
@@ -577,7 +599,8 @@ async def test_runtime_bootstrap_start_keeps_running_state_after_partial_dispatc
     monkeypatch.setattr(module, "get_runtime_bootstrap_status", lambda _db: statuses[0])
     monkeypatch.setattr(module, "save_runtime_preferences", _save)
     monkeypatch.setattr(module, "queue_local_runtime_bootstrap", _queue)
-    app.dependency_overrides[get_db] = lambda: _FakeDb()
+    db = _FakeDb()
+    app.dependency_overrides[get_db] = lambda: db
 
     try:
         response = await client.post(
@@ -592,6 +615,7 @@ async def test_runtime_bootstrap_start_keeps_running_state_after_partial_dispatc
     payload = response.json()
     assert payload["task_id"] == "primary-task-123"
     assert payload["bootstrap_state"] == "running"
+    assert db.expire_all_calls == 1
 
 
 @pytest.mark.asyncio
@@ -628,7 +652,8 @@ async def test_runtime_bootstrap_start_rejects_duplicate_running_bootstrap(
             or (_ for _ in ()).throw(BootstrapAlreadyRunning("active dispatch"))
         ),
     )
-    app.dependency_overrides[get_db] = lambda: _FakeDb()
+    db = _FakeDb()
+    app.dependency_overrides[get_db] = lambda: db
 
     try:
         response = await client.post(
@@ -641,3 +666,4 @@ async def test_runtime_bootstrap_start_rejects_duplicate_running_bootstrap(
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "bootstrap_already_running"
     assert queue_calls == [{"primary_market": "US", "enabled_markets": ["US"]}]
+    assert db.expire_all_calls == 1

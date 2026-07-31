@@ -25,6 +25,7 @@ from ...services.bootstrap_run_manifest import BootstrapAlreadyRunning
 from ...services.market_activity_service import get_runtime_activity_status
 from ...services.runtime_activity_contract import bootstrap_stage_metadata
 from ...services.runtime_preferences_service import (
+    RuntimeBootstrapStatus,
     get_runtime_bootstrap_status,
     save_runtime_preferences,
 )
@@ -50,6 +51,12 @@ def _bootstrap_status_payload(status: object) -> dict[str, object]:
         "supported_markets": list(getattr(status, "supported_markets")),
         "bootstrap_stages": bootstrap_stage_metadata(),
     }
+
+
+def _refresh_runtime_bootstrap_status(db: Session) -> RuntimeBootstrapStatus:
+    """Discard request-session identities changed by bootstrap orchestration."""
+    db.expire_all()
+    return get_runtime_bootstrap_status(db)
 
 
 @router.get("/app-capabilities", response_model=AppCapabilitiesResponse)
@@ -118,7 +125,7 @@ async def start_runtime_bootstrap(
             enabled_markets=request.enabled_markets,
         )
     except BootstrapAlreadyRunning:
-        status = get_runtime_bootstrap_status(db)
+        status = _refresh_runtime_bootstrap_status(db)
         raise HTTPException(
             status_code=409,
             detail={
@@ -148,13 +155,13 @@ async def start_runtime_bootstrap(
             },
             exc_info=True,
         )
-        status = get_runtime_bootstrap_status(db)
+        status = _refresh_runtime_bootstrap_status(db)
         payload = {
             **_bootstrap_status_payload(status),
             "task_id": exc.primary_task_id,
         }
         return RuntimeBootstrapStartResponse(**payload)
-    status = get_runtime_bootstrap_status(db)
+    status = _refresh_runtime_bootstrap_status(db)
     payload = {
         **_bootstrap_status_payload(status),
         "task_id": task_id,
