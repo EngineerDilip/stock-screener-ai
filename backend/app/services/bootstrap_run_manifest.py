@@ -398,7 +398,7 @@ class BootstrapRunManifestRepository:
         self._write_setting(setting, manifest, db)
         return manifest.to_payload()
 
-    def is_current_dispatch(self, db: Session, *, dispatch_id: str) -> bool:
+    def is_current_dispatch(self, db: Session, *, dispatch_id: str | None) -> bool:
         current = self.load(db)
         return bool(current and current.dispatch_id == dispatch_id)
 
@@ -406,7 +406,7 @@ class BootstrapRunManifestRepository:
         self,
         db: Session,
         *,
-        dispatch_id: str,
+        dispatch_id: str | None,
         market: str,
         succeeded: bool,
     ) -> BootstrapRunManifest:
@@ -423,7 +423,7 @@ class BootstrapRunManifestRepository:
         self,
         db: Session,
         *,
-        dispatch_id: str,
+        dispatch_id: str | None,
         transform: Callable[[BootstrapRunManifest], BootstrapRunManifest],
     ) -> BootstrapRunManifest:
         setting = self._locked_setting(db)

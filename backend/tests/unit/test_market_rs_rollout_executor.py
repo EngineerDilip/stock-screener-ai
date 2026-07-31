@@ -223,3 +223,112 @@ def test_executor_rejects_invalid_staging_before_backfill(tmp_path: Path) -> Non
 
     assert not rollout.coverage_requested
     assert not rollout.backfill_requested
+
+
+def test_executor_rejects_staging_that_overlaps_serving_directory(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from app.services import market_rs_rollout_executor as module
+
+    serving_dir = tmp_path / "served"
+    monkeypatch.setattr(
+        module.settings,
+        "static_export_output_dir",
+        str(serving_dir),
+    )
+    executor = MarketRsActivationExecutor(
+        rollout_service=_RolloutFake(),
+        feature_snapshot_builder=MagicMock(),
+        static_exporter=MagicMock(),
+        live_group_publisher=MagicMock(),
+    )
+
+    for stage in (serving_dir / "stage", tmp_path):
+        with pytest.raises(
+            MarketRsActivationExecutionError,
+            match="must not overlap",
+        ):
+            executor.execute(
+                MagicMock(),
+                request=MarketRsActivationRequest(
+                    market="US",
+                    through_date=date(2026, 7, 29),
+                    static_staging_dir=stage,
+                ),
+            )
+
+
+def test_executor_wraps_invalid_market_as_activation_error(tmp_path: Path) -> None:
+    executor = MarketRsActivationExecutor(
+        rollout_service=_RolloutFake(),
+        feature_snapshot_builder=MagicMock(),
+        static_exporter=MagicMock(),
+        live_group_publisher=MagicMock(),
+    )
+
+    with pytest.raises(
+        MarketRsActivationExecutionError,
+        match="Unsupported market",
+    ):
+        executor.execute(
+            MagicMock(),
+            request=MarketRsActivationRequest(
+                market="INVALID",
+                through_date=date(2026, 7, 29),
+                static_staging_dir=tmp_path / "stage",
+            ),
+        )
+
+
+def test_executor_stops_before_activation_when_validation_failed(
+    tmp_path: Path,
+) -> None:
+    rollout = _RolloutFake(validation=_validation(ok=False))
+    publisher = MagicMock()
+    executor = MarketRsActivationExecutor(
+        rollout_service=rollout,
+        feature_snapshot_builder=lambda **_kwargs: 99,
+        static_exporter=lambda **_kwargs: None,
+        live_group_publisher=publisher,
+    )
+
+    with pytest.raises(
+        MarketRsActivationExecutionError,
+        match="Activation validation failed: static mismatch",
+    ):
+        executor.execute(
+            MagicMock(),
+            request=MarketRsActivationRequest(
+                market="US",
+                through_date=date(2026, 7, 29),
+                static_staging_dir=tmp_path / "stage",
+            ),
+        )
+
+    assert not rollout.activation_requested
+    publisher.assert_not_called()
+
+
+def test_executor_treats_live_group_snapshot_as_best_effort(
+    tmp_path: Path,
+) -> None:
+    rollout = _RolloutFake()
+    executor = MarketRsActivationExecutor(
+        rollout_service=rollout,
+        feature_snapshot_builder=lambda **_kwargs: 99,
+        static_exporter=lambda **_kwargs: None,
+        live_group_publisher=MagicMock(side_effect=OSError("snapshot store full")),
+    )
+
+    outcome = executor.execute(
+        MagicMock(),
+        request=MarketRsActivationRequest(
+            market="US",
+            through_date=date(2026, 7, 29),
+            static_staging_dir=tmp_path / "stage",
+        ),
+    )
+
+    assert outcome.market == "US"
+    assert rollout.activation_requested is True

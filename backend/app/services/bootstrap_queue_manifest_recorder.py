@@ -136,6 +136,7 @@ class BootstrapQueueManifestRecorder:
 
     def log_extra(self) -> dict:
         return {
+            "dispatch_id": self.dispatch_id,
             "primary_market": self.primary_market,
             "enabled_markets": self.enabled_markets,
             "market_task_ids": self.market_task_ids,

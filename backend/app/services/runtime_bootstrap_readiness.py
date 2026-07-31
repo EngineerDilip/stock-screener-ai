@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+from typing import TYPE_CHECKING
+
+from sqlalchemy.orm import Session
 
 from app.tasks.market_queues import normalize_market
+
+if TYPE_CHECKING:
+    from app.services.bootstrap_readiness_service import MarketBootstrapReadiness
 
 
 @dataclass(frozen=True)
@@ -21,7 +28,9 @@ class MarketReadinessCompletion:
     failure: ReadinessFailure | None = None
 
 
-def readiness_failure(market_result) -> ReadinessFailure:
+def readiness_failure(
+    market_result: MarketBootstrapReadiness | None,
+) -> ReadinessFailure:
     if market_result is None or not market_result.core_ready:
         return ReadinessFailure(
             stage_key="core",
@@ -42,10 +51,10 @@ def readiness_failure(market_result) -> ReadinessFailure:
 
 
 def evaluate_market_readiness(
-    db,
+    db: Session,
     *,
     market: str,
-    bootstrap_started_at=None,
+    bootstrap_started_at: datetime | None = None,
     expected_formula_version: str | None = None,
 ) -> MarketReadinessCompletion:
     from app.services.bootstrap_readiness_service import BootstrapReadinessService

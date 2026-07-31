@@ -218,7 +218,7 @@ def test_bootstrap_balanced_market_rs_requires_successful_activation(monkeypatch
             static_bundle_sha256="bundle",
             errors=(),
         ),
-        static_staging_dir="/tmp/stage",
+        static_staging_dir="stage",
     )
 
     result = module.bootstrap_balanced_market_rs.run(
@@ -241,6 +241,7 @@ def test_bootstrap_balanced_market_rs_requires_successful_activation(monkeypatch
     [
         MarketRsActivationExecutionError("static validation failed"),
         RuntimeError("adapter failed"),
+        OSError("staging filesystem unavailable"),
     ],
 )
 def test_bootstrap_balanced_market_rs_stops_chain_on_rollout_failure(

@@ -2,6 +2,44 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+
+def test_missing_dispatch_id_matches_only_a_legacy_current_manifest(monkeypatch):
+    from app.tasks import runtime_bootstrap_tasks as module
+
+    repository = SimpleNamespace(
+        load=lambda _db: SimpleNamespace(dispatch_id=None),
+        is_current_dispatch=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy dispatch should be matched from its manifest")
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "BootstrapRunManifestRepository",
+        lambda: repository,
+    )
+
+    assert module._is_current_bootstrap_dispatch(object(), dispatch_id=None) is True
+
+
+def test_missing_dispatch_id_does_not_match_a_fenced_manifest(monkeypatch):
+    from app.tasks import runtime_bootstrap_tasks as module
+
+    repository = SimpleNamespace(
+        load=lambda _db: SimpleNamespace(dispatch_id="dispatch-current"),
+        is_current_dispatch=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("missing dispatch ID must not use the fenced path")
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "BootstrapRunManifestRepository",
+        lambda: repository,
+    )
+
+    assert module._is_current_bootstrap_dispatch(object(), dispatch_id=None) is False
+
 
 def test_fail_local_runtime_bootstrap_preserves_active_task_owner(monkeypatch):
     from app.tasks import runtime_bootstrap_tasks as module

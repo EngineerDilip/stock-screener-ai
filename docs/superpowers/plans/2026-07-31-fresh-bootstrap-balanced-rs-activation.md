@@ -477,6 +477,12 @@ self.rollout_service.activate(
 self.live_group_publisher(market)
 ```
 
+The production live Group publisher is an explicitly best-effort cache refresh after
+the durable two-pointer transaction. It absorbs and logs snapshot publication errors;
+such an error does not make activation fail or imply that the committed pointers were
+rolled back. The live request path can rebuild the cache. The current Groups bootstrap
+snapshot is US-only, so non-US activation records an explicit skip.
+
 Move the existing `_build_balanced_feature_snapshot`, `_export_static_v3`, and `_publish_live_groups` implementations into `market_rs_rollout_executor.py` as module-level production adapters named `build_balanced_feature_snapshot`, `export_static_v3`, and `publish_live_groups`. Inject those three functions when `RuntimeServices` constructs `MarketRsRolloutExecutor`; keep their imports local inside each adapter to avoid adding eager task/static-export imports to bootstrap wiring.
 
 - [ ] **Step 5: Wire one runtime executor instance**

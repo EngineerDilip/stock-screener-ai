@@ -265,7 +265,7 @@ def test_fresh_bootstrap_completion_rejects_legacy_formula_pointer(
     )
     monkeypatch.setattr(
         "app.services.runtime_preferences_service.get_runtime_preferences",
-        lambda _db: type("Prefs", (), {"bootstrap_started_at": None})(),
+        lambda _db: SimpleNamespace(bootstrap_started_at=None),
     )
 
     task = getattr(module, completion_task_name)

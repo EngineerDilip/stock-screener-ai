@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 import logging
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -27,9 +27,9 @@ from app.wiring.bootstrap import (
     get_market_rs_snapshot_service,
 )
 
-
 logger = logging.getLogger(__name__)
-_TRANSIENT_CONNECTION_ERRORS = (ConnectionError, TimeoutError, OSError)
+_TRANSIENT_CONNECTION_ERRORS = (ConnectionError, TimeoutError)
+_TRANSIENT_BOOTSTRAP_ERRORS = (DBAPIError, ConnectionError, TimeoutError)
 BOOTSTRAP_BALANCED_MARKET_RS_TASK_NAME = (
     "app.tasks.market_rs_tasks.bootstrap_balanced_market_rs"
 )
@@ -105,10 +105,10 @@ def bootstrap_balanced_market_rs(
             message="Balanced Market RS activated",
         )
         return {"status": "activated", **outcome.to_dict()}
-    except (DBAPIError, ConnectionError, TimeoutError, OSError) as exc:
+    except _TRANSIENT_BOOTSTRAP_ERRORS as exc:
         db.rollback()
         _retry_connection_failure(self, exc)
-        raise AssertionError("unreachable")
+        raise AssertionError("unreachable") from exc
     except Exception as exc:
         db.rollback()
         mark_market_activity_failed(
@@ -234,7 +234,7 @@ def calculate_market_rs_snapshot(
         )
     except _TRANSIENT_CONNECTION_ERRORS as exc:
         _retry_connection_failure(self, exc)
-        raise AssertionError("unreachable")
+        raise AssertionError("unreachable") from exc
     except DBAPIError as exc:
         retry_transient_database_error(
             self,

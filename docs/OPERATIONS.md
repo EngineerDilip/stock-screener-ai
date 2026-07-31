@@ -75,7 +75,7 @@ Bootstrap stages:
 5. **Breadth calculation** — computes StockBee-style advance/decline data with gap-fill.
 6. **Market exposure** — derives the market-regime exposure state from the refreshed breadth data.
 7. **Group rankings** — averages canonical constituent RS values for each group, using the active formula for that market.
-8. **Feature snapshot** — US-only daily feature rollup for the Setup Engine.
+8. **Feature snapshot** — daily Setup Engine feature rollup for each enabled Market, using that Market's universe and publication pointer.
 9. **Group history** — after activation, seeds formula-compatible history used by 1W/1M/3M/6M rank changes, movers, and RRG.
 10. **Initial autoscan** — publishes the first default-profile scan.
 
@@ -274,7 +274,7 @@ python -m app.scripts.backfill_market_rs \
   --activate
 ```
 
-The command calculates and validates the bounded 187-day activation window, builds a balanced Feature snapshot for `through-date`, stages `static-site-v3`, and checks stock/Group coverage, 1–99 ranges, contiguous deterministic Group ranks, exact formula/run/universe metadata on every Scan shard and row, live/static stock and Group parity, and formula-isolated RRG state. `--start-date` is shadow-backfill-only and is rejected with `--activate`. Approval records a fingerprint of the root manifest plus the complete staged Market tree, so any file change invalidates activation. Any failed gate exits nonzero without changing either active pointer. A successful validation updates the Market formula pointer and `latest_published_market:<MARKET>` Feature pointer in one database transaction, then invalidates Group caches and republishes the US bootstrap snapshot when applicable.
+The command calculates and validates the bounded 187-day activation window, builds a balanced Feature snapshot for `through-date`, stages `static-site-v3`, and checks stock/Group coverage, 1–99 ranges, contiguous deterministic Group ranks, exact formula/run/universe metadata on every Scan shard and row, live/static stock and Group parity, and formula-isolated RRG state. `--start-date` is shadow-backfill-only and is rejected with `--activate`. Approval records a fingerprint of the root manifest plus the complete staged Market tree, so any file change invalidates activation. Any failed gate exits nonzero without changing either active pointer. A successful validation updates the Market formula pointer and `latest_published_market:<MARKET>` Feature pointer in one database transaction, then invalidates Group caches. The US-only live Group bootstrap snapshot is a best-effort cache publication after activation; failures are logged and the request path can rebuild it without reverting the durable pointers.
 
 After success, verify the JSON has `activated: true`, the expected formula/run IDs, and no validation errors. In the live app, refresh Groups and a Scan and confirm:
 

@@ -274,19 +274,20 @@ def _bootstrap_dispatch_lifecycle() -> BootstrapDispatchLifecycle:
 
 
 def _is_current_bootstrap_dispatch(db, *, dispatch_id: str | None) -> bool:
-    return bool(
-        dispatch_id
-        and BootstrapRunManifestRepository().is_current_dispatch(
-            db,
-            dispatch_id=dispatch_id,
-        )
+    repository = BootstrapRunManifestRepository()
+    if dispatch_id is None:
+        current = repository.load(db)
+        return bool(current is not None and current.dispatch_id is None)
+    return repository.is_current_dispatch(
+        db,
+        dispatch_id=dispatch_id,
     )
 
 
 def _finish_bootstrap_market(
     db,
     *,
-    dispatch_id: str,
+    dispatch_id: str | None,
     completion: BootstrapMarketCompletion,
 ) -> bool:
     try:

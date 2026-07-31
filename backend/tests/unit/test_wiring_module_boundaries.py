@@ -23,7 +23,8 @@ def test_runtime_context_does_not_erase_runtime_services_to_any() -> None:
     any_references = [
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.Name) and node.id == "Any"
+        if (isinstance(node, ast.Name) and node.id == "Any")
+        or (isinstance(node, ast.Attribute) and node.attr == "Any")
     ]
 
     assert any_references == []

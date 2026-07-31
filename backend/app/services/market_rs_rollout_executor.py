@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -20,6 +21,8 @@ from app.services.market_rs_rollout_contracts import (
     BackfillReport,
     normalize_rollout_market,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class MarketRsActivationExecutionError(RuntimeError):
@@ -111,16 +114,16 @@ class MarketRsActivationOutcome:
 def validate_static_staging_directory(path: Path) -> Path:
     if not path.is_absolute():
         raise MarketRsActivationExecutionError(
-            "--static-staging-dir must be an absolute path"
+            "Static staging directory must be an absolute path"
         )
     resolved = path.resolve()
     serving_dir = Path(settings.static_export_output_dir).expanduser().resolve()
-    if resolved == serving_dir:
+    if resolved.is_relative_to(serving_dir) or serving_dir.is_relative_to(resolved):
         raise MarketRsActivationExecutionError(
-            "--static-staging-dir must not be the configured serving directory"
+            "Static staging directory must not overlap the configured serving directory"
         )
     if resolved.exists() and any(resolved.iterdir()):
-        raise MarketRsActivationExecutionError("--static-staging-dir must be empty")
+        raise MarketRsActivationExecutionError("Static staging directory must be empty")
     resolved.mkdir(parents=True, exist_ok=True)
     return resolved
 
@@ -145,7 +148,10 @@ class MarketRsActivationExecutor:
         *,
         request: MarketRsActivationRequest,
     ) -> MarketRsActivationOutcome:
-        market = normalize_rollout_market(request.market)
+        try:
+            market = normalize_rollout_market(request.market)
+        except ValueError as exc:
+            raise MarketRsActivationExecutionError(str(exc)) from exc
         staging_dir = validate_static_staging_directory(request.static_staging_dir)
         coverage = self.rollout_service.activation_coverage(
             market=market,
@@ -189,13 +195,22 @@ class MarketRsActivationExecutor:
             validation=validation,
             static_staging_dir=staging_dir,
         )
-        self.live_group_publisher(
-            GroupSnapshotIdentity(
-                market=market,
-                as_of_date=request.through_date,
-                formula_version=BALANCED_RS_FORMULA_VERSION,
-            )
+        identity = GroupSnapshotIdentity(
+            market=market,
+            as_of_date=request.through_date,
+            formula_version=BALANCED_RS_FORMULA_VERSION,
         )
+        try:
+            self.live_group_publisher(identity)
+        except Exception:
+            logger.exception(
+                "Best-effort live Group snapshot publication failed after activation",
+                extra={
+                    "market": identity.market,
+                    "as_of_date": identity.as_of_date.isoformat(),
+                    "formula_version": identity.formula_version,
+                },
+            )
         return MarketRsActivationOutcome(
             backfill=report,
             market=market,

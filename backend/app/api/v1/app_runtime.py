@@ -111,6 +111,7 @@ async def start_runtime_bootstrap(
     db: Session = Depends(get_db),
 ) -> RuntimeBootstrapStartResponse:
     """Persist local bootstrap choices and queue the primary-market sync."""
+    previous_status = get_runtime_bootstrap_status(db)
     try:
         task_id = queue_local_runtime_bootstrap(
             primary_market=request.primary_market,
@@ -127,9 +128,15 @@ async def start_runtime_bootstrap(
                 "primary_market": status.primary_market,
                 "enabled_markets": status.enabled_markets,
             },
-        )
+        ) from None
     except BootstrapDispatchError as exc:
         if not exc.dispatched_any:
+            save_runtime_preferences(
+                db,
+                primary_market=request.primary_market,
+                enabled_markets=request.enabled_markets,
+                bootstrap_state=previous_status.bootstrap_state,
+            )
             raise
         logger.warning(
             "Bootstrap dispatch failed after queueing one or more market workflows",

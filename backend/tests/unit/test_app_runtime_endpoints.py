@@ -316,30 +316,26 @@ async def test_runtime_bootstrap_start_delegates_atomic_claim_to_orchestration(
             },
         )()
 
-    statuses = iter(
-        [
-            type(
-                "BootstrapStatus",
-                (),
-                {
-                    "bootstrap_required": True,
-                    "empty_system": True,
-                    "primary_market": "HK",
-                    "enabled_markets": ["HK", "US"],
-                    "bootstrap_state": "running",
-                    "supported_markets": ["US", "HK", "JP", "TW"],
-                },
-            )(),
-        ]
-    )
+    statuses = [
+        type(
+            "BootstrapStatus",
+            (),
+            {
+                "bootstrap_required": True,
+                "empty_system": True,
+                "primary_market": "HK",
+                "enabled_markets": ["HK", "US"],
+                "bootstrap_state": "running",
+                "supported_markets": ["US", "HK", "JP", "TW"],
+            },
+        )()
+    ]
 
     monkeypatch.setattr(module, "save_runtime_preferences", _save)
     monkeypatch.setattr(
         module, "queue_local_runtime_bootstrap", lambda **_kwargs: "task-bootstrap-123"
     )
-    monkeypatch.setattr(
-        module, "get_runtime_bootstrap_status", lambda _db: next(statuses)
-    )
+    monkeypatch.setattr(module, "get_runtime_bootstrap_status", lambda _db: statuses[0])
     app.dependency_overrides[get_db] = lambda: _FakeDb()
 
     try:
@@ -466,6 +462,70 @@ async def test_runtime_bootstrap_start_does_not_persist_running_state_when_queue
 
 
 @pytest.mark.asyncio
+async def test_runtime_bootstrap_start_restores_state_when_no_task_was_dispatched(
+    client, monkeypatch
+):
+    from app.api.v1 import app_runtime as module
+    from app.services import server_auth
+    from app.tasks.runtime_bootstrap_tasks import BootstrapDispatchError
+
+    monkeypatch.setattr(server_auth.settings, "server_auth_enabled", False)
+    saved = []
+    current_status = type(
+        "BootstrapStatus",
+        (),
+        {
+            "bootstrap_required": False,
+            "empty_system": False,
+            "primary_market": "US",
+            "enabled_markets": ["US"],
+            "bootstrap_state": "ready",
+            "supported_markets": ["US", "HK", "JP", "TW"],
+        },
+    )()
+
+    monkeypatch.setattr(
+        module,
+        "get_runtime_bootstrap_status",
+        lambda _db: current_status,
+    )
+    monkeypatch.setattr(
+        module,
+        "save_runtime_preferences",
+        lambda _db, **kwargs: saved.append(kwargs),
+    )
+
+    def _queue(**_kwargs):
+        raise BootstrapDispatchError(
+            "queue unavailable",
+            primary_market="HK",
+            enabled_markets=["HK", "US"],
+            primary_task_id=None,
+            market_task_ids={},
+        )
+
+    monkeypatch.setattr(module, "queue_local_runtime_bootstrap", _queue)
+    app.dependency_overrides[get_db] = lambda: _FakeDb()
+
+    try:
+        with pytest.raises(BootstrapDispatchError, match="queue unavailable"):
+            await client.post(
+                "/api/v1/runtime/bootstrap",
+                json={"primary_market": "HK", "enabled_markets": ["HK", "US"]},
+            )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert saved == [
+        {
+            "primary_market": "HK",
+            "enabled_markets": ["HK", "US"],
+            "bootstrap_state": "ready",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_runtime_bootstrap_start_keeps_running_state_after_partial_dispatch_failure(
     client,
     monkeypatch,
@@ -478,22 +538,20 @@ async def test_runtime_bootstrap_start_keeps_running_state_after_partial_dispatc
 
     monkeypatch.setattr(server_auth.settings, "server_auth_enabled", False)
 
-    statuses = iter(
-        [
-            type(
-                "BootstrapStatus",
-                (),
-                {
-                    "bootstrap_required": True,
-                    "empty_system": True,
-                    "primary_market": "US",
-                    "enabled_markets": ["US", "HK"],
-                    "bootstrap_state": "running",
-                    "supported_markets": ["US", "HK", "JP", "TW"],
-                },
-            )(),
-        ]
-    )
+    statuses = [
+        type(
+            "BootstrapStatus",
+            (),
+            {
+                "bootstrap_required": True,
+                "empty_system": True,
+                "primary_market": "US",
+                "enabled_markets": ["US", "HK"],
+                "bootstrap_state": "running",
+                "supported_markets": ["US", "HK", "JP", "TW"],
+            },
+        )()
+    ]
 
     def _save(_db, *, primary_market, enabled_markets, bootstrap_state):
         saved_states.append(bootstrap_state)
@@ -516,9 +574,7 @@ async def test_runtime_bootstrap_start_keeps_running_state_after_partial_dispatc
             market_task_ids={"US": "primary-task-123"},
         )
 
-    monkeypatch.setattr(
-        module, "get_runtime_bootstrap_status", lambda _db: next(statuses)
-    )
+    monkeypatch.setattr(module, "get_runtime_bootstrap_status", lambda _db: statuses[0])
     monkeypatch.setattr(module, "save_runtime_preferences", _save)
     monkeypatch.setattr(module, "queue_local_runtime_bootstrap", _queue)
     app.dependency_overrides[get_db] = lambda: _FakeDb()

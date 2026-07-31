@@ -153,6 +153,24 @@ def test_publish_live_groups_does_not_duplicate_activation_cache_invalidation(
     )
 
 
+def test_publish_live_groups_logs_explicit_non_us_skip(monkeypatch):
+    from app.wiring import market_rs_activation as module
+
+    info = MagicMock()
+    monkeypatch.setattr(module.logger, "info", info)
+
+    module.publish_live_groups(
+        GroupSnapshotIdentity(
+            market="HK",
+            as_of_date=date(2026, 4, 10),
+            formula_version=BALANCED_RS_FORMULA_VERSION,
+        )
+    )
+
+    info.assert_called_once()
+    assert info.call_args.kwargs["extra"]["market"] == "HK"
+
+
 def test_executor_failure_is_exposed_as_command_failure(monkeypatch, tmp_path):
     from app.scripts import backfill_market_rs as module
 

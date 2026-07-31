@@ -131,7 +131,7 @@ class BootstrapDispatchLifecycle:
         self,
         db: Session,
         *,
-        dispatch_id: str,
+        dispatch_id: str | None,
         completion: BootstrapMarketCompletion,
     ) -> BootstrapRunManifest:
         market = str(completion.market).upper()
@@ -151,6 +151,7 @@ class BootstrapDispatchLifecycle:
                 balanced_activation_completed = False
 
         try:
+
             def finish(current: BootstrapRunManifest) -> BootstrapRunManifest:
                 nonlocal previous_outcome
                 previous_outcome = current.market_outcome(market)
@@ -250,22 +251,29 @@ class BootstrapDispatchLifecycle:
 class PersistedBootstrapDispatchStore:
     """Open one short transaction for each queue-publication transition."""
 
-    def __init__(self, session_factory: SessionFactory) -> None:
+    def __init__(
+        self,
+        session_factory: SessionFactory,
+        *,
+        lifecycle: BootstrapDispatchLifecycle | None = None,
+    ) -> None:
         self.session_factory = session_factory
+        self.lifecycle = lifecycle or BootstrapDispatchLifecycle()
 
     def claim(self, manifest: BootstrapRunManifest) -> BootstrapRunManifest:
         db = self.session_factory()
         try:
-            return BootstrapDispatchLifecycle().claim(db, manifest=manifest)
+            return self.lifecycle.claim(db, manifest=manifest)
         finally:
             db.close()
 
     def update(self, manifest: BootstrapRunManifest) -> BootstrapRunManifest:
         db = self.session_factory()
         try:
-            return BootstrapDispatchLifecycle().update_manifest(db, manifest=manifest)
+            return self.lifecycle.update_manifest(db, manifest=manifest)
         finally:
             db.close()
+
 
 __all__ = [
     "BootstrapDispatchLifecycle",

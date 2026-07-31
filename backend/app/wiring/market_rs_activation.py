@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from pathlib import Path
 
@@ -14,6 +15,8 @@ from app.services.market_rs_rollout_executor import (
     MarketRsActivationExecutor,
 )
 from app.services.market_rs_rollout_service import MarketRsRolloutService
+
+logger = logging.getLogger(__name__)
 
 
 def build_balanced_feature_snapshot(*, market: str, through_date: date) -> int:
@@ -62,11 +65,20 @@ def export_static_v3(
 def publish_live_groups(identity: GroupSnapshotIdentity) -> None:
     from app.services.ui_snapshot_service import safe_publish_groups_bootstrap
 
-    if identity.market == "US":
-        safe_publish_groups_bootstrap(
-            expected_formula_version=identity.formula_version,
-            expected_through_date=identity.as_of_date,
+    if identity.market != "US":
+        logger.info(
+            "Skipping US-only live Group bootstrap snapshot publication",
+            extra={
+                "market": identity.market,
+                "formula_version": identity.formula_version,
+                "as_of_date": identity.as_of_date.isoformat(),
+            },
         )
+        return
+    safe_publish_groups_bootstrap(
+        expected_formula_version=identity.formula_version,
+        expected_through_date=identity.as_of_date,
+    )
 
 
 def create_market_rs_activation_executor(
