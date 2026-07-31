@@ -289,10 +289,12 @@ def test_shared_executor_activates_exact_group_and_history_identity(
         service,
         "activation_coverage",
         lambda **_kwargs: SimpleNamespace(
+            market="US",
+            through_date=date(2026, 4, 10),
             required_dates=(date(2026, 4, 10),),
         ),
     )
-    monkeypatch.setattr(service, "backfill", lambda *args, **kwargs: report)
+    monkeypatch.setattr(service, "backfill_activation", lambda *args, **kwargs: report)
 
     def _export_static(*, static_staging_dir, **_kwargs):
         (static_staging_dir / "manifest.json").write_text(

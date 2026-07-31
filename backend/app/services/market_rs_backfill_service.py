@@ -14,6 +14,7 @@ from app.models.stock import StockPrice
 from app.services.benchmark_registry_service import benchmark_registry
 from app.services.canonical_group_ranking_service import CanonicalGroupRankingService
 from app.services.market_calendar_service import MarketCalendarService
+from app.services.market_rs_activation_coverage import MarketRsActivationCoverage
 from app.services.market_rs_inputs import MarketRsInputLoader, MarketRsInputUnavailable
 from app.services.market_rs_rollout_contracts import (
     BackfillDateResult,
@@ -100,7 +101,6 @@ class MarketRsBackfillService:
         market: str,
         through_date: date,
         first_valid_date: date | None = None,
-        coverage_start_date: date | None = None,
     ) -> tuple[date, ...]:
         normalized = normalize_rollout_market(market)
         boundary = first_valid_date or self.earliest_backfillable_date(
@@ -110,8 +110,6 @@ class MarketRsBackfillService:
         )
         if boundary is None:
             return ()
-        if coverage_start_date is not None:
-            boundary = max(boundary, coverage_start_date)
         return tuple(
             session_date
             for session_date in self.calendar_service.trading_days(
@@ -129,22 +127,60 @@ class MarketRsBackfillService:
         market: str,
         through_date: date,
         start_date: date | None = None,
-        coverage_start_date: date | None = None,
-        required_dates: tuple[date, ...] | None = None,
+    ) -> BackfillReport:
+        normalized = normalize_rollout_market(market)
+        first_valid = self.earliest_backfillable_date(
+            db,
+            market=normalized,
+            through_date=through_date,
+        )
+        candidates = (
+            self.candidate_dates(
+                db,
+                market=normalized,
+                through_date=through_date,
+                first_valid_date=first_valid,
+            )
+            if first_valid is not None
+            else ()
+        )
+        return self._backfill_dates(
+            db,
+            market=normalized,
+            through_date=through_date,
+            start_date=start_date,
+            first_valid=first_valid,
+            candidates=candidates,
+        )
+
+    def backfill_activation(
+        self,
+        db: Session,
+        *,
+        coverage: MarketRsActivationCoverage,
+    ) -> BackfillReport:
+        return self._backfill_dates(
+            db,
+            market=coverage.market,
+            through_date=coverage.through_date,
+            start_date=None,
+            first_valid=coverage.start_date,
+            candidates=coverage.required_dates,
+        )
+
+    def _backfill_dates(
+        self,
+        db: Session,
+        *,
+        market: str,
+        through_date: date,
+        start_date: date | None,
+        first_valid: date | None,
+        candidates: tuple[date, ...],
     ) -> BackfillReport:
         normalized = normalize_rollout_market(market)
         groups_applicable = (
             get_market_catalog().get(normalized).capabilities.group_rankings
-        )
-        first_valid = (
-            required_dates[0]
-            if required_dates
-            else self.earliest_backfillable_date(
-                db,
-                market=normalized,
-                through_date=through_date,
-                probe_start_date=coverage_start_date,
-            )
         )
         if first_valid is None:
             return BackfillReport(
@@ -164,13 +200,6 @@ class MarketRsBackfillService:
                 ),
             )
 
-        candidates = required_dates or self.candidate_dates(
-            db,
-            market=normalized,
-            through_date=through_date,
-            first_valid_date=first_valid,
-            coverage_start_date=coverage_start_date,
-        )
         results: list[BackfillDateResult] = []
         for calculation_date in candidates:
             run = self.repository.get_completed_exact(

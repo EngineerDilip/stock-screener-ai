@@ -108,11 +108,9 @@ class MarketRsActivationExecutor:
             market=market,
             through_date=request.through_date,
         )
-        report = self.rollout_service.backfill(
+        report = self.rollout_service.backfill_activation(
             db,
-            market=market,
-            through_date=request.through_date,
-            required_dates=coverage.required_dates,
+            coverage=coverage,
         )
         if not report.ok or report.failed_count:
             raise MarketRsActivationExecutionError(
@@ -132,11 +130,9 @@ class MarketRsActivationExecutor:
         db.expire_all()
         validation = self.rollout_service.validate_activation(
             db,
-            market=market,
-            through_date=request.through_date,
+            coverage=coverage,
             feature_run_id=feature_run_id,
             static_staging_dir=staging_dir,
-            required_dates=coverage.required_dates,
         )
         if not validation.ok:
             raise MarketRsActivationExecutionError(

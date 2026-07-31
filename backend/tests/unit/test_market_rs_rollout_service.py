@@ -9,14 +9,15 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
+from app.services.market_rs_activation_coverage import MarketRsActivationCoverage
 from app.services.market_rs_inputs import MarketRsInputUnavailable
-from app.services.market_rs_static_artifact_validator import (
-    MarketRsStaticArtifactValidator,
-)
 from app.services.market_rs_rollout_service import (
     ActivationValidationReport,
     MarketRsActivationRejected,
     MarketRsRolloutService,
+)
+from app.services.market_rs_static_artifact_validator import (
+    MarketRsStaticArtifactValidator,
 )
 
 
@@ -73,25 +74,6 @@ def test_candidate_dates_start_at_first_probe_with_two_eligible_stocks():
         market="US",
         through_date=sessions[-1],
         first_valid_date=sessions[1],
-    ) == (sessions[1], sessions[2])
-
-
-def test_candidate_dates_honor_activation_coverage_start() -> None:
-    sessions = [
-        date(2026, 1, 2),
-        date(2026, 4, 1),
-        date(2026, 7, 29),
-    ]
-    calendar = MagicMock()
-    calendar.trading_days.return_value = sessions
-    service = _service(calendar=calendar)
-
-    assert service.candidate_dates(
-        MagicMock(),
-        market="US",
-        through_date=sessions[-1],
-        first_valid_date=sessions[0],
-        coverage_start_date=date(2026, 1, 23),
     ) == (sessions[1], sessions[2])
 
 
@@ -242,11 +224,14 @@ def test_activation_backfill_attempts_every_required_date() -> None:
     groups.calculate_and_store.return_value = [{"market_rs_run_id": 42}]
     service = _service(repository=repository, snapshot=snapshot, groups=groups)
 
-    report = service.backfill(
-        MagicMock(),
+    coverage = MarketRsActivationCoverage(
         market="US",
         through_date=required_dates[-1],
         required_dates=required_dates,
+    )
+    report = service.backfill_activation(
+        MagicMock(),
+        coverage=coverage,
     )
 
     assert [result.as_of_date for result in report.results] == list(required_dates)
@@ -268,13 +253,16 @@ def test_activation_validation_checks_every_required_date(
     feature_repository.get_run.side_effect = LookupError("not needed")
     service.validator.feature_run_repository_factory = lambda _db: feature_repository
 
-    validation = service.validate_activation(
-        MagicMock(),
+    coverage = MarketRsActivationCoverage(
         market="US",
         through_date=required_dates[-1],
+        required_dates=required_dates,
+    )
+    validation = service.validate_activation(
+        MagicMock(),
+        coverage=coverage,
         feature_run_id=99,
         static_staging_dir=tmp_path,
-        required_dates=required_dates,
     )
 
     assert [
@@ -503,10 +491,14 @@ def test_validation_collects_feature_and_static_errors_without_short_circuiting(
         lambda *args, **kwargs: run,
     )
 
-    validation = service.validate_activation(
-        MagicMock(),
+    coverage = MarketRsActivationCoverage(
         market="US",
         through_date=through_date,
+        required_dates=(through_date,),
+    )
+    validation = service.validate_activation(
+        MagicMock(),
+        coverage=coverage,
         feature_run_id=99,
         static_staging_dir=tmp_path / "missing-stage",
     )

@@ -12,9 +12,9 @@ from ..domain.markets import normalize_market_codes
 from ..domain.markets.catalog import get_market_catalog
 from ..models.app_settings import AppSetting
 from .bootstrap_readiness_service import (
-    BootstrapReadiness,
+    BootstrapReadiness,  # noqa: F401 - compatibility export for tests and callers
     BootstrapReadinessService,
-    MarketBootstrapReadiness,
+    MarketBootstrapReadiness,  # noqa: F401 - compatibility export
 )
 
 RUNTIME_SETTINGS_CATEGORY = "runtime"
@@ -127,7 +127,9 @@ def _ensure_bootstrap_started_at(db: Session) -> None:
 def get_runtime_preferences(db: Session) -> RuntimePreferences:
     primary_setting = _get_setting(db, PRIMARY_MARKET_KEY)
     primary_market = _normalize_supported_market(
-        primary_setting.value if primary_setting and primary_setting.value else DEFAULT_PRIMARY_MARKET
+        primary_setting.value
+        if primary_setting and primary_setting.value
+        else DEFAULT_PRIMARY_MARKET
     )
 
     enabled_setting = _get_setting(db, ENABLED_MARKETS_KEY)
@@ -168,6 +170,23 @@ def save_runtime_preferences(
     enabled_markets: list[str],
     bootstrap_state: str | None = None,
 ) -> RuntimePreferences:
+    _stage_runtime_preferences(
+        db,
+        primary_market=primary_market,
+        enabled_markets=enabled_markets,
+        bootstrap_state=bootstrap_state,
+    )
+    db.commit()
+    return get_runtime_preferences(db)
+
+
+def _stage_runtime_preferences(
+    db: Session,
+    *,
+    primary_market: str,
+    enabled_markets: list[str],
+    bootstrap_state: str | None = None,
+) -> None:
     normalized_primary = _normalize_supported_market(primary_market)
     normalized_enabled = _normalize_runtime_enabled_markets(enabled_markets)
     if normalized_primary not in normalized_enabled:
@@ -202,8 +221,6 @@ def save_runtime_preferences(
                 _ensure_bootstrap_started_at(db)
             else:
                 _write_bootstrap_started_at(db)
-    db.commit()
-    return get_runtime_preferences(db)
 
 
 def set_bootstrap_state(db: Session, bootstrap_state: str) -> RuntimePreferences:
@@ -219,7 +236,10 @@ def set_bootstrap_state(db: Session, bootstrap_state: str) -> RuntimePreferences
 def is_market_enabled(db: Session, market: str | None) -> bool:
     if market is None:
         return True
-    return _normalize_supported_market(market) in get_runtime_preferences(db).enabled_markets
+    return (
+        _normalize_supported_market(market)
+        in get_runtime_preferences(db).enabled_markets
+    )
 
 
 def is_market_enabled_now(market: str | None) -> bool:
@@ -249,9 +269,7 @@ def get_runtime_bootstrap_status(db: Session) -> RuntimeBootstrapStatus:
     readiness_active = bootstrap_state in {"running", "ready", "failed"}
     primary_result = readiness.market_results.get(prefs.primary_market)
     primary_market_ready = (
-        bool(primary_result and primary_result.ready)
-        if readiness_active
-        else False
+        bool(primary_result and primary_result.ready) if readiness_active else False
     )
     if primary_market_ready:
         bootstrap_state = "ready"

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import date
 import math
+from collections.abc import Callable
+from datetime import date
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -25,6 +26,7 @@ from app.services.feature_run_rs_identity import (
     resolve_feature_run_rs_identity,
 )
 from app.services.ibd_industry_service import IBDIndustryService
+from app.services.market_rs_activation_coverage import MarketRsActivationCoverage
 from app.services.market_rs_backfill_service import MarketRsBackfillService
 from app.services.market_rs_rollout_contracts import (
     ActivationValidationReport,
@@ -34,7 +36,6 @@ from app.services.market_rs_static_artifact_validator import (
     MarketRsStaticArtifactValidator,
 )
 from app.services.static_market_artifact_contract import STATIC_SITE_SCHEMA_VERSION
-
 
 FeatureRunRepositoryFactory = Callable[[Session], SqlFeatureRunRepository]
 
@@ -203,36 +204,15 @@ class MarketRsActivationValidator:
         self,
         db: Session,
         *,
-        market: str,
-        through_date: date,
+        coverage: MarketRsActivationCoverage,
         feature_run_id: int,
         static_staging_dir: Path,
-        coverage_start_date: date | None = None,
-        required_dates: tuple[date, ...] | None = None,
     ) -> ActivationValidationReport:
-        normalized = normalize_rollout_market(market)
+        normalized = normalize_rollout_market(coverage.market)
+        through_date = coverage.through_date
         errors: list[str] = []
-        if required_dates is not None:
-            candidates = required_dates
-            first_valid = candidates[0] if candidates else None
-        else:
-            first_valid = self.backfill_service.earliest_backfillable_date(
-                db,
-                market=normalized,
-                through_date=through_date,
-                probe_start_date=coverage_start_date,
-            )
-            candidates = (
-                self.backfill_service.candidate_dates(
-                    db,
-                    market=normalized,
-                    through_date=through_date,
-                    first_valid_date=first_valid,
-                    coverage_start_date=coverage_start_date,
-                )
-                if first_valid is not None
-                else ()
-            )
+        candidates = coverage.required_dates
+        first_valid = coverage.start_date if candidates else None
         if not candidates:
             errors.append("No required balanced Market RS candidate dates were found.")
 

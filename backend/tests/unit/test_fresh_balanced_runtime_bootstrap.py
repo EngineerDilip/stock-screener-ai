@@ -312,6 +312,12 @@ def test_fresh_bootstrap_completion_rejects_legacy_formula_pointer(
     failed_markets = []
     monkeypatch.setattr(module, "SessionLocal", lambda: _FakeSession())
     monkeypatch.setattr(
+        module, "_is_current_bootstrap_dispatch", lambda *_args, **_kwargs: True
+    )
+    monkeypatch.setattr(
+        module, "_finish_bootstrap_market", lambda *_args, **_kwargs: True
+    )
+    monkeypatch.setattr(
         "app.services.bootstrap_readiness_service.BootstrapReadinessService",
         _FakeReadinessService,
     )
@@ -333,6 +339,7 @@ def test_fresh_bootstrap_completion_rejects_legacy_formula_pointer(
     result = task.run(
         **task_kwargs,
         expected_formula_version=BALANCED_RS_FORMULA_VERSION,
+        dispatch_id="dispatch-current",
     )
 
     assert result == expected_result

@@ -43,10 +43,9 @@ def test_executor_activates_only_after_bounded_publication_gates(
     events: list[str] = []
     rollout = MagicMock()
     required_dates = (date(2026, 1, 23), date(2026, 7, 29))
-    rollout.activation_coverage.return_value = SimpleNamespace(
-        required_dates=required_dates
-    )
-    rollout.backfill.side_effect = lambda *args, **kwargs: (
+    coverage = SimpleNamespace(required_dates=required_dates)
+    rollout.activation_coverage.return_value = coverage
+    rollout.backfill_activation.side_effect = lambda *args, **kwargs: (
         events.append("backfill") or _report()
     )
     rollout.validate_activation.side_effect = lambda *args, **kwargs: (
@@ -82,16 +81,14 @@ def test_executor_activates_only_after_bounded_publication_gates(
         "activate",
         "publish_live",
     ]
-    assert rollout.backfill.call_args.kwargs["required_dates"] == required_dates
-    assert (
-        rollout.validate_activation.call_args.kwargs["required_dates"] == required_dates
-    )
+    assert rollout.backfill_activation.call_args.kwargs["coverage"] is coverage
+    assert rollout.validate_activation.call_args.kwargs["coverage"] is coverage
     db.expire_all.assert_called_once_with()
 
 
 def test_executor_stops_before_publication_when_backfill_failed(tmp_path: Path) -> None:
     rollout = MagicMock()
-    rollout.backfill.return_value = _report(ok=False, failed_count=1)
+    rollout.backfill_activation.return_value = _report(ok=False, failed_count=1)
     feature_builder = MagicMock()
     executor = MarketRsActivationExecutor(
         rollout_service=rollout,
@@ -140,4 +137,4 @@ def test_executor_rejects_invalid_staging_before_backfill(tmp_path: Path) -> Non
             ),
         )
 
-    rollout.backfill.assert_not_called()
+    rollout.backfill_activation.assert_not_called()

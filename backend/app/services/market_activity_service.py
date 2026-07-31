@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Iterable
-from datetime import datetime, timezone
 from dataclasses import replace
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -182,7 +182,11 @@ def save_runtime_bootstrap_run(
         queued_at=_utcnow_iso(),
     )
     if queue_state == "queueing":
-        return repository.begin_dispatch(db, manifest)
+        from app.services.bootstrap_dispatch_lifecycle import (
+            claim_runtime_bootstrap_dispatch,
+        )
+
+        return claim_runtime_bootstrap_dispatch(db, manifest=manifest)
     if dispatch_id is None:
         return repository.begin_dispatch(db, manifest)
     updated = repository.update_dispatch(

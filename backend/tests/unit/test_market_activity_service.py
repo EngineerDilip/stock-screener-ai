@@ -9,9 +9,8 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.database import Base
-
 import app.models.app_settings  # noqa: F401
+from app.database import Base
 
 
 @pytest.fixture
@@ -136,6 +135,38 @@ def test_runtime_activity_status_exposes_bootstrap_run_task_manifest(
     }
     hk_market = next(item for item in payload["markets"] if item["market"] == "HK")
     assert hk_market["task_id"] == "background-task-2"
+
+
+def test_queueing_manifest_atomically_claims_runtime_preferences(db_session) -> None:
+    from app.services.bootstrap_run_manifest import BootstrapAlreadyRunning
+    from app.services.market_activity_service import save_runtime_bootstrap_run
+    from app.services.runtime_preferences_service import get_runtime_preferences
+
+    save_runtime_bootstrap_run(
+        db_session,
+        primary_market="HK",
+        enabled_markets=["HK", "US"],
+        dispatch_id="dispatch-a",
+        queue_state="queueing",
+    )
+
+    prefs = get_runtime_preferences(db_session)
+    assert prefs.primary_market == "HK"
+    assert prefs.enabled_markets == ["HK", "US"]
+    assert prefs.bootstrap_state == "running"
+
+    with pytest.raises(BootstrapAlreadyRunning):
+        save_runtime_bootstrap_run(
+            db_session,
+            primary_market="JP",
+            enabled_markets=["JP"],
+            dispatch_id="dispatch-b",
+            queue_state="queueing",
+        )
+
+    unchanged = get_runtime_preferences(db_session)
+    assert unchanged.primary_market == "HK"
+    assert unchanged.enabled_markets == ["HK", "US"]
 
 
 def test_runtime_activity_status_marks_running_stage_without_real_percent_as_indeterminate(

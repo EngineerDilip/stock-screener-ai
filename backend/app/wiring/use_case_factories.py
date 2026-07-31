@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from app.wiring.runtime_context import resolve_runtime_services
+
 if TYPE_CHECKING:
     from app.use_cases.feature_store.build_daily_snapshot import (
         BuildDailyFeatureSnapshotUseCase,
@@ -26,10 +28,9 @@ def get_create_scan_use_case() -> CreateScanUseCase:
     """Build the HTTP scan use case with its mandatory freshness gate."""
     from app.services.market_data_freshness import evaluate_symbol_freshness
     from app.use_cases.scanning.create_scan import CreateScanUseCase
-    from app.wiring.bootstrap import get_task_dispatcher
 
     return CreateScanUseCase(
-        dispatcher=get_task_dispatcher(),
+        dispatcher=resolve_runtime_services().task_dispatcher(),
         freshness_evaluator=evaluate_symbol_freshness,
     )
 
@@ -37,10 +38,9 @@ def get_create_scan_use_case() -> CreateScanUseCase:
 def get_create_scan_use_case_without_freshness_gate() -> CreateScanUseCase:
     """Build the internal bootstrap scan use case without a freshness gate."""
     from app.use_cases.scanning.create_scan import CreateScanUseCase
-    from app.wiring.bootstrap import get_task_dispatcher
 
     return CreateScanUseCase(
-        dispatcher=get_task_dispatcher(),
+        dispatcher=resolve_runtime_services().task_dispatcher(),
         freshness_evaluator=None,
     )
 
@@ -89,16 +89,13 @@ def get_export_scan_results_use_case() -> ExportScanResultsUseCase:
 
 def get_run_bulk_scan_use_case() -> RunBulkScanUseCase:
     from app.use_cases.scanning.run_bulk_scan import RunBulkScanUseCase
-    from app.wiring.bootstrap import (
-        get_market_rs_reader,
-        get_scan_orchestrator,
-        get_stock_data_provider,
-    )
+
+    runtime = resolve_runtime_services()
 
     return RunBulkScanUseCase(
-        scanner=get_scan_orchestrator(),
-        data_provider=get_stock_data_provider(),
-        market_rs_reader=get_market_rs_reader(),
+        scanner=runtime.scan_orchestrator(),
+        data_provider=runtime.stock_data_provider(),
+        market_rs_reader=runtime.market_rs_reader(),
     )
 
 
@@ -127,18 +124,14 @@ def get_build_daily_snapshot_use_case() -> BuildDailyFeatureSnapshotUseCase:
     from app.use_cases.feature_store.build_daily_snapshot import (
         BuildDailyFeatureSnapshotUseCase,
     )
-    from app.wiring.bootstrap import (
-        get_market_calendar_service,
-        get_market_rs_reader,
-        get_scan_orchestrator,
-        get_stock_data_provider,
-    )
+
+    runtime = resolve_runtime_services()
 
     return BuildDailyFeatureSnapshotUseCase(
-        scanner=get_scan_orchestrator(),
-        data_provider=get_stock_data_provider(),
-        market_calendar=get_market_calendar_service(),
-        market_rs_reader=get_market_rs_reader(),
+        scanner=runtime.scan_orchestrator(),
+        data_provider=runtime.stock_data_provider(),
+        market_calendar=runtime.market_calendar_service(),
+        market_rs_reader=runtime.market_rs_reader(),
         bootstrap_coverage_evaluator=evaluate_bootstrap_cache_coverage,
     )
 

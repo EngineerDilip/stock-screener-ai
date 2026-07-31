@@ -38,6 +38,12 @@ def test_background_completion_marks_market_failure_without_global_state(
 
     monkeypatch.setattr(module, "SessionLocal", lambda: session)
     monkeypatch.setattr(
+        module, "_is_current_bootstrap_dispatch", lambda *_args, **_kwargs: True
+    )
+    monkeypatch.setattr(
+        module, "_finish_bootstrap_market", lambda *_args, **_kwargs: True
+    )
+    monkeypatch.setattr(
         "app.services.bootstrap_readiness_service.BootstrapReadinessService",
         _FakeReadinessService,
     )
@@ -57,7 +63,9 @@ def test_background_completion_marks_market_failure_without_global_state(
         lambda _db, **kwargs: failed_markets.append(kwargs),
     )
 
-    result = module.complete_background_market_bootstrap.run(market="HK")
+    result = module.complete_background_market_bootstrap.run(
+        market="HK", dispatch_id="dispatch-current"
+    )
 
     assert calls["evaluate"] == (session, ["HK"], "started-at")
     assert result == {

@@ -289,7 +289,7 @@ async def test_runtime_activity_endpoint_returns_runtime_activity_payload(client
 
 
 @pytest.mark.asyncio
-async def test_runtime_bootstrap_start_persists_preferences_and_queues_orchestration(client, monkeypatch):
+async def test_runtime_bootstrap_start_delegates_atomic_claim_to_orchestration(client, monkeypatch):
     from app.api.v1 import app_runtime as module
     from app.services import server_auth
 
@@ -350,7 +350,7 @@ async def test_runtime_bootstrap_start_persists_preferences_and_queues_orchestra
         app.dependency_overrides.pop(get_db, None)
 
     assert response.status_code == 200
-    assert saved_states == ["running"]
+    assert saved_states == []
     payload = response.json()
     assert payload["task_id"] == "task-bootstrap-123"
     assert payload["primary_market"] == "HK"
@@ -451,7 +451,7 @@ async def test_runtime_bootstrap_start_does_not_persist_running_state_when_queue
     finally:
         app.dependency_overrides.pop(get_db, None)
 
-    assert saved_states == ["running", "not_started"]
+    assert saved_states == []
 
 
 @pytest.mark.asyncio
@@ -529,7 +529,7 @@ async def test_runtime_bootstrap_start_keeps_running_state_after_partial_dispatc
         app.dependency_overrides.pop(get_db, None)
 
     assert response.status_code == 200
-    assert saved_states == ["running"]
+    assert saved_states == []
     payload = response.json()
     assert payload["task_id"] == "primary-task-123"
     assert payload["bootstrap_state"] == "running"
