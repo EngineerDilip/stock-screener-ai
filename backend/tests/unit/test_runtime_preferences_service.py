@@ -2,16 +2,52 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
+
+from app.domain.relative_strength import LEGACY_RS_FORMULA_VERSION
+
+
+@pytest.fixture(autouse=True)
+def _no_bootstrap_manifest(monkeypatch):
+    from app.services import runtime_preferences_service as module
+
+    repository = SimpleNamespace(load=lambda _db: None)
+    monkeypatch.setattr(
+        module,
+        "BootstrapRunManifestRepository",
+        lambda: repository,
+        raising=False,
+    )
+
 
 class _FakeBootstrapReadinessService:
-    def __init__(self, module, *, empty_system, market_results, calls=None):
+    def __init__(
+        self,
+        module,
+        *,
+        empty_system,
+        market_results,
+        formula_versions=None,
+        calls=None,
+    ):
         self._module = module
         self._empty_system = empty_system
         self._market_results = market_results
+        self._formula_versions = formula_versions or {}
         self.calls = calls if calls is not None else []
 
-    def evaluate(self, db, *, enabled_markets, bootstrap_started_at=None):
+    def evaluate(
+        self,
+        db,
+        *,
+        enabled_markets,
+        bootstrap_started_at=None,
+        expected_formula_versions=None,
+    ):
         self.calls.append((db, list(enabled_markets), bootstrap_started_at))
+        expectations = expected_formula_versions or {}
         return self._module.BootstrapReadiness(
             empty_system=self._empty_system,
             market_results={
@@ -19,6 +55,10 @@ class _FakeBootstrapReadinessService:
                     market=market,
                     core_ready=core_ready,
                     scan_ready=scan_ready,
+                    rs_ready=(
+                        market not in expectations
+                        or self._formula_versions.get(market) == expectations[market]
+                    ),
                 )
                 for market, core_ready, scan_ready in self._market_results
             },
@@ -50,6 +90,40 @@ def test_non_empty_resume_state_does_not_require_bootstrap(monkeypatch):
     assert status.empty_system is False
     assert status.bootstrap_required is False
     assert status.bootstrap_state == "not_started"
+
+
+def test_failed_fresh_activation_requires_pending_balanced_formula(monkeypatch):
+    from app.services import runtime_preferences_service as module
+
+    prefs = module.RuntimePreferences(
+        primary_market="US",
+        enabled_markets=["US"],
+        bootstrap_state="failed",
+    )
+    manifest = SimpleNamespace(pending_balanced_activation_markets=("US",))
+    repository = SimpleNamespace(load=lambda _db: manifest)
+    monkeypatch.setattr(module, "get_runtime_preferences", lambda _db: prefs)
+    monkeypatch.setattr(
+        module,
+        "BootstrapRunManifestRepository",
+        lambda: repository,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        module,
+        "get_bootstrap_readiness_service",
+        lambda: _FakeBootstrapReadinessService(
+            module,
+            empty_system=False,
+            market_results=[("US", True, True)],
+            formula_versions={"US": LEGACY_RS_FORMULA_VERSION},
+        ),
+    )
+
+    status = module.get_runtime_bootstrap_status(object())
+
+    assert status.bootstrap_state == "failed"
+    assert status.bootstrap_required is True
 
 
 def test_running_bootstrap_becomes_ready_when_primary_market_has_scan(monkeypatch):
@@ -257,7 +331,9 @@ def test_save_runtime_preferences_preserves_running_bootstrap_start_boundary() -
         engine.dispose()
 
 
-def test_save_runtime_preferences_resets_bootstrap_start_boundary_for_new_attempt() -> None:
+def test_save_runtime_preferences_resets_bootstrap_start_boundary_for_new_attempt() -> (
+    None
+):
     from datetime import datetime, timezone
 
     from sqlalchemy import create_engine
