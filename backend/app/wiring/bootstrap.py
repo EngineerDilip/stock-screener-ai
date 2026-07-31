@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from app.services.market_rs_inputs import MarketRsInputLoader
     from app.domain.scanning.ports import MarketRsReader
     from app.services.market_rs_snapshot_service import MarketRsSnapshotService
+    from app.services.market_rs_rollout_executor import MarketRsRolloutExecutor
     from app.services.market_rs_rollout_service import MarketRsRolloutService
     from app.services.group_rank_snapshot_coordinator import GroupRankSnapshotCoordinator
     from app.services.group_rank_snapshot_reader import GroupRankSnapshotReader
@@ -118,6 +119,7 @@ class RuntimeServices:
         self._hybrid_fundamentals_service: HybridFundamentalsService | None = None
         self._stock_data_provider: DataPrepStockDataProvider | None = None
         self._scan_orchestrator: ScanOrchestrator | None = None
+        self._market_rs_rollout_executor: MarketRsRolloutExecutor | None = None
 
     def session_factory(self) -> SessionFactory:
         return self._session_factory
@@ -363,6 +365,25 @@ class RuntimeServices:
     def market_rs_rollout_service(self) -> MarketRsRolloutService:
         return self.canonical_rs_runtime().rollout_service()
 
+    def market_rs_rollout_executor(self) -> MarketRsRolloutExecutor:
+        if self._market_rs_rollout_executor is None:
+            with self._init_lock:
+                if self._market_rs_rollout_executor is None:
+                    from app.services.market_rs_rollout_executor import (
+                        MarketRsRolloutExecutor,
+                        build_balanced_feature_snapshot,
+                        export_static_v3,
+                        publish_live_groups,
+                    )
+
+                    self._market_rs_rollout_executor = MarketRsRolloutExecutor(
+                        rollout_service=self.market_rs_rollout_service(),
+                        feature_snapshot_builder=build_balanced_feature_snapshot,
+                        static_exporter=export_static_v3,
+                        live_group_publisher=publish_live_groups,
+                    )
+        return self._market_rs_rollout_executor
+
     def market_rs_reader(self) -> MarketRsReader:
         return self.market_rs_services().reader
 
@@ -561,6 +582,7 @@ class RuntimeServices:
             self._hybrid_fundamentals_service = None
             self._stock_data_provider = None
             self._scan_orchestrator = None
+            self._market_rs_rollout_executor = None
 
 
 _runtime_services_ctx: ContextVar[RuntimeServices | None] = ContextVar(
@@ -773,6 +795,11 @@ def get_market_rs_snapshot_service() -> MarketRsSnapshotService:
 def get_market_rs_rollout_service() -> MarketRsRolloutService:
     """Return the process-scoped balanced Market RS rollout coordinator."""
     return _resolve_runtime_services().market_rs_rollout_service()
+
+
+def get_market_rs_rollout_executor() -> MarketRsRolloutExecutor:
+    """Return the process-scoped guarded Market RS rollout executor."""
+    return _resolve_runtime_services().market_rs_rollout_executor()
 
 
 def get_market_rs_reader() -> MarketRsReader:

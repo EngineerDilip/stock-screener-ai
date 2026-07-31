@@ -5,12 +5,14 @@ from __future__ import annotations
 from argparse import Namespace
 from datetime import date
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
+from app.services.market_rs_rollout_executor import (
+    MarketRsRolloutExecutionError,
+    MarketRsRolloutOutcome,
+)
 
 
 def _options(tmp_path: Path, *, activate: bool) -> Namespace:
@@ -26,18 +28,23 @@ def _options(tmp_path: Path, *, activate: bool) -> Namespace:
 def test_dry_run_prints_report_and_never_activates(monkeypatch, tmp_path):
     from app.scripts import backfill_market_rs as module
 
-    report = SimpleNamespace(ok=True, failed_count=0, to_dict=lambda: {"ok": True})
-    service = MagicMock()
-    service.backfill.return_value = report
-    monkeypatch.setattr(module, "get_market_rs_rollout_service", lambda: service)
+    executor = MagicMock()
+    executor.execute.return_value = MarketRsRolloutOutcome(
+        backfill={"ok": True},
+        activated=False,
+        market="US",
+        formula_version="balanced-percentile-v1",
+    )
+    monkeypatch.setattr(module, "get_market_rs_rollout_executor", lambda: executor)
     db = MagicMock()
     monkeypatch.setattr(module, "SessionLocal", lambda: db)
 
     result = module.execute_rollout(_options(tmp_path, activate=False))
 
     assert result == {"backfill": {"ok": True}, "activated": False}
-    service.validate_activation.assert_not_called()
-    service.activate.assert_not_called()
+    request = executor.execute.call_args.kwargs["request"]
+    assert request.activate is False
+    assert request.static_staging_dir is None
     db.close.assert_called_once_with()
 
 
@@ -56,63 +63,37 @@ def test_activate_requires_empty_non_serving_absolute_staging_directory(
         module.execute_rollout(options)
 
 
-def test_activate_stages_validates_then_atomically_switches(monkeypatch, tmp_path):
+def test_activate_delegates_once_and_preserves_outcome(monkeypatch, tmp_path):
     from app.scripts import backfill_market_rs as module
 
-    events: list[str] = []
-    report = SimpleNamespace(
-        ok=True,
-        failed_count=0,
-        to_dict=lambda: {"ok": True},
+    executor = MagicMock()
+    executor.execute.return_value = MarketRsRolloutOutcome(
+        backfill={"ok": True, "failed_count": 0},
+        activated=True,
+        market="US",
+        formula_version="balanced-percentile-v1",
+        feature_run_id=99,
+        validation={"ok": True},
+        static_staging_dir=str((tmp_path / "stage").resolve()),
     )
-    validation = SimpleNamespace(
-        ok=True,
-        errors=(),
-        to_dict=lambda: {"ok": True},
-    )
-    service = MagicMock()
-    service.backfill.side_effect = lambda *a, **k: events.append("backfill") or report
-    service.validate_activation.side_effect = (
-        lambda *a, **k: events.append("validate") or validation
-    )
-    service.activate.side_effect = lambda *a, **k: events.append("activate")
-    monkeypatch.setattr(module, "get_market_rs_rollout_service", lambda: service)
-    monkeypatch.setattr(
-        module,
-        "_build_balanced_feature_snapshot",
-        lambda **kwargs: events.append("feature") or 99,
-    )
-    monkeypatch.setattr(
-        module,
-        "_export_static_v3",
-        lambda **kwargs: events.append("static"),
-    )
-    monkeypatch.setattr(
-        module,
-        "_publish_live_groups",
-        lambda market: events.append("publish_live"),
-    )
+    monkeypatch.setattr(module, "get_market_rs_rollout_executor", lambda: executor)
     db = MagicMock()
     monkeypatch.setattr(module, "SessionLocal", lambda: db)
 
     result = module.execute_rollout(_options(tmp_path, activate=True))
 
-    assert events == [
-        "backfill",
-        "feature",
-        "static",
-        "validate",
-        "activate",
-        "publish_live",
-    ]
     assert result["activated"] is True
-    assert result["formula_version"] == BALANCED_RS_FORMULA_VERSION
+    assert result["formula_version"] == "balanced-percentile-v1"
+    executor.execute.assert_called_once()
+    request = executor.execute.call_args.kwargs["request"]
+    assert request.activate is True
+    assert request.static_staging_dir == (tmp_path / "stage").resolve()
 
 
 def test_publish_live_groups_does_not_duplicate_activation_cache_invalidation(
     monkeypatch,
 ):
-    from app.scripts import backfill_market_rs as module
+    from app.services import market_rs_rollout_executor as module
     from app.services import group_rankings_cache, ui_snapshot_service
 
     bump_epoch = MagicMock()
@@ -124,28 +105,24 @@ def test_publish_live_groups_does_not_duplicate_activation_cache_invalidation(
         publish_bootstrap,
     )
 
-    module._publish_live_groups("US")  # noqa: SLF001 - operator workflow boundary
+    module.publish_live_groups("US")
 
     bump_epoch.assert_not_called()
     publish_bootstrap.assert_called_once_with()
 
 
-def test_activate_stops_before_feature_build_when_backfill_failed(monkeypatch, tmp_path):
+def test_executor_failure_is_exposed_as_command_failure(monkeypatch, tmp_path):
     from app.scripts import backfill_market_rs as module
 
-    report = SimpleNamespace(
-        ok=False,
-        failed_count=1,
-        to_dict=lambda: {"ok": False, "failed_dates": ["2026-04-09"]},
+    executor = MagicMock()
+    executor.execute.side_effect = MarketRsRolloutExecutionError(
+        "required backfill dates failed"
     )
-    service = MagicMock()
-    service.backfill.return_value = report
-    monkeypatch.setattr(module, "get_market_rs_rollout_service", lambda: service)
-    monkeypatch.setattr(module, "SessionLocal", MagicMock())
-    feature = MagicMock()
-    monkeypatch.setattr(module, "_build_balanced_feature_snapshot", feature)
+    monkeypatch.setattr(module, "get_market_rs_rollout_executor", lambda: executor)
+    db = MagicMock()
+    monkeypatch.setattr(module, "SessionLocal", lambda: db)
 
     with pytest.raises(module.RolloutCommandFailed, match="required backfill dates failed"):
         module.execute_rollout(_options(tmp_path, activate=True))
 
-    feature.assert_not_called()
+    db.close.assert_called_once_with()
