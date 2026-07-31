@@ -6,8 +6,14 @@ from datetime import date
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
 from app.services.market_rs_inputs import MarketRsInputUnavailable
+from app.services.market_rs_rollout_executor import (
+    MarketRsRolloutExecutionError,
+    MarketRsRolloutOutcome,
+)
 
 
 def _patch_task_dependencies(monkeypatch):
@@ -144,3 +150,110 @@ def test_calculate_market_rs_snapshot_rejects_shared_market():
 
     assert result["status"] == "failed"
     assert result["reason_code"] == "invalid_market"
+
+
+def _patch_bootstrap_rollout_dependencies(monkeypatch):
+    from app.tasks import market_rs_tasks as module
+
+    db = MagicMock()
+    calendar = MagicMock()
+    calendar.last_completed_trading_day.return_value = date(2026, 7, 29)
+    executor = MagicMock()
+    started = MagicMock()
+    completed = MagicMock()
+    failed = MagicMock()
+    monkeypatch.setattr(module, "SessionLocal", lambda: db)
+    monkeypatch.setattr(module, "get_market_calendar_service", lambda: calendar)
+    monkeypatch.setattr(module, "get_market_rs_rollout_executor", lambda: executor)
+    monkeypatch.setattr(module, "mark_market_activity_started", started)
+    monkeypatch.setattr(module, "mark_market_activity_completed", completed)
+    monkeypatch.setattr(module, "mark_market_activity_failed", failed)
+    return module, db, calendar, executor, started, completed, failed
+
+
+def test_bootstrap_balanced_market_rs_requires_activated_outcome(monkeypatch):
+    (
+        module,
+        db,
+        calendar,
+        executor,
+        started,
+        completed,
+        failed,
+    ) = _patch_bootstrap_rollout_dependencies(monkeypatch)
+    executor.execute.return_value = MarketRsRolloutOutcome(
+        backfill={"failed_count": 0},
+        activated=True,
+        market="US",
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+        feature_run_id=99,
+        validation={"ok": True},
+    )
+
+    result = module.bootstrap_balanced_market_rs.run(
+        market="us",
+        activity_lifecycle="bootstrap",
+    )
+
+    assert result["status"] == "activated"
+    assert result["formula_version"] == BALANCED_RS_FORMULA_VERSION
+    assert executor.execute.call_args.kwargs["request"].activate is True
+    calendar.last_completed_trading_day.assert_called_once_with("US")
+    started.assert_called_once()
+    completed.assert_called_once()
+    failed.assert_not_called()
+    db.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        MarketRsRolloutExecutionError("static validation failed"),
+        RuntimeError("rollout returned without activation"),
+    ],
+)
+def test_bootstrap_balanced_market_rs_stops_chain_on_rollout_failure(
+    monkeypatch,
+    failure,
+):
+    module, db, _calendar, executor, _started, completed, failed = (
+        _patch_bootstrap_rollout_dependencies(monkeypatch)
+    )
+    if isinstance(failure, MarketRsRolloutExecutionError):
+        executor.execute.side_effect = failure
+    else:
+        executor.execute.return_value = MarketRsRolloutOutcome(
+            backfill={"failed_count": 0},
+            activated=False,
+            market="US",
+            formula_version=BALANCED_RS_FORMULA_VERSION,
+        )
+
+    with pytest.raises(type(failure), match=str(failure)):
+        module.bootstrap_balanced_market_rs.run(market="US")
+
+    db.rollback.assert_called_once_with()
+    completed.assert_not_called()
+    failed.assert_called_once()
+    db.close.assert_called_once_with()
+
+
+def test_bootstrap_balanced_market_rs_retries_transient_connection_failure(
+    monkeypatch,
+):
+    module, db, _calendar, executor, _started, _completed, failed = (
+        _patch_bootstrap_rollout_dependencies(monkeypatch)
+    )
+    error = ConnectionError("database unavailable")
+    executor.execute.side_effect = error
+    retry = MagicMock(side_effect=RuntimeError("retry requested"))
+    monkeypatch.setattr(module, "_retry_connection_failure", retry)
+
+    with pytest.raises(RuntimeError, match="retry requested"):
+        module.bootstrap_balanced_market_rs.run(market="US")
+
+    db.rollback.assert_called_once_with()
+    retry.assert_called_once()
+    assert retry.call_args.args[1] is error
+    failed.assert_not_called()
+    db.close.assert_called_once_with()

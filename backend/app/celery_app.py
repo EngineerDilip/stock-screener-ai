@@ -309,6 +309,7 @@ _MARKET_JOB_TASKS = (
     'app.tasks.group_rank_tasks.backfill_group_rankings_1year',
     'app.tasks.group_history_tasks.ensure_group_history',
     'app.tasks.market_rs_tasks.calculate_market_rs_snapshot',
+    'app.tasks.market_rs_tasks.bootstrap_balanced_market_rs',
     'app.interfaces.tasks.feature_store_tasks.build_daily_snapshot',
     'app.tasks.daily_market_pipeline_tasks.queue_daily_market_pipeline',
     'app.tasks.daily_market_pipeline_tasks.guard_price_refresh',
