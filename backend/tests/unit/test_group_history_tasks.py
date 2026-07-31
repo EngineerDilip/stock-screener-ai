@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
 from app.services.group_history_bootstrap_service import GroupHistoryBootstrapStatus
 
 
@@ -84,6 +85,30 @@ def test_ensure_group_history_invalidates_cache_and_publishes_us_snapshot(
     service.ensure.assert_called_once_with(db, target=target)
     module.mark_market_activity_completed.assert_called_once()
     db.close.assert_called_once()
+
+
+def test_group_history_target_uses_active_formula_pointer(monkeypatch):
+    from app.infra.db.repositories import market_rs_repo
+    from app.tasks import group_history_tasks as module
+
+    repository = Mock()
+    repository.active_formula.return_value = BALANCED_RS_FORMULA_VERSION
+    monkeypatch.setattr(
+        market_rs_repo,
+        "MarketRsRunRepository",
+        lambda: repository,
+    )
+    calendar = Mock()
+    calendar.last_completed_trading_day.return_value = date(2026, 6, 30)
+    monkeypatch.setattr(module, "get_market_calendar_service", lambda: calendar)
+    db = Mock()
+
+    target = module._resolve_current_group_history_target(db, market="us")
+
+    assert target.market == "US"
+    assert target.formula_version == BALANCED_RS_FORMULA_VERSION
+    assert target.through_date == date(2026, 6, 30)
+    repository.active_formula.assert_called_once_with(db, market="US")
 
 
 def test_strict_group_history_task_raises_when_readiness_remains_incomplete(

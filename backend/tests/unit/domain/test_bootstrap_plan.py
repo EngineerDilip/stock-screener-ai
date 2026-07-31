@@ -25,7 +25,10 @@ def test_us_bootstrap_plan_includes_us_only_industry_group_seed() -> None:
     ]
     assert plan.market_plans[0].stages[1].queue_kind == BootstrapQueueKind.MARKET_JOBS
     assert plan.market_plans[0].stages[3].queue_kind == BootstrapQueueKind.CELERY
-    assert plan.market_plans[0].stages[-1].operation == BootstrapOperation.ENSURE_GROUP_HISTORY
+    assert (
+        plan.market_plans[0].stages[-1].operation
+        == BootstrapOperation.ENSURE_GROUP_HISTORY
+    )
     assert plan.market_plans[0].stages[2].kwargs["ensure_group_history"] is True
 
 
@@ -74,7 +77,10 @@ def test_au_bootstrap_plan_refreshes_universe_before_prices_and_fundamentals() -
         "prices",
         "price_warmup",
     ]
-    assert au_plan.stages[0].operation == BootstrapOperation.REFRESH_OFFICIAL_MARKET_UNIVERSE
+    assert (
+        au_plan.stages[0].operation
+        == BootstrapOperation.REFRESH_OFFICIAL_MARKET_UNIVERSE
+    )
     assert au_plan.stages[0].kwargs["market"] == "AU"
 
 
@@ -82,3 +88,52 @@ def test_bootstrap_plan_deduplicates_primary_and_enabled_markets_in_order() -> N
     plan = build_bootstrap_plan(primary_market="HK", enabled_markets=["US", "HK", "US"])
 
     assert [market_plan.market for market_plan in plan.market_plans] == ["HK", "US"]
+
+
+def test_fresh_bootstrap_requires_balanced_activation_before_groups() -> None:
+    plan = build_bootstrap_plan(
+        primary_market="US",
+        enabled_markets=("US",),
+        balanced_activation_markets=("US",),
+    )
+    operations = [stage.operation for stage in plan.market_plans[0].stages]
+
+    assert BootstrapOperation.BOOTSTRAP_BALANCED_MARKET_RS in operations
+    assert BootstrapOperation.CALCULATE_MARKET_RS_SNAPSHOT not in operations
+    assert operations.index(
+        BootstrapOperation.BOOTSTRAP_BALANCED_MARKET_RS
+    ) < operations.index(BootstrapOperation.CALCULATE_DAILY_GROUP_RANKINGS)
+    assert operations.index(
+        BootstrapOperation.BOOTSTRAP_BALANCED_MARKET_RS
+    ) < operations.index(BootstrapOperation.BUILD_DAILY_SNAPSHOT)
+
+
+def test_nonempty_bootstrap_keeps_shadow_market_rs_stage() -> None:
+    plan = build_bootstrap_plan(
+        primary_market="US",
+        enabled_markets=("US",),
+        balanced_activation_markets=(),
+    )
+
+    operations = [stage.operation for stage in plan.market_plans[0].stages]
+    assert BootstrapOperation.CALCULATE_MARKET_RS_SNAPSHOT in operations
+    assert BootstrapOperation.BOOTSTRAP_BALANCED_MARKET_RS not in operations
+
+
+def test_bootstrap_plan_activates_only_markets_still_pending() -> None:
+    plan = build_bootstrap_plan(
+        primary_market="US",
+        enabled_markets=("US", "HK"),
+        balanced_activation_markets=("HK",),
+    )
+
+    operations_by_market = {
+        market_plan.market: [stage.operation for stage in market_plan.stages]
+        for market_plan in plan.market_plans
+    }
+    assert BootstrapOperation.CALCULATE_MARKET_RS_SNAPSHOT in operations_by_market["US"]
+    assert (
+        BootstrapOperation.BOOTSTRAP_BALANCED_MARKET_RS
+        not in operations_by_market["US"]
+    )
+    assert BootstrapOperation.BOOTSTRAP_BALANCED_MARKET_RS in operations_by_market["HK"]

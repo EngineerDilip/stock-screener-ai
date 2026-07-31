@@ -2,25 +2,39 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 import logging
+from datetime import datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from sqlalchemy.exc import DBAPIError
 
 from app.celery_app import celery_app
 from app.database import SessionLocal
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
+from app.services.market_activity_service import (
+    mark_market_activity_completed,
+    mark_market_activity_failed,
+    mark_market_activity_started,
+)
 from app.services.market_rs_inputs import MarketRsInputUnavailable
+from app.services.market_rs_rollout_executor import MarketRsActivationRequest
 from app.tasks.market_queues import normalize_market
-from app.tasks.transient_database import retry_transient_database_error
+from app.tasks.transient_database import (
+    is_transient_database_error,
+    retry_transient_database_error,
+)
 from app.wiring.bootstrap import (
     get_market_calendar_service,
+    get_market_rs_activation_executor,
     get_market_rs_snapshot_service,
 )
 
-
 logger = logging.getLogger(__name__)
-_TRANSIENT_CONNECTION_ERRORS = (ConnectionError, TimeoutError, OSError)
+_TRANSIENT_CONNECTION_ERRORS = (ConnectionError, TimeoutError)
+BOOTSTRAP_BALANCED_MARKET_RS_TASK_NAME = (
+    "app.tasks.market_rs_tasks.bootstrap_balanced_market_rs"
+)
 
 
 def _failed_result(
@@ -45,6 +59,73 @@ def _retry_connection_failure(task, exc: Exception) -> None:
     retries = getattr(getattr(task, "request", None), "retries", 0) or 0
     countdown = min(5 * (2**retries), 60)
     raise task.retry(exc=exc, countdown=countdown, max_retries=2)
+
+
+@celery_app.task(
+    bind=True,
+    name=BOOTSTRAP_BALANCED_MARKET_RS_TASK_NAME,
+    soft_time_limit=7200,
+    max_retries=2,
+)
+def bootstrap_balanced_market_rs(
+    self,
+    market: str,
+    activity_lifecycle: str | None = None,
+) -> dict[str, object]:
+    market_code = normalize_market(market)
+    lifecycle = activity_lifecycle or "bootstrap"
+    through_date = get_market_calendar_service().last_completed_trading_day(market_code)
+    db = SessionLocal()
+    task_name = getattr(self, "name", BOOTSTRAP_BALANCED_MARKET_RS_TASK_NAME)
+    task_id = getattr(getattr(self, "request", None), "id", None)
+    try:
+        mark_market_activity_started(
+            db,
+            market=market_code,
+            stage_key="market_rs",
+            lifecycle=lifecycle,
+            task_name=task_name,
+            task_id=task_id,
+            message="Preparing balanced Market RS publication",
+        )
+        with TemporaryDirectory(prefix=f"market-rs-{market_code.lower()}-") as raw_dir:
+            outcome = get_market_rs_activation_executor().execute(
+                db,
+                request=MarketRsActivationRequest(
+                    market=market_code,
+                    through_date=through_date,
+                    static_staging_dir=Path(raw_dir),
+                ),
+            )
+        mark_market_activity_completed(
+            db,
+            market=market_code,
+            stage_key="market_rs",
+            lifecycle=lifecycle,
+            task_name=task_name,
+            task_id=task_id,
+            message="Balanced Market RS activated",
+        )
+        return {"status": "activated", **outcome.to_dict()}
+    except Exception as exc:
+        db.rollback()
+        if isinstance(exc, _TRANSIENT_CONNECTION_ERRORS) or (
+            is_transient_database_error(exc)
+        ):
+            _retry_connection_failure(self, exc)
+            raise AssertionError("unreachable") from exc
+        mark_market_activity_failed(
+            db,
+            market=market_code,
+            stage_key="market_rs",
+            lifecycle=lifecycle,
+            task_name=task_name,
+            task_id=task_id,
+            message=f"Balanced Market RS activation failed: {exc}",
+        )
+        raise
+    finally:
+        db.close()
 
 
 @celery_app.task(
@@ -156,7 +237,7 @@ def calculate_market_rs_snapshot(
         )
     except _TRANSIENT_CONNECTION_ERRORS as exc:
         _retry_connection_failure(self, exc)
-        raise AssertionError("unreachable")
+        raise AssertionError("unreachable") from exc
     except DBAPIError as exc:
         retry_transient_database_error(
             self,

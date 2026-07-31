@@ -260,6 +260,43 @@ def test_rrg_validation_accepts_market_where_rrg_is_not_enabled(
     assert errors == []
 
 
+def test_rrg_validation_rejects_insufficient_history_for_enabled_market(
+    tmp_path,
+    monkeypatch,
+):
+    class _UnavailableSource:
+        def __init__(self, **_kwargs):
+            pass
+
+        def build(self, **_kwargs):
+            raise StaticGroupsRRGUnavailableError(
+                section="US rrg",
+                reason_code=StaticGroupsRRGUnavailableReason.INSUFFICIENT_HISTORY,
+                reason="Only 11 usable weeks are available.",
+            )
+
+    monkeypatch.setattr(
+        "app.services.market_rs_static_artifact_validator."
+        "StaticGroupsRRGDatabasePayloadSource",
+        _UnavailableSource,
+    )
+    errors: list[str] = []
+
+    status = MarketRsStaticArtifactValidator()._validate_rrg(
+        MagicMock(),
+        market="US",
+        through_date=date(2026, 4, 10),
+        market_dir=tmp_path,
+        errors=errors,
+    )
+
+    assert status == "insufficient_balanced_history"
+    assert errors == [
+        "Balanced RRG history is insufficient for guarded activation: "
+        "Only 11 usable weeks are available."
+    ]
+
+
 def test_validate_accepts_unavailable_groups_for_group_less_market(
     tmp_path,
     monkeypatch,

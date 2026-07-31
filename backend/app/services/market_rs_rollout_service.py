@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path
-from typing import Callable
 
 from sqlalchemy.orm import Session
 
@@ -12,6 +12,7 @@ from app.infra.db.repositories.feature_run_repo import SqlFeatureRunRepository
 from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
 from app.services.canonical_group_ranking_service import CanonicalGroupRankingService
 from app.services.market_calendar_service import MarketCalendarService
+from app.services.market_rs_activation_coverage import MarketRsActivationCoverage
 from app.services.market_rs_activation_validator import (
     MarketRsActivationValidator,
 )
@@ -25,7 +26,6 @@ from app.services.market_rs_rollout_contracts import (
     MarketRsActivationRejected,
 )
 from app.services.market_rs_snapshot_service import MarketRsSnapshotService
-
 
 FeatureRunRepositoryFactory = Callable[[Session], SqlFeatureRunRepository]
 
@@ -43,9 +43,8 @@ class MarketRsRolloutService:
         canonical_group_service: CanonicalGroupRankingService,
         feature_run_repository_factory: FeatureRunRepositoryFactory | None = None,
     ) -> None:
-        feature_factory = (
-            feature_run_repository_factory or SqlFeatureRunRepository
-        )
+        feature_factory = feature_run_repository_factory or SqlFeatureRunRepository
+        self.calendar_service = calendar_service
         self.backfill_service = MarketRsBackfillService(
             calendar_service=calendar_service,
             input_loader=input_loader,
@@ -70,11 +69,13 @@ class MarketRsRolloutService:
         *,
         market: str,
         through_date: date,
+        probe_start_date: date | None = None,
     ) -> date | None:
         return self.backfill_service.earliest_backfillable_date(
             db,
             market=market,
             through_date=through_date,
+            probe_start_date=probe_start_date,
         )
 
     def candidate_dates(
@@ -107,19 +108,37 @@ class MarketRsRolloutService:
             start_date=start_date,
         )
 
+    def backfill_activation(
+        self,
+        db: Session,
+        *,
+        coverage: MarketRsActivationCoverage,
+    ) -> BackfillReport:
+        return self.backfill_service.backfill_activation(db, coverage=coverage)
+
+    def activation_coverage(
+        self,
+        *,
+        market: str,
+        through_date: date,
+    ) -> MarketRsActivationCoverage:
+        return MarketRsActivationCoverage.build(
+            calendar_service=self.calendar_service,
+            market=market,
+            through_date=through_date,
+        )
+
     def validate_activation(
         self,
         db: Session,
         *,
-        market: str,
-        through_date: date,
+        coverage: MarketRsActivationCoverage,
         feature_run_id: int,
         static_staging_dir: Path,
     ) -> ActivationValidationReport:
         return self.validator.validate(
             db,
-            market=market,
-            through_date=through_date,
+            coverage=coverage,
             feature_run_id=feature_run_id,
             static_staging_dir=static_staging_dir,
         )

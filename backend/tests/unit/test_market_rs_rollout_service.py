@@ -7,16 +7,19 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from celery.exceptions import SoftTimeLimitExceeded
+from sqlalchemy.exc import OperationalError
 
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
+from app.services.market_rs_activation_coverage import MarketRsActivationCoverage
 from app.services.market_rs_inputs import MarketRsInputUnavailable
-from app.services.market_rs_static_artifact_validator import (
-    MarketRsStaticArtifactValidator,
-)
 from app.services.market_rs_rollout_service import (
     ActivationValidationReport,
     MarketRsActivationRejected,
     MarketRsRolloutService,
+)
+from app.services.market_rs_static_artifact_validator import (
+    MarketRsStaticArtifactValidator,
 )
 
 
@@ -60,17 +63,50 @@ def test_candidate_dates_start_at_first_probe_with_two_eligible_stocks():
         lambda _db, _market: sessions[0]
     )
 
-    assert service.earliest_backfillable_date(
-        MagicMock(),
-        market="us",
-        through_date=sessions[-1],
-    ) == sessions[1]
+    assert (
+        service.earliest_backfillable_date(
+            MagicMock(),
+            market="us",
+            through_date=sessions[-1],
+        )
+        == sessions[1]
+    )
     assert service.candidate_dates(
         MagicMock(),
         market="US",
         through_date=sessions[-1],
         first_valid_date=sessions[1],
     ) == (sessions[1], sessions[2])
+
+
+def test_earliest_backfillable_probe_starts_at_activation_coverage() -> None:
+    coverage_start = date(2026, 1, 23)
+    through_date = date(2026, 7, 29)
+    calendar = MagicMock()
+    calendar.trading_days.return_value = [coverage_start, through_date]
+    loader = MagicMock()
+    loader.load.return_value = SimpleNamespace(
+        excess_returns_by_symbol={"AAA": {}, "BBB": {}},
+    )
+    service = _service(calendar=calendar, loader=loader)
+    service.backfill_service._earliest_available_price_date = (  # type: ignore[method-assign]
+        lambda _db, _market: date(2024, 1, 2)
+    )
+
+    assert (
+        service.earliest_backfillable_date(
+            MagicMock(),
+            market="US",
+            through_date=through_date,
+            probe_start_date=coverage_start,
+        )
+        == coverage_start
+    )
+    calendar.trading_days.assert_called_once_with(
+        "US",
+        coverage_start,
+        through_date,
+    )
 
 
 def test_earliest_backfillable_date_does_not_hide_unexpected_loader_errors():
@@ -127,7 +163,9 @@ def test_backfill_resumes_completed_stock_run_and_reports_all_failures(monkeypat
     assert report.latest_run_id == 12
     assert [item.as_of_date for item in report.results] == list(dates)
     assert report.results[1].reason_code == "group_calculation_failed"
-    assert [call.kwargs["as_of_date"] for call in snapshot.calculate.call_args_list] == [
+    assert [
+        call.kwargs["as_of_date"] for call in snapshot.calculate.call_args_list
+    ] == [
         dates[0],
         dates[1],
         dates[2],
@@ -168,6 +206,112 @@ def test_backfill_labels_snapshot_rebuild_failure_as_stock_calculation(monkeypat
 
     assert report.results[0].reason_code == "stock_calculation_runtime_error"
     groups.calculate_and_store.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(SoftTimeLimitExceeded(), id="soft-timeout"),
+        pytest.param(
+            OperationalError(
+                "select 1",
+                {},
+                Exception("database system is not yet accepting connections"),
+            ),
+            id="transient-database-error",
+        ),
+    ],
+)
+def test_backfill_propagates_infrastructure_interruption(monkeypatch, error):
+    calculation_date = date(2026, 4, 10)
+    repository = MagicMock()
+    repository.get_completed_exact.return_value = None
+    snapshot = MagicMock()
+    snapshot.calculate.side_effect = error
+    service = _service(repository=repository, snapshot=snapshot)
+    monkeypatch.setattr(
+        service.backfill_service,
+        "earliest_backfillable_date",
+        lambda *a, **k: calculation_date,
+    )
+    monkeypatch.setattr(
+        service.backfill_service,
+        "candidate_dates",
+        lambda *a, **k: (calculation_date,),
+    )
+    db = MagicMock()
+
+    with pytest.raises(type(error)) as raised:
+        service.backfill(db, market="US", through_date=calculation_date)
+
+    assert raised.value is error
+    db.rollback.assert_called_once_with()
+
+
+def test_activation_backfill_attempts_every_required_date() -> None:
+    required_dates = (date(2026, 1, 23), date(2026, 7, 29))
+    latest_run = SimpleNamespace(id=42, eligible_symbol_count=2)
+    repository = MagicMock()
+    repository.get_completed_exact.return_value = None
+    snapshot = MagicMock()
+    snapshot.calculate.side_effect = [
+        MarketRsInputUnavailable(
+            "missing anchors",
+            reason_code="session_anchors_unavailable",
+            diagnostics={},
+        ),
+        latest_run,
+    ]
+    groups = MagicMock()
+    groups.calculate_and_store.return_value = [{"market_rs_run_id": 42}]
+    service = _service(repository=repository, snapshot=snapshot, groups=groups)
+
+    coverage = MarketRsActivationCoverage(
+        market="US",
+        through_date=required_dates[-1],
+        required_dates=required_dates,
+    )
+    report = service.backfill_activation(
+        MagicMock(),
+        coverage=coverage,
+    )
+
+    assert [result.as_of_date for result in report.results] == list(required_dates)
+    assert report.failed_count == 1
+    assert report.results[0].reason_code == "session_anchors_unavailable"
+    assert [
+        call.kwargs["as_of_date"] for call in snapshot.calculate.call_args_list
+    ] == list(required_dates)
+
+
+def test_activation_validation_checks_every_required_date(
+    monkeypatch, tmp_path
+) -> None:
+    required_dates = (date(2026, 1, 23), date(2026, 7, 29))
+    service = _service()
+    validate_run = MagicMock(side_effect=[None, SimpleNamespace(id=42)])
+    monkeypatch.setattr(service.validator, "_validate_run_and_groups", validate_run)
+    feature_repository = MagicMock()
+    feature_repository.get_run.side_effect = LookupError("not needed")
+    service.validator.feature_run_repository_factory = lambda _db: feature_repository
+
+    coverage = MarketRsActivationCoverage(
+        market="US",
+        through_date=required_dates[-1],
+        required_dates=required_dates,
+    )
+    validation = service.validate_activation(
+        MagicMock(),
+        coverage=coverage,
+        feature_run_id=99,
+        static_staging_dir=tmp_path,
+    )
+
+    assert [
+        call.kwargs["calculation_date"] for call in validate_run.call_args_list
+    ] == list(required_dates)
+    assert validation.first_valid_date == required_dates[0]
+    assert validation.candidate_count == 2
 
 
 def test_backfill_completes_without_groups_when_market_lacks_capability(monkeypatch):
@@ -389,18 +533,26 @@ def test_validation_collects_feature_and_static_errors_without_short_circuiting(
         lambda *args, **kwargs: run,
     )
 
-    validation = service.validate_activation(
-        MagicMock(),
+    coverage = MarketRsActivationCoverage(
         market="US",
         through_date=through_date,
+        required_dates=(through_date,),
+    )
+    validation = service.validate_activation(
+        MagicMock(),
+        coverage=coverage,
         feature_run_id=99,
         static_staging_dir=tmp_path / "missing-stage",
     )
 
     assert validation.ok is False
-    assert any("not published for the activation date" in error for error in validation.errors)
+    assert any(
+        "not published for the activation date" in error for error in validation.errors
+    )
     assert any("rs_formula_version" in error for error in validation.errors)
-    assert any("Missing staged static-site-v3 manifest" in error for error in validation.errors)
+    assert any(
+        "Missing staged static-site-v3 manifest" in error for error in validation.errors
+    )
 
 
 def test_successful_activation_revalidates_then_commits_both_pointers(
@@ -428,8 +580,8 @@ def test_successful_activation_revalidates_then_commits_both_pointers(
             "rs_universe_size": 2,
         },
     )
-    feature_repository.repoint_published.side_effect = (
-        lambda *a, **k: events.append("feature")
+    feature_repository.repoint_published.side_effect = lambda *a, **k: events.append(
+        "feature"
     )
     service = _service(
         repository=repository,

@@ -7,12 +7,13 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
+from ...config import settings
+from ...database import get_db
 from ...domain.markets.catalog import get_market_catalog
 from ...domain.scanning.defaults import get_default_scan_profile
-from ...database import get_db
 from ...schemas.app_runtime import (
-    AppCapabilitiesResponse,
     AppAuthStatusResponse,
+    AppCapabilitiesResponse,
     RuntimeActivityResponse,
     RuntimeBootstrapRequest,
     RuntimeBootstrapStartResponse,
@@ -20,16 +21,24 @@ from ...schemas.app_runtime import (
     RuntimeMarketsUpdateRequest,
     ScanDefaultsResponse,
 )
-from ...config import settings
-from ...services.server_auth import get_server_auth_status, require_server_session
+from ...services.bootstrap_run_manifest import (
+    CURRENT_BOOTSTRAP_OWNERSHIP_VERSION,
+    BootstrapAlreadyRunning,
+    BootstrapRunManifestRepository,
+)
+from ...services.market_activity_service import get_runtime_activity_status
+from ...services.runtime_activity_contract import bootstrap_stage_metadata
 from ...services.runtime_preferences_service import (
+    RuntimeBootstrapStatus,
     get_runtime_bootstrap_status,
     save_runtime_preferences,
 )
 from ...services.runtime_universe_options import build_runtime_universe_options_payload
-from ...services.market_activity_service import get_runtime_activity_status
-from ...services.runtime_activity_contract import bootstrap_stage_metadata
-from ...tasks.runtime_bootstrap_tasks import BootstrapDispatchError, queue_local_runtime_bootstrap
+from ...services.server_auth import get_server_auth_status, require_server_session
+from ...tasks.runtime_bootstrap_tasks import (
+    BootstrapDispatchError,
+    queue_local_runtime_bootstrap,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -46,6 +55,38 @@ def _bootstrap_status_payload(status: object) -> dict[str, object]:
         "supported_markets": list(getattr(status, "supported_markets")),
         "bootstrap_stages": bootstrap_stage_metadata(),
     }
+
+
+def _refresh_runtime_bootstrap_status(db: Session) -> RuntimeBootstrapStatus:
+    """Discard request-session identities changed by bootstrap orchestration."""
+    db.expire_all()
+    return get_runtime_bootstrap_status(db)
+
+
+def _has_unfenced_running_bootstrap(
+    db: Session,
+    status: RuntimeBootstrapStatus,
+) -> bool:
+    if status.bootstrap_state != "running":
+        return False
+    manifest = BootstrapRunManifestRepository().load(db)
+    return bool(
+        manifest is None
+        or manifest.ownership_version < CURRENT_BOOTSTRAP_OWNERSHIP_VERSION
+    )
+
+
+def _bootstrap_already_running_error(status: RuntimeBootstrapStatus) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "bootstrap_already_running",
+            "message": "Local bootstrap is already running.",
+            "bootstrap_state": status.bootstrap_state,
+            "primary_market": status.primary_market,
+            "enabled_markets": status.enabled_markets,
+        },
+    )
 
 
 @router.get("/app-capabilities", response_model=AppCapabilitiesResponse)
@@ -107,36 +148,24 @@ async def start_runtime_bootstrap(
     db: Session = Depends(get_db),
 ) -> RuntimeBootstrapStartResponse:
     """Persist local bootstrap choices and queue the primary-market sync."""
-    current_status = get_runtime_bootstrap_status(db)
-    if current_status.bootstrap_state == "running":
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "bootstrap_already_running",
-                "message": "Local bootstrap is already running.",
-                "bootstrap_state": current_status.bootstrap_state,
-                "primary_market": current_status.primary_market,
-                "enabled_markets": current_status.enabled_markets,
-            },
-        )
-    prefs = save_runtime_preferences(
-        db,
-        primary_market=request.primary_market,
-        enabled_markets=request.enabled_markets,
-        bootstrap_state="running",
-    )
+    previous_status = get_runtime_bootstrap_status(db)
+    if _has_unfenced_running_bootstrap(db, previous_status):
+        raise _bootstrap_already_running_error(previous_status)
     try:
         task_id = queue_local_runtime_bootstrap(
-            primary_market=prefs.primary_market,
-            enabled_markets=prefs.enabled_markets,
+            primary_market=request.primary_market,
+            enabled_markets=request.enabled_markets,
         )
+    except BootstrapAlreadyRunning:
+        status = _refresh_runtime_bootstrap_status(db)
+        raise _bootstrap_already_running_error(status) from None
     except BootstrapDispatchError as exc:
         if not exc.dispatched_any:
             save_runtime_preferences(
                 db,
-                primary_market=prefs.primary_market,
-                enabled_markets=prefs.enabled_markets,
-                bootstrap_state=current_status.bootstrap_state,
+                primary_market=request.primary_market,
+                enabled_markets=request.enabled_markets,
+                bootstrap_state=previous_status.bootstrap_state,
             )
             raise
         logger.warning(
@@ -149,21 +178,13 @@ async def start_runtime_bootstrap(
             },
             exc_info=True,
         )
-        status = get_runtime_bootstrap_status(db)
+        status = _refresh_runtime_bootstrap_status(db)
         payload = {
             **_bootstrap_status_payload(status),
             "task_id": exc.primary_task_id,
         }
         return RuntimeBootstrapStartResponse(**payload)
-    except Exception:
-        save_runtime_preferences(
-            db,
-            primary_market=prefs.primary_market,
-            enabled_markets=prefs.enabled_markets,
-            bootstrap_state=current_status.bootstrap_state,
-        )
-        raise
-    status = get_runtime_bootstrap_status(db)
+    status = _refresh_runtime_bootstrap_status(db)
     payload = {
         **_bootstrap_status_payload(status),
         "task_id": task_id,

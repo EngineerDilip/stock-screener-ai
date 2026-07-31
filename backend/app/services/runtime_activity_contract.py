@@ -6,32 +6,37 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 ACTIVE_ACTIVITY_STATUSES = frozenset({"queued", "running"})
-ACTIVE_PROGRESS_STATUSES = frozenset({
-    "queued",
-    "running",
-    "reserved",
-    "waiting",
-    "stale",
-    "stuck",
-})
-PERSISTED_RUNTIME_ACTIVITY_FIELDS = frozenset({
-    "market",
-    "lifecycle",
-    "stage_key",
-    "status",
-    "percent",
-    "current",
-    "total",
-    "message",
-    "task_name",
-    "task_id",
-    "updated_at",
-})
+ACTIVE_PROGRESS_STATUSES = frozenset(
+    {
+        "queued",
+        "running",
+        "reserved",
+        "waiting",
+        "stale",
+        "stuck",
+    }
+)
+PERSISTED_RUNTIME_ACTIVITY_FIELDS = frozenset(
+    {
+        "market",
+        "lifecycle",
+        "stage_key",
+        "status",
+        "percent",
+        "current",
+        "total",
+        "message",
+        "task_name",
+        "task_id",
+        "updated_at",
+    }
+)
 
 RUNTIME_STAGE_SEQUENCE = (
     "universe",
     "prices",
     "fundamentals",
+    "market_rs",
     "breadth",
     "groups",
     "scan",
@@ -41,6 +46,7 @@ STAGE_LABELS = {
     "universe": "Universe Refresh",
     "prices": "Price Refresh",
     "fundamentals": "Fundamentals Refresh",
+    "market_rs": "Market RS",
     "breadth": "Breadth Calculation",
     "groups": "Group Rankings",
     "snapshot": "Feature Snapshot",
@@ -51,6 +57,7 @@ DEFAULT_LIFECYCLE_BY_STAGE = {
     "universe": "weekly_refresh",
     "prices": "daily_refresh",
     "fundamentals": "weekly_refresh",
+    "market_rs": "daily_refresh",
     "breadth": "daily_refresh",
     "groups": "daily_refresh",
     "snapshot": "daily_refresh",
@@ -229,9 +236,7 @@ class PersistedRuntimeActivity:
             current=payload.get("current"),
             total=payload.get("total"),
             message=(
-                str(payload["message"])
-                if payload.get("message") is not None
-                else None
+                str(payload["message"]) if payload.get("message") is not None else None
             ),
             task_name=payload.get("task_name"),
             task_id=payload.get("task_id"),

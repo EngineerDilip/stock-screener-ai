@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
@@ -15,6 +16,8 @@ from ..models.app_settings import AppSetting
 BOOTSTRAP_RUN_KEY = "runtime.activity.bootstrap_run"
 RUNTIME_ACTIVITY_CATEGORY = "runtime_activity"
 BOOTSTRAP_RUN_DESCRIPTION = "Latest local runtime bootstrap run task manifest."
+BOOTSTRAP_DISPATCH_LEASE = timedelta(hours=24)
+CURRENT_BOOTSTRAP_OWNERSHIP_VERSION = 1
 
 
 class BootstrapQueueState(str, Enum):
@@ -22,9 +25,11 @@ class BootstrapQueueState(str, Enum):
     PARTIAL = "partial"
     QUEUED = "queued"
     DISPATCH_FAILED = "dispatch_failed"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
     @classmethod
-    def parse(cls, value: "BootstrapQueueState | str") -> "BootstrapQueueState":
+    def parse(cls, value: BootstrapQueueState | str) -> BootstrapQueueState:
         if isinstance(value, cls):
             return value
         try:
@@ -33,14 +38,34 @@ class BootstrapQueueState(str, Enum):
             raise ValueError(f"invalid bootstrap queue_state: {value}") from exc
 
 
+class BootstrapMarketOutcome(str, Enum):
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class StaleBootstrapDispatch(RuntimeError):
+    pass
+
+
+class BootstrapAlreadyRunning(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class BootstrapRunManifest:
     primary_market: str
     enabled_markets: tuple[str, ...]
+    dispatch_id: str | None = None
+    ownership_version: int = CURRENT_BOOTSTRAP_OWNERSHIP_VERSION
+    fresh_install: bool = False
+    pending_balanced_activation_markets: tuple[str, ...] = ()
     primary_task_id: str | None = None
     market_task_ids: Mapping[str, str | None] = field(default_factory=dict)
+    completed_markets: tuple[str, ...] = ()
+    failed_markets: tuple[str, ...] = ()
     queue_state: BootstrapQueueState | str = BootstrapQueueState.QUEUED
     queued_at: str | None = None
+    ownership_expires_at: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "primary_market", str(self.primary_market).upper())
@@ -48,6 +73,23 @@ class BootstrapRunManifest:
             self,
             "enabled_markets",
             tuple(str(market).upper() for market in self.enabled_markets),
+        )
+        pending = tuple(
+            dict.fromkeys(
+                str(market).upper()
+                for market in self.pending_balanced_activation_markets
+            )
+        )
+        unknown_pending = set(pending) - set(self.enabled_markets)
+        if unknown_pending:
+            raise ValueError(
+                "pending balanced activation markets must be enabled: "
+                + ", ".join(sorted(unknown_pending))
+            )
+        object.__setattr__(
+            self,
+            "pending_balanced_activation_markets",
+            pending,
         )
         object.__setattr__(
             self,
@@ -57,25 +99,78 @@ class BootstrapRunManifest:
                 for market, task_id in self.market_task_ids.items()
             },
         )
-        object.__setattr__(self, "queue_state", BootstrapQueueState.parse(self.queue_state))
+        object.__setattr__(
+            self,
+            "completed_markets",
+            tuple(
+                dict.fromkeys(str(market).upper() for market in self.completed_markets)
+            ),
+        )
+        object.__setattr__(
+            self,
+            "failed_markets",
+            tuple(dict.fromkeys(str(market).upper() for market in self.failed_markets)),
+        )
+        enabled = set(self.enabled_markets)
+        completed = set(self.completed_markets)
+        failed = set(self.failed_markets)
+        unknown_terminal = (completed | failed) - enabled
+        if unknown_terminal:
+            raise ValueError(
+                "terminal bootstrap markets must be enabled: "
+                + ", ".join(sorted(unknown_terminal))
+            )
+        conflicting = completed & failed
+        if conflicting:
+            raise ValueError(
+                "bootstrap markets cannot be both completed and failed: "
+                + ", ".join(sorted(conflicting))
+            )
+        object.__setattr__(
+            self, "queue_state", BootstrapQueueState.parse(self.queue_state)
+        )
 
     @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> "BootstrapRunManifest":
+    def from_payload(cls, payload: Mapping[str, Any]) -> BootstrapRunManifest:
+        enabled_markets = tuple(payload.get("enabled_markets") or ())
+        fresh_install = payload.get("fresh_install") is True
+        pending_markets = (
+            tuple(payload.get("pending_balanced_activation_markets") or ())
+            if "pending_balanced_activation_markets" in payload
+            else enabled_markets
+            if fresh_install
+            else ()
+        )
         return cls(
             primary_market=str(payload["primary_market"]),
-            enabled_markets=tuple(payload.get("enabled_markets") or ()),
+            enabled_markets=enabled_markets,
+            dispatch_id=(
+                str(payload["dispatch_id"])
+                if payload.get("dispatch_id") is not None
+                else None
+            ),
+            ownership_version=int(payload.get("ownership_version") or 0),
+            fresh_install=fresh_install,
+            pending_balanced_activation_markets=pending_markets,
             primary_task_id=(
                 str(payload["primary_task_id"])
                 if payload.get("primary_task_id") is not None
                 else None
             ),
             market_task_ids=dict(payload.get("market_task_ids") or {}),
+            completed_markets=tuple(payload.get("completed_markets") or ()),
+            failed_markets=tuple(payload.get("failed_markets") or ()),
             queue_state=BootstrapQueueState.parse(
                 payload.get("queue_state") or BootstrapQueueState.QUEUED
             ),
             queued_at=(
                 str(payload["queued_at"])
                 if payload.get("queued_at") is not None
+                else None
+            ),
+            ownership_expires_at=(
+                str(payload["ownership_expires_at"])
+                if payload.get("ownership_expires_at") is not None
                 else None
             ),
         )
@@ -86,36 +181,168 @@ class BootstrapRunManifest:
         *,
         primary_market: str,
         enabled_markets: Iterable[str],
+        dispatch_id: str | None = None,
+        fresh_install: bool = False,
+        pending_balanced_activation_markets: Iterable[str] | None = None,
         primary_task_id: str | None = None,
         market_task_ids: Mapping[str, str | None] | None = None,
+        completed_markets: Iterable[str] = (),
+        failed_markets: Iterable[str] = (),
         queue_state: BootstrapQueueState | str = BootstrapQueueState.QUEUED,
         queued_at: str | None = None,
-    ) -> "BootstrapRunManifest":
+        ownership_expires_at: str | None = None,
+    ) -> BootstrapRunManifest:
+        normalized_enabled = tuple(enabled_markets)
+        pending_markets = (
+            tuple(pending_balanced_activation_markets)
+            if pending_balanced_activation_markets is not None
+            else normalized_enabled
+            if fresh_install
+            else ()
+        )
         return cls(
             primary_market=primary_market,
-            enabled_markets=tuple(enabled_markets),
+            enabled_markets=normalized_enabled,
+            dispatch_id=dispatch_id,
+            fresh_install=fresh_install,
+            pending_balanced_activation_markets=pending_markets,
             primary_task_id=primary_task_id,
             market_task_ids=dict(market_task_ids or {}),
+            completed_markets=tuple(completed_markets),
+            failed_markets=tuple(failed_markets),
             queue_state=queue_state,
             queued_at=queued_at,
+            ownership_expires_at=ownership_expires_at,
         )
 
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "primary_market": self.primary_market,
             "enabled_markets": list(self.enabled_markets),
+            "dispatch_id": self.dispatch_id,
+            "ownership_version": self.ownership_version,
+            "fresh_install": self.fresh_install,
+            "pending_balanced_activation_markets": list(
+                self.pending_balanced_activation_markets
+            ),
             "primary_task_id": self.primary_task_id,
             "market_task_ids": dict(self.market_task_ids),
+            "completed_markets": list(self.completed_markets),
+            "failed_markets": list(self.failed_markets),
             "queue_state": self.queue_state.value,
         }
         if self.queued_at is not None:
             payload["queued_at"] = self.queued_at
+        if self.ownership_expires_at is not None:
+            payload["ownership_expires_at"] = self.ownership_expires_at
         return payload
+
+    def with_renewed_ownership(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> BootstrapRunManifest:
+        current_time = now or datetime.now(timezone.utc)
+        return replace(
+            self,
+            ownership_expires_at=(current_time + BOOTSTRAP_DISPATCH_LEASE).isoformat(),
+        )
+
+    def has_active_ownership(self, *, now: datetime | None = None) -> bool:
+        if self.queue_state in {
+            BootstrapQueueState.COMPLETED,
+            BootstrapQueueState.FAILED,
+        }:
+            return False
+        if self.ownership_version < CURRENT_BOOTSTRAP_OWNERSHIP_VERSION:
+            return False
+        raw_deadline = self.ownership_expires_at
+        if raw_deadline is None and self.queued_at is not None:
+            try:
+                queued_at = datetime.fromisoformat(self.queued_at)
+            except ValueError:
+                queued_at = None
+            if queued_at is not None:
+                raw_deadline = (queued_at + BOOTSTRAP_DISPATCH_LEASE).isoformat()
+        if raw_deadline is None:
+            return False
+        try:
+            deadline = datetime.fromisoformat(raw_deadline)
+        except ValueError:
+            return False
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=timezone.utc)
+        return deadline > (now or datetime.now(timezone.utc))
+
+    def reconcile_terminal_state(self) -> BootstrapRunManifest:
+        if self.queue_state in {
+            BootstrapQueueState.PARTIAL,
+            BootstrapQueueState.QUEUED,
+        }:
+            expected = set(self.enabled_markets)
+        elif self.queue_state == BootstrapQueueState.DISPATCH_FAILED:
+            expected = {
+                market
+                for market, task_id in self.market_task_ids.items()
+                if task_id is not None
+            }
+        else:
+            return self
+        terminal = set(self.completed_markets) | set(self.failed_markets)
+        if not expected or not expected <= terminal:
+            return self
+        terminal_state = (
+            BootstrapQueueState.FAILED
+            if self.failed_markets
+            or self.queue_state == BootstrapQueueState.DISPATCH_FAILED
+            else BootstrapQueueState.COMPLETED
+        )
+        return replace(self, queue_state=terminal_state)
+
+    def finish_market(
+        self,
+        *,
+        market: str,
+        succeeded: bool,
+        balanced_activation_completed: bool = False,
+    ) -> BootstrapRunManifest:
+        normalized = str(market).upper()
+        if normalized not in self.enabled_markets:
+            raise ValueError(
+                f"Bootstrap completion requires an enabled market: {normalized}."
+            )
+        if self.market_outcome(normalized) is not None:
+            return self
+        completed = self.completed_markets
+        failed = self.failed_markets
+        if succeeded:
+            completed = tuple(dict.fromkeys((*completed, normalized)))
+        else:
+            failed = tuple(dict.fromkeys((*failed, normalized)))
+        pending = self.pending_balanced_activation_markets
+        if balanced_activation_completed:
+            pending = tuple(item for item in pending if item != normalized)
+        return replace(
+            self,
+            completed_markets=completed,
+            failed_markets=failed,
+            pending_balanced_activation_markets=pending,
+        ).reconcile_terminal_state()
+
+    def market_outcome(self, market: str) -> BootstrapMarketOutcome | None:
+        normalized = str(market).upper()
+        if normalized in self.completed_markets:
+            return BootstrapMarketOutcome.COMPLETED
+        if normalized in self.failed_markets:
+            return BootstrapMarketOutcome.FAILED
+        return None
 
 
 class BootstrapRunManifestRepository:
     def load(self, db: Session) -> BootstrapRunManifest | None:
-        setting = db.query(AppSetting).filter(AppSetting.key == BOOTSTRAP_RUN_KEY).first()
+        setting = (
+            db.query(AppSetting).filter(AppSetting.key == BOOTSTRAP_RUN_KEY).first()
+        )
         if setting is None:
             return None
         try:
@@ -126,24 +353,100 @@ class BootstrapRunManifestRepository:
             return None
         return BootstrapRunManifest.from_payload(payload)
 
-    def save(
+    @staticmethod
+    def _write_setting(
+        setting: AppSetting | None,
+        manifest: BootstrapRunManifest,
+        db: Session,
+    ) -> None:
+        encoded = json.dumps(manifest.to_payload())
+        if setting is None:
+            db.add(
+                AppSetting(
+                    key=BOOTSTRAP_RUN_KEY,
+                    value=encoded,
+                    category=RUNTIME_ACTIVITY_CATEGORY,
+                    description=BOOTSTRAP_RUN_DESCRIPTION,
+                )
+            )
+            return
+        setting.value = encoded
+        setting.category = RUNTIME_ACTIVITY_CATEGORY
+        setting.description = BOOTSTRAP_RUN_DESCRIPTION
+
+    @staticmethod
+    def _locked_setting(db: Session) -> AppSetting | None:
+        return (
+            db.query(AppSetting)
+            .filter(AppSetting.key == BOOTSTRAP_RUN_KEY)
+            .with_for_update()
+            .first()
+        )
+
+    def begin_dispatch(
         self,
         db: Session,
         manifest: BootstrapRunManifest,
     ) -> dict[str, Any]:
-        encoded = json.dumps(manifest.to_payload())
-        setting = db.query(AppSetting).filter(AppSetting.key == BOOTSTRAP_RUN_KEY).first()
-        if setting is None:
-            setting = AppSetting(
-                key=BOOTSTRAP_RUN_KEY,
-                value=encoded,
-                category=RUNTIME_ACTIVITY_CATEGORY,
-                description=BOOTSTRAP_RUN_DESCRIPTION,
-            )
-            db.add(setting)
-        else:
-            setting.value = encoded
-            setting.category = RUNTIME_ACTIVITY_CATEGORY
-            setting.description = BOOTSTRAP_RUN_DESCRIPTION
-        db.commit()
+        setting = self._locked_setting(db)
+        if setting is not None:
+            try:
+                current = BootstrapRunManifest.from_payload(json.loads(setting.value))
+            except (json.JSONDecodeError, TypeError, KeyError, ValueError):
+                current = None
+            if current is not None and current.has_active_ownership():
+                raise BootstrapAlreadyRunning(
+                    f"Bootstrap dispatch {current.dispatch_id} is still active."
+                )
+        self._write_setting(setting, manifest, db)
         return manifest.to_payload()
+
+    def is_current_dispatch(self, db: Session, *, dispatch_id: str | None) -> bool:
+        current = self.load(db)
+        return bool(current and current.dispatch_id == dispatch_id)
+
+    def finish_market(
+        self,
+        db: Session,
+        *,
+        dispatch_id: str | None,
+        market: str,
+        succeeded: bool,
+    ) -> BootstrapRunManifest:
+        return self.update_dispatch(
+            db,
+            dispatch_id=dispatch_id,
+            transform=lambda current: current.finish_market(
+                market=market,
+                succeeded=succeeded,
+            ),
+        )
+
+    def update_dispatch(
+        self,
+        db: Session,
+        *,
+        dispatch_id: str | None,
+        transform: Callable[[BootstrapRunManifest], BootstrapRunManifest],
+    ) -> BootstrapRunManifest:
+        setting = self._locked_setting(db)
+        if setting is None:
+            raise StaleBootstrapDispatch(
+                f"Bootstrap dispatch {dispatch_id} has no persisted manifest."
+            )
+        try:
+            current = BootstrapRunManifest.from_payload(json.loads(setting.value))
+        except (json.JSONDecodeError, TypeError, KeyError, ValueError) as exc:
+            raise StaleBootstrapDispatch(
+                f"Bootstrap dispatch {dispatch_id} has an invalid manifest."
+            ) from exc
+        if current.dispatch_id != dispatch_id:
+            raise StaleBootstrapDispatch(
+                f"Bootstrap dispatch {dispatch_id} is stale; current dispatch is "
+                f"{current.dispatch_id}."
+            )
+        updated = transform(current).reconcile_terminal_state()
+        if updated.dispatch_id != dispatch_id:
+            raise ValueError("Bootstrap dispatch updates cannot change dispatch_id.")
+        self._write_setting(setting, updated, db)
+        return updated

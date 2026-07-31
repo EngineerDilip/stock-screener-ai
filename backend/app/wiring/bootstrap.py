@@ -2,47 +2,74 @@
 
 from __future__ import annotations
 
-from contextvars import ContextVar, Token
+from collections.abc import Callable, Iterator
+from contextvars import Token
 from dataclasses import dataclass
 from threading import RLock
-from typing import TYPE_CHECKING, Callable, Iterator, TypeAlias
+from typing import TYPE_CHECKING, TypeAlias
 
 from fastapi import Request
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.domain.scanning.ports import StockDataProvider, TaskDispatcher
-from app.services.job_backend import JobBackend, CeleryJobBackend
+from app.services.job_backend import CeleryJobBackend, JobBackend
 from app.services.redis_pool import get_redis_client
+from app.wiring import runtime_context
+from app.wiring import use_case_factories as _use_case_factories
+
+get_build_daily_snapshot_use_case = (
+    _use_case_factories.get_build_daily_snapshot_use_case
+)
+get_compare_feature_runs_use_case = (
+    _use_case_factories.get_compare_feature_runs_use_case
+)
+get_create_scan_use_case = _use_case_factories.get_create_scan_use_case
+get_create_scan_use_case_without_freshness_gate = (
+    _use_case_factories.get_create_scan_use_case_without_freshness_gate
+)
+get_explain_stock_use_case = _use_case_factories.get_explain_stock_use_case
+get_export_scan_results_use_case = _use_case_factories.get_export_scan_results_use_case
+get_get_filter_options_use_case = _use_case_factories.get_get_filter_options_use_case
+get_get_peers_use_case = _use_case_factories.get_get_peers_use_case
+get_get_scan_results_use_case = _use_case_factories.get_get_scan_results_use_case
+get_get_scan_symbols_use_case = _use_case_factories.get_get_scan_symbols_use_case
+get_get_setup_details_use_case = _use_case_factories.get_get_setup_details_use_case
+get_get_single_result_use_case = _use_case_factories.get_get_single_result_use_case
+get_list_feature_runs_use_case = _use_case_factories.get_list_feature_runs_use_case
+get_run_bulk_scan_use_case = _use_case_factories.get_run_bulk_scan_use_case
 
 if TYPE_CHECKING:
+    from app.domain.scanning.ports import MarketRsReader
+    from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
     from app.infra.db.uow import SqlUnitOfWork
     from app.infra.providers.stock_data import DataPrepStockDataProvider
     from app.scanners.scan_orchestrator import ScanOrchestrator
     from app.services.alphavantage_service import AlphaVantageService
     from app.services.benchmark_cache_service import BenchmarkCacheService
-    from app.services.canonical_group_ranking_service import CanonicalGroupRankingService
+    from app.services.canonical_group_ranking_service import (
+        CanonicalGroupRankingService,
+    )
+    from app.services.daily_price_bundle_service import DailyPriceBundleService
     from app.services.data_source_service import DataSourceService
     from app.services.eps_rating_service import EPSRatingService
     from app.services.finviz_service import FinvizService
     from app.services.fundamentals_cache_service import FundamentalsCacheService
     from app.services.github_release_sync_service import GitHubReleaseSyncService
+    from app.services.group_rank_snapshot_coordinator import (
+        GroupRankSnapshotCoordinator,
+    )
+    from app.services.group_rank_snapshot_reader import GroupRankSnapshotReader
     from app.services.hybrid_fundamentals_service import HybridFundamentalsService
     from app.services.ibd_group_rank_service import IBDGroupRankService
     from app.services.llm.groq_key_manager import GroqKeyManager
     from app.services.llm.zai_key_manager import ZAIKeyManager
-    from app.services.daily_price_bundle_service import DailyPriceBundleService
     from app.services.market_calendar_service import MarketCalendarService
     from app.services.market_rs_inputs import MarketRsInputLoader
-    from app.domain.scanning.ports import MarketRsReader
-    from app.services.market_rs_snapshot_service import MarketRsSnapshotService
+    from app.services.market_rs_rollout_executor import MarketRsActivationExecutor
     from app.services.market_rs_rollout_service import MarketRsRolloutService
-    from app.services.group_rank_snapshot_coordinator import GroupRankSnapshotCoordinator
-    from app.services.group_rank_snapshot_reader import GroupRankSnapshotReader
-    from app.wiring.market_rs_services import MarketRsServices
+    from app.services.market_rs_snapshot_service import MarketRsSnapshotService
     from app.services.point_in_time_universe_service import PointInTimeUniverseService
-    from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
-    from app.wiring.canonical_rs_runtime import CanonicalRsRuntime
     from app.services.price_cache_service import PriceCacheService
     from app.services.provider_snapshot_service import ProviderSnapshotService
     from app.services.rate_limiter import RedisRateLimiter
@@ -55,21 +82,8 @@ if TYPE_CHECKING:
     from app.services.yfinance_service import YFinanceService
     from app.tasks.data_fetch_lock import DataFetchLock
     from app.tasks.workload_coordination import WorkloadCoordination
-    from app.use_cases.feature_store.build_daily_snapshot import (
-        BuildDailyFeatureSnapshotUseCase,
-    )
-    from app.use_cases.feature_store.compare_runs import CompareFeatureRunsUseCase
-    from app.use_cases.feature_store.list_runs import ListFeatureRunsUseCase
-    from app.use_cases.scanning.create_scan import CreateScanUseCase
-    from app.use_cases.scanning.explain_stock import ExplainStockUseCase
-    from app.use_cases.scanning.export_scan_results import ExportScanResultsUseCase
-    from app.use_cases.scanning.get_filter_options import GetFilterOptionsUseCase
-    from app.use_cases.scanning.get_peers import GetPeersUseCase
-    from app.use_cases.scanning.get_scan_results import GetScanResultsUseCase
-    from app.use_cases.scanning.get_scan_symbols import GetScanSymbolsUseCase
-    from app.use_cases.scanning.get_setup_details import GetSetupDetailsUseCase
-    from app.use_cases.scanning.get_single_result import GetSingleResultUseCase
-    from app.use_cases.scanning.run_bulk_scan import RunBulkScanUseCase
+    from app.wiring.canonical_rs_runtime import CanonicalRsRuntime
+    from app.wiring.market_rs_services import MarketRsServices
 
 
 SessionFactory: TypeAlias = Callable[[], Session]
@@ -153,8 +167,12 @@ class RuntimeServices:
         if self._cache_bundle is None:
             with self._init_lock:
                 if self._cache_bundle is None:
-                    from app.services.benchmark_cache_service import BenchmarkCacheService
-                    from app.services.fundamentals_cache_service import FundamentalsCacheService
+                    from app.services.benchmark_cache_service import (
+                        BenchmarkCacheService,
+                    )
+                    from app.services.fundamentals_cache_service import (
+                        FundamentalsCacheService,
+                    )
                     from app.services.price_cache_service import PriceCacheService
 
                     redis_client = get_redis_client()
@@ -178,6 +196,12 @@ class RuntimeServices:
         if self._group_rank_service is None:
             with self._init_lock:
                 if self._group_rank_service is None:
+                    from app.scanners.criteria.relative_strength import (
+                        RelativeStrengthCalculator,
+                    )
+                    from app.services.group_rank_historical_calculator import (
+                        GroupRankHistoricalCalculator,
+                    )
                     from app.services.group_rank_input_loader import (
                         GroupRankInputLoader,
                     )
@@ -185,9 +209,6 @@ class RuntimeServices:
                         IBDIndustryTaxonomySource,
                         SqlGroupRankMarketCapSource,
                         StockUniverseGroupRankSource,
-                    )
-                    from app.services.group_rank_historical_calculator import (
-                        GroupRankHistoricalCalculator,
                     )
                     from app.services.group_rank_legacy_adapter import (
                         LegacyGroupRankPrefetchAdapter,
@@ -199,9 +220,6 @@ class RuntimeServices:
                         GroupRankingRepository,
                     )
                     from app.services.ibd_group_rank_service import IBDGroupRankService
-                    from app.scanners.criteria.relative_strength import (
-                        RelativeStrengthCalculator,
-                    )
 
                     cache_bundle = self.cache_bundle()
                     input_loader = GroupRankInputLoader(
@@ -218,14 +236,12 @@ class RuntimeServices:
                     )
                     ranking_repository = GroupRankingRepository()
                     legacy_adapter = LegacyGroupRankPrefetchAdapter()
-                    historical_calculator = (
-                        GroupRankHistoricalCalculator(
-                            input_loader=input_loader,
-                            ranking_calculator=ranking_calculator,
-                            repository=ranking_repository,
-                            calendar_service=self.market_calendar_service(),
-                            legacy_adapter=legacy_adapter,
-                        )
+                    historical_calculator = GroupRankHistoricalCalculator(
+                        input_loader=input_loader,
+                        ranking_calculator=ranking_calculator,
+                        repository=ranking_repository,
+                        calendar_service=self.market_calendar_service(),
+                        legacy_adapter=legacy_adapter,
                     )
                     self._group_rank_service = IBDGroupRankService(
                         price_cache=cache_bundle.price,
@@ -266,7 +282,9 @@ class RuntimeServices:
                     from app.services.market_taxonomy_service import (
                         get_market_taxonomy_service,
                     )
-                    from app.services.rrg_history_provider import build_rrg_history_provider
+                    from app.services.rrg_history_provider import (
+                        build_rrg_history_provider,
+                    )
                     from app.services.rrg_service import RRGService
 
                     self._rrg_service = RRGService(
@@ -309,7 +327,10 @@ class RuntimeServices:
         if self._groq_key_manager is None:
             with self._init_lock:
                 if self._groq_key_manager is None:
-                    from app.services.llm.groq_key_manager import GroqKeyManager, _get_keys_from_settings
+                    from app.services.llm.groq_key_manager import (
+                        GroqKeyManager,
+                        _get_keys_from_settings,
+                    )
 
                     self._groq_key_manager = GroqKeyManager(
                         keys=_get_keys_from_settings() or []
@@ -320,7 +341,10 @@ class RuntimeServices:
         if self._zai_key_manager is None:
             with self._init_lock:
                 if self._zai_key_manager is None:
-                    from app.services.llm.zai_key_manager import ZAIKeyManager, _get_keys_from_settings
+                    from app.services.llm.zai_key_manager import (
+                        ZAIKeyManager,
+                        _get_keys_from_settings,
+                    )
 
                     self._zai_key_manager = ZAIKeyManager(
                         keys=_get_keys_from_settings() or []
@@ -340,7 +364,9 @@ class RuntimeServices:
         if self._market_calendar_service is None:
             with self._init_lock:
                 if self._market_calendar_service is None:
-                    from app.services.market_calendar_service import MarketCalendarService
+                    from app.services.market_calendar_service import (
+                        MarketCalendarService,
+                    )
 
                     self._market_calendar_service = MarketCalendarService()
         return self._market_calendar_service
@@ -363,6 +389,9 @@ class RuntimeServices:
     def market_rs_rollout_service(self) -> MarketRsRolloutService:
         return self.canonical_rs_runtime().rollout_service()
 
+    def market_rs_activation_executor(self) -> MarketRsActivationExecutor:
+        return self.canonical_rs_runtime().activation_executor()
+
     def market_rs_reader(self) -> MarketRsReader:
         return self.market_rs_services().reader
 
@@ -376,8 +405,10 @@ class RuntimeServices:
         if self._github_release_sync_service is None:
             with self._init_lock:
                 if self._github_release_sync_service is None:
-                    from app.services.github_release_sync_service import GitHubReleaseSyncService
                     from app.config import settings
+                    from app.services.github_release_sync_service import (
+                        GitHubReleaseSyncService,
+                    )
 
                     self._github_release_sync_service = GitHubReleaseSyncService(
                         api_base=settings.github_data_api_base,
@@ -388,7 +419,9 @@ class RuntimeServices:
         if self._security_master_resolver is None:
             with self._init_lock:
                 if self._security_master_resolver is None:
-                    from app.services.security_master_service import security_master_resolver
+                    from app.services.security_master_service import (
+                        security_master_resolver,
+                    )
 
                     self._security_master_resolver = security_master_resolver
         return self._security_master_resolver
@@ -464,7 +497,9 @@ class RuntimeServices:
         if self._ticker_validation_service is None:
             with self._init_lock:
                 if self._ticker_validation_service is None:
-                    from app.services.ticker_validation_service import TickerValidationService
+                    from app.services.ticker_validation_service import (
+                        TickerValidationService,
+                    )
 
                     self._ticker_validation_service = TickerValidationService()
         return self._ticker_validation_service
@@ -473,7 +508,9 @@ class RuntimeServices:
         if self._provider_snapshot_service is None:
             with self._init_lock:
                 if self._provider_snapshot_service is None:
-                    from app.services.provider_snapshot_service import ProviderSnapshotService
+                    from app.services.provider_snapshot_service import (
+                        ProviderSnapshotService,
+                    )
 
                     cache_bundle = self.cache_bundle()
                     self._provider_snapshot_service = ProviderSnapshotService(
@@ -487,7 +524,9 @@ class RuntimeServices:
         if self._daily_price_bundle_service is None:
             with self._init_lock:
                 if self._daily_price_bundle_service is None:
-                    from app.services.daily_price_bundle_service import DailyPriceBundleService
+                    from app.services.daily_price_bundle_service import (
+                        DailyPriceBundleService,
+                    )
 
                     self._daily_price_bundle_service = DailyPriceBundleService(
                         market_calendar=self.market_calendar_service(),
@@ -498,7 +537,9 @@ class RuntimeServices:
         if self._hybrid_fundamentals_service is None:
             with self._init_lock:
                 if self._hybrid_fundamentals_service is None:
-                    from app.services.hybrid_fundamentals_service import HybridFundamentalsService
+                    from app.services.hybrid_fundamentals_service import (
+                        HybridFundamentalsService,
+                    )
 
                     self._hybrid_fundamentals_service = HybridFundamentalsService(
                         price_cache=self.cache_bundle().price,
@@ -563,14 +604,6 @@ class RuntimeServices:
             self._scan_orchestrator = None
 
 
-_runtime_services_ctx: ContextVar[RuntimeServices | None] = ContextVar(
-    "runtime_services_ctx",
-    default=None,
-)
-_process_runtime_services_lock = RLock()
-_process_runtime_services = None  # type: RuntimeServices | None
-
-
 def build_runtime_services(
     *,
     session_factory: SessionFactory = SessionLocal,
@@ -588,16 +621,12 @@ def set_runtime_services(
 
     Set ``bind_process`` only at process lifecycle boundaries.
     """
-    global _process_runtime_services
-    if bind_process:
-        with _process_runtime_services_lock:
-            _process_runtime_services = runtime
-    return _runtime_services_ctx.set(runtime)
+    return runtime_context.set_runtime_services(runtime, bind_process=bind_process)
 
 
 def reset_runtime_services(token: Token[RuntimeServices | None]) -> None:
     """Restore runtime services context to a previous token."""
-    _runtime_services_ctx.reset(token)
+    runtime_context.reset_runtime_services(token)
 
 
 def _provision_market_rs_formula_pointers(
@@ -621,51 +650,29 @@ def initialize_process_runtime_services(
     force: bool = False,
 ) -> RuntimeServices:
     """Ensure one process-scoped runtime container exists and bind it to context."""
-    global _process_runtime_services
-    with _process_runtime_services_lock:
-        if _process_runtime_services is None or force:
-            _provision_market_rs_formula_pointers(session_factory)
-            _process_runtime_services = build_runtime_services(
-                session_factory=session_factory
-            )
-        runtime = _process_runtime_services
-    set_runtime_services(runtime, bind_process=True)
-    return runtime
+
+    def _factory() -> RuntimeServices:
+        _provision_market_rs_formula_pointers(session_factory)
+        return build_runtime_services(session_factory=session_factory)
+
+    return runtime_context.initialize_process_runtime_services(
+        _factory,
+        force=force,
+    )
 
 
 def clear_runtime_services() -> None:
     """Clear runtime services from both process state and current context."""
-    global _process_runtime_services
-    with _process_runtime_services_lock:
-        _process_runtime_services = None
-    _runtime_services_ctx.set(None)
+    runtime_context.clear_runtime_services()
 
 
 def get_runtime_services(request: Request) -> RuntimeServices:
     """FastAPI dependency getter for process runtime services."""
-    runtime = getattr(request.app.state, "runtime_services", None)
-    if runtime is None:
-        raise RuntimeError("RuntimeServices are not initialized on app.state.runtime_services")
-    return runtime
+    return runtime_context.request_runtime_services(request)
 
 
 def _resolve_runtime_services(request: Request | None = None) -> RuntimeServices:
-    if request is not None:
-        request_runtime = getattr(request.app.state, "runtime_services", None)
-        if request_runtime is not None:
-            return request_runtime
-    context_runtime = _runtime_services_ctx.get()
-    if context_runtime is not None:
-        return context_runtime
-    with _process_runtime_services_lock:
-        if _process_runtime_services is not None:
-            return _process_runtime_services
-    raise RuntimeError(
-        "RuntimeServices are not initialized for this context. "
-        "Call initialize_process_runtime_services() at process startup."
-    )
-
-
+    return runtime_context.resolve_runtime_services(request)
 
 
 def get_uow() -> Iterator[SqlUnitOfWork]:
@@ -679,8 +686,6 @@ def get_uow() -> Iterator[SqlUnitOfWork]:
 
     uow = SqlUnitOfWork(SessionLocal)
     yield uow
-
-
 
 
 def get_job_backend() -> JobBackend:
@@ -775,6 +780,11 @@ def get_market_rs_rollout_service() -> MarketRsRolloutService:
     return _resolve_runtime_services().market_rs_rollout_service()
 
 
+def get_market_rs_activation_executor() -> MarketRsActivationExecutor:
+    """Return the process-scoped guarded Market RS activation executor."""
+    return _resolve_runtime_services().market_rs_activation_executor()
+
+
 def get_market_rs_reader() -> MarketRsReader:
     """Return the process-scoped canonical Market RS reader."""
     return _resolve_runtime_services().market_rs_reader()
@@ -850,143 +860,6 @@ def get_hybrid_fundamentals_service() -> HybridFundamentalsService:
     return _resolve_runtime_services().hybrid_fundamentals_service()
 
 
-
-
-def get_create_scan_use_case() -> CreateScanUseCase:
-    """HTTP-bound factory: always enforces the staleness gate.
-
-    This function is used with ``Depends(get_create_scan_use_case)`` in the
-    FastAPI route. It intentionally has no parameters — FastAPI would expose
-    any kwarg as a client-controllable query parameter, which could let a
-    caller disable the gate with ``?with_freshness_gate=false``.
-
-    Internal non-HTTP callers (e.g. bootstrap scans that *populate* the cache
-    and therefore can't be gated on that data already existing) must use
-    :func:`get_create_scan_use_case_without_freshness_gate` instead.
-    """
-    from app.use_cases.scanning.create_scan import CreateScanUseCase
-    from app.services.market_data_freshness import evaluate_symbol_freshness
-
-    return CreateScanUseCase(
-        dispatcher=get_task_dispatcher(),
-        freshness_evaluator=evaluate_symbol_freshness,
-    )
-
-
-def get_create_scan_use_case_without_freshness_gate() -> CreateScanUseCase:
-    """Internal factory for callers that must bypass the staleness gate.
-
-    Only appropriate for scans that *create* the data the gate would check
-    (bootstrap scans, initial market provisioning). Must never be wired
-    through ``Depends(...)`` — use :func:`get_create_scan_use_case` there.
-    """
-    from app.use_cases.scanning.create_scan import CreateScanUseCase
-
-    return CreateScanUseCase(
-        dispatcher=get_task_dispatcher(),
-        freshness_evaluator=None,
-    )
-
-
-def get_get_scan_results_use_case() -> GetScanResultsUseCase:
-    """Build a GetScanResultsUseCase (no extra dependencies — reads via UoW)."""
-    from app.use_cases.scanning.get_scan_results import GetScanResultsUseCase
-
-    return GetScanResultsUseCase()
-
-
-def get_get_scan_symbols_use_case() -> GetScanSymbolsUseCase:
-    """Build a GetScanSymbolsUseCase (no extra dependencies — reads via UoW)."""
-    from app.use_cases.scanning.get_scan_symbols import GetScanSymbolsUseCase
-
-    return GetScanSymbolsUseCase()
-
-
-def get_get_filter_options_use_case() -> GetFilterOptionsUseCase:
-    """Build a GetFilterOptionsUseCase (no extra dependencies — reads via UoW)."""
-    from app.use_cases.scanning.get_filter_options import GetFilterOptionsUseCase
-
-    return GetFilterOptionsUseCase()
-
-
-def get_get_single_result_use_case() -> GetSingleResultUseCase:
-    """Build a GetSingleResultUseCase (no extra dependencies — reads via UoW)."""
-    from app.use_cases.scanning.get_single_result import GetSingleResultUseCase
-
-    return GetSingleResultUseCase()
-
-
-def get_get_setup_details_use_case() -> GetSetupDetailsUseCase:
-    """Build a GetSetupDetailsUseCase (no extra dependencies — reads via UoW)."""
-    from app.use_cases.scanning.get_setup_details import GetSetupDetailsUseCase
-
-    return GetSetupDetailsUseCase()
-
-
-def get_get_peers_use_case() -> GetPeersUseCase:
-    """Build a GetPeersUseCase (no extra dependencies — reads via UoW)."""
-    from app.use_cases.scanning.get_peers import GetPeersUseCase
-
-    return GetPeersUseCase()
-
-
-def get_export_scan_results_use_case() -> ExportScanResultsUseCase:
-    """Build an ExportScanResultsUseCase (no extra dependencies — reads via UoW)."""
-    from app.use_cases.scanning.export_scan_results import ExportScanResultsUseCase
-
-    return ExportScanResultsUseCase()
-
-
-def get_run_bulk_scan_use_case() -> RunBulkScanUseCase:
-    """Build a RunBulkScanUseCase wired with the scan orchestrator."""
-    from app.use_cases.scanning.run_bulk_scan import RunBulkScanUseCase
-
-    return RunBulkScanUseCase(
-        scanner=get_scan_orchestrator(),
-        data_provider=get_stock_data_provider(),
-        market_rs_reader=get_market_rs_reader(),
-    )
-
-
-def get_explain_stock_use_case() -> ExplainStockUseCase:
-    """Build an ExplainStockUseCase (no extra dependencies — reads via UoW)."""
-    from app.use_cases.scanning.explain_stock import ExplainStockUseCase
-
-    return ExplainStockUseCase()
-
-
-def get_list_feature_runs_use_case() -> ListFeatureRunsUseCase:
-    """Build a ListFeatureRunsUseCase (no extra dependencies — reads via UoW)."""
-    from app.use_cases.feature_store.list_runs import ListFeatureRunsUseCase
-
-    return ListFeatureRunsUseCase()
-
-
-def get_compare_feature_runs_use_case() -> CompareFeatureRunsUseCase:
-    """Build a CompareFeatureRunsUseCase (no extra dependencies — reads via UoW)."""
-    from app.use_cases.feature_store.compare_runs import CompareFeatureRunsUseCase
-
-    return CompareFeatureRunsUseCase()
-
-
-def get_build_daily_snapshot_use_case() -> BuildDailyFeatureSnapshotUseCase:
-    """Build a BuildDailyFeatureSnapshotUseCase wired with the scan orchestrator."""
-    from app.services.bootstrap_cache_coverage import (
-        evaluate_bootstrap_cache_coverage,
-    )
-    from app.use_cases.feature_store.build_daily_snapshot import (
-        BuildDailyFeatureSnapshotUseCase,
-    )
-
-    return BuildDailyFeatureSnapshotUseCase(
-        scanner=get_scan_orchestrator(),
-        data_provider=get_stock_data_provider(),
-        market_calendar=get_market_calendar_service(),
-        market_rs_reader=get_market_rs_reader(),
-        bootstrap_coverage_evaluator=evaluate_bootstrap_cache_coverage,
-    )
-
-
 # ── Providers ────────────────────────────────────────────────────────────
 
 
@@ -1005,7 +878,7 @@ def get_scan_orchestrator() -> ScanOrchestrator:
 
 def _reset_singletons_for_tests() -> None:
     """Reset runtime-scoped singletons for test isolation."""
-    runtime = _runtime_services_ctx.get()
+    runtime = runtime_context.current_runtime_services()
     if runtime is not None:
         runtime.reset_for_tests()
     clear_runtime_services()

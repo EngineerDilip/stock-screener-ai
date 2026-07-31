@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import date
 import math
+from collections.abc import Callable
+from datetime import date
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -25,6 +26,7 @@ from app.services.feature_run_rs_identity import (
     resolve_feature_run_rs_identity,
 )
 from app.services.ibd_industry_service import IBDIndustryService
+from app.services.market_rs_activation_coverage import MarketRsActivationCoverage
 from app.services.market_rs_backfill_service import MarketRsBackfillService
 from app.services.market_rs_rollout_contracts import (
     ActivationValidationReport,
@@ -34,7 +36,6 @@ from app.services.market_rs_static_artifact_validator import (
     MarketRsStaticArtifactValidator,
 )
 from app.services.static_market_artifact_contract import STATIC_SITE_SCHEMA_VERSION
-
 
 FeatureRunRepositoryFactory = Callable[[Session], SqlFeatureRunRepository]
 
@@ -74,8 +75,7 @@ class MarketRsActivationValidator:
             return None
         if not balanced_run_has_required_price_basis(run):
             errors.append(
-                f"Market RS run for {calculation_date} has an "
-                "incompatible price basis."
+                f"Market RS run for {calculation_date} has an incompatible price basis."
             )
         if len(run.rows) != int(run.eligible_symbol_count):
             errors.append(
@@ -131,8 +131,7 @@ class MarketRsActivationValidator:
             }
         except Exception as exc:
             errors.append(
-                f"Could not reconstruct expected Groups for "
-                f"{calculation_date}: {exc}"
+                f"Could not reconstruct expected Groups for {calculation_date}: {exc}"
             )
         stored_groups = {row.industry_group for row in group_rows}
         missing_groups = sorted(expected_groups - stored_groups)
@@ -157,9 +156,7 @@ class MarketRsActivationValidator:
         if [row.industry_group for row in ordered] != [
             row.industry_group for row in deterministic
         ]:
-            errors.append(
-                f"Non-deterministic Group rank order for {calculation_date}."
-            )
+            errors.append(f"Non-deterministic Group rank order for {calculation_date}.")
         return run
 
     @staticmethod
@@ -207,32 +204,17 @@ class MarketRsActivationValidator:
         self,
         db: Session,
         *,
-        market: str,
-        through_date: date,
+        coverage: MarketRsActivationCoverage,
         feature_run_id: int,
         static_staging_dir: Path,
     ) -> ActivationValidationReport:
-        normalized = normalize_rollout_market(market)
+        normalized = normalize_rollout_market(coverage.market)
+        through_date = coverage.through_date
         errors: list[str] = []
-        first_valid = self.backfill_service.earliest_backfillable_date(
-            db,
-            market=normalized,
-            through_date=through_date,
-        )
-        candidates = (
-            self.backfill_service.candidate_dates(
-                db,
-                market=normalized,
-                through_date=through_date,
-                first_valid_date=first_valid,
-            )
-            if first_valid is not None
-            else ()
-        )
+        candidates = coverage.required_dates
+        first_valid = coverage.start_date if candidates else None
         if not candidates:
-            errors.append(
-                "No required balanced Market RS candidate dates were found."
-            )
+            errors.append("No required balanced Market RS candidate dates were found.")
 
         latest_run = None
         for calculation_date in candidates:
@@ -284,9 +266,7 @@ class MarketRsActivationValidator:
                 rrg_status = static_result.rrg_status
                 errors.extend(static_result.errors)
             except Exception as exc:
-                errors.append(
-                    f"Staged static artifact validation failed: {exc}"
-                )
+                errors.append(f"Staged static artifact validation failed: {exc}")
         elif not (Path(static_staging_dir) / "manifest.json").is_file():
             errors.append(f"Missing staged {STATIC_SITE_SCHEMA_VERSION} manifest.")
 
