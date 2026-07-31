@@ -4,12 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Mapping
 
 from sqlalchemy.orm import Session
 
 from ..domain.markets.catalog import get_market_catalog
 from ..infra.db.models.feature_store import FeatureRun
 from ..infra.db.models.relative_strength import MarketRsRun
+from ..infra.db.repositories.market_rs_repo import (
+    MarketRsFormulaNotConfigured,
+    MarketRsRunRepository,
+)
 from ..models.industry import IBDGroupRank
 from ..models.scan_result import SCAN_TRIGGER_SOURCE_AUTO, Scan
 from ..models.stock import StockFundamental, StockPrice
@@ -21,10 +26,11 @@ class MarketBootstrapReadiness:
     market: str
     core_ready: bool
     scan_ready: bool
+    rs_ready: bool = True
 
     @property
     def ready(self) -> bool:
-        return self.core_ready and self.scan_ready
+        return self.core_ready and self.scan_ready and self.rs_ready
 
 
 @dataclass(frozen=True)
@@ -105,10 +111,15 @@ class BootstrapReadinessService:
         *,
         enabled_markets: list[str],
         bootstrap_started_at: datetime | None = None,
+        expected_formula_versions: Mapping[str, str] | None = None,
     ) -> BootstrapReadiness:
         normalized_markets = [
             self.normalize_market(market) for market in enabled_markets
         ]
+        normalized_expectations = {
+            self.normalize_market(market): formula_version
+            for market, formula_version in (expected_formula_versions or {}).items()
+        }
         return BootstrapReadiness(
             empty_system=self.is_empty_system(db),
             market_results={
@@ -120,10 +131,33 @@ class BootstrapReadinessService:
                         market,
                         bootstrap_started_at=bootstrap_started_at,
                     ),
+                    rs_ready=self._has_expected_formula(
+                        db,
+                        market=market,
+                        expected_formula_version=normalized_expectations.get(market),
+                    ),
                 )
                 for market in normalized_markets
             },
         )
+
+    def _has_expected_formula(
+        self,
+        db: Session,
+        *,
+        market: str,
+        expected_formula_version: str | None,
+    ) -> bool:
+        if expected_formula_version is None:
+            return True
+        try:
+            active_formula = MarketRsRunRepository().active_formula(
+                db,
+                market=market,
+            )
+        except MarketRsFormulaNotConfigured:
+            return False
+        return active_formula == expected_formula_version
 
     def _has_active_universe_rows(
         self,

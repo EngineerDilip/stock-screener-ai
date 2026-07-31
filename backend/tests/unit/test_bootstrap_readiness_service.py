@@ -10,7 +10,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.domain.relative_strength import LEGACY_RS_FORMULA_VERSION
+from app.domain.relative_strength import (
+    BALANCED_RS_FORMULA_VERSION,
+    LEGACY_RS_FORMULA_VERSION,
+)
 from app.infra.db.models.feature_store import FeatureRun
 from app.infra.db.models.relative_strength import MarketRsFormulaPointer, MarketRsRun
 from app.models.industry import IBDGroupRank
@@ -293,6 +296,51 @@ def test_pristine_installation_rejects_any_durable_data(
     readiness_db.commit()
 
     assert BootstrapReadinessService().is_pristine_installation(readiness_db) is False
+
+
+def test_market_readiness_rejects_formula_pointer_mismatch(readiness_db) -> None:
+    seed_core_market_data(readiness_db)
+    seed_scan(readiness_db)
+    readiness_db.add(
+        MarketRsFormulaPointer(
+            market="US",
+            formula_version=LEGACY_RS_FORMULA_VERSION,
+        )
+    )
+    readiness_db.commit()
+
+    result = BootstrapReadinessService().evaluate(
+        readiness_db,
+        enabled_markets=["US"],
+        expected_formula_versions={"US": BALANCED_RS_FORMULA_VERSION},
+    ).market_results["US"]
+
+    assert result.core_ready is True
+    assert result.scan_ready is True
+    assert result.rs_ready is False
+    assert result.ready is False
+
+
+def test_market_readiness_keeps_legacy_compatibility_without_expectation(
+    readiness_db,
+) -> None:
+    seed_core_market_data(readiness_db)
+    seed_scan(readiness_db)
+    readiness_db.add(
+        MarketRsFormulaPointer(
+            market="US",
+            formula_version=LEGACY_RS_FORMULA_VERSION,
+        )
+    )
+    readiness_db.commit()
+
+    result = BootstrapReadinessService().evaluate(
+        readiness_db,
+        enabled_markets=["US"],
+    ).market_results["US"]
+
+    assert result.rs_ready is True
+    assert result.ready is True
 
 
 @pytest.mark.parametrize(

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
+
 
 @pytest.fixture(autouse=True)
 def classify_unit_test_bootstraps_as_non_fresh(monkeypatch):
@@ -481,6 +483,7 @@ def test_queue_bootstrap_captures_pristine_installation_once(
     classifications = []
     saved = []
     queued_operations = []
+    completion_payloads = []
 
     def _classify():
         classifications.append(fresh_install)
@@ -496,6 +499,7 @@ def test_queue_bootstrap_captures_pristine_installation_once(
         queued_operations.append(
             [stage.operation for stage in market_plan.stages]
         )
+        completion_payloads.append(dict(_kwargs["completion_kwargs"]))
         return _FakeAsyncResult(f"task-{market_plan.market.lower()}")
 
     monkeypatch.setattr(module, "_queue_market_bootstrap_workflow", _queue)
@@ -515,6 +519,17 @@ def test_queue_bootstrap_captures_pristine_installation_once(
     )
     assert queued_operations
     assert all(expected_operation in operations for operations in queued_operations)
+    if fresh_install:
+        assert all(
+            payload["expected_formula_version"]
+            == BALANCED_RS_FORMULA_VERSION
+            for payload in completion_payloads
+        )
+    else:
+        assert all(
+            "expected_formula_version" not in payload
+            for payload in completion_payloads
+        )
 
 
 def test_fresh_bootstrap_signature_routes_activation_to_market_queue() -> None:
@@ -1054,3 +1069,107 @@ def test_complete_background_market_bootstrap_marks_market_failure_without_globa
             "message": "Bootstrap scan did not publish",
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("completion_task_name", "task_kwargs", "expected_result"),
+    [
+        (
+            "complete_local_runtime_bootstrap",
+            {"primary_market": "US"},
+            {
+                "status": "failed",
+                "primary_market": "US",
+                "market": "US",
+                "reason": "balanced market rs formula not active",
+            },
+        ),
+        (
+            "complete_background_market_bootstrap",
+            {"market": "US"},
+            {
+                "status": "failed",
+                "market": "US",
+                "reason": "balanced market rs formula not active",
+            },
+        ),
+    ],
+)
+def test_fresh_bootstrap_completion_rejects_legacy_formula_pointer(
+    monkeypatch,
+    completion_task_name,
+    task_kwargs,
+    expected_result,
+):
+    from app.services.bootstrap_readiness_service import (
+        BootstrapReadiness,
+        MarketBootstrapReadiness,
+    )
+    from app.tasks import runtime_bootstrap_tasks as module
+
+    class _FakeSession:
+        def close(self):
+            pass
+
+    class _FakeReadinessService:
+        def evaluate(
+            self,
+            db,
+            *,
+            enabled_markets,
+            bootstrap_started_at=None,
+            expected_formula_versions=None,
+        ):
+            calls["expectations"] = expected_formula_versions
+            return BootstrapReadiness(
+                empty_system=False,
+                market_results={
+                    "US": MarketBootstrapReadiness(
+                        market="US",
+                        core_ready=True,
+                        scan_ready=True,
+                        rs_ready=False,
+                    )
+                },
+            )
+
+    calls = {}
+    bootstrap_states = []
+    failed_markets = []
+    monkeypatch.setattr(module, "SessionLocal", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.services.bootstrap_readiness_service.BootstrapReadinessService",
+        _FakeReadinessService,
+    )
+    monkeypatch.setattr(
+        "app.services.runtime_preferences_service.get_runtime_preferences",
+        lambda _db: type("Prefs", (), {"bootstrap_started_at": None})(),
+    )
+    monkeypatch.setattr(
+        "app.services.runtime_preferences_service.set_bootstrap_state",
+        lambda _db, state: bootstrap_states.append(state),
+    )
+    monkeypatch.setattr(
+        module,
+        "mark_market_activity_failed",
+        lambda _db, **kwargs: failed_markets.append(kwargs),
+    )
+
+    task = getattr(module, completion_task_name)
+    result = task.run(
+        **task_kwargs,
+        expected_formula_version=BALANCED_RS_FORMULA_VERSION,
+    )
+
+    assert result == expected_result
+    assert calls["expectations"] == {
+        "US": BALANCED_RS_FORMULA_VERSION,
+    }
+    assert failed_markets[0]["stage_key"] == "market_rs"
+    assert failed_markets[0]["message"] == (
+        "Balanced Market RS activation incomplete"
+    )
+    if completion_task_name == "complete_local_runtime_bootstrap":
+        assert bootstrap_states == ["failed"]
+    else:
+        assert bootstrap_states == []

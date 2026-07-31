@@ -17,6 +17,7 @@ from ..domain.bootstrap.plan import (
     MarketBootstrapPlan,
     build_bootstrap_plan,
 )
+from ..domain.relative_strength import BALANCED_RS_FORMULA_VERSION
 from ..services.bootstrap_price_readiness import evaluate_bootstrap_price_warmup_wait
 from ..services.market_activity_service import (
     mark_current_market_activity_failed,
@@ -364,22 +365,38 @@ def _readiness_failure(market_result) -> ReadinessFailure:
             activity_message="Bootstrap core data incomplete",
             result_reason="missing core market data",
         )
+    if not market_result.scan_ready:
+        return ReadinessFailure(
+            stage_key="scan",
+            activity_message="Bootstrap scan did not publish",
+            result_reason="missing published auto scan",
+        )
     return ReadinessFailure(
-        stage_key="scan",
-        activity_message="Bootstrap scan did not publish",
-        result_reason="missing published auto scan",
+        stage_key="market_rs",
+        activity_message="Balanced Market RS activation incomplete",
+        result_reason="balanced market rs formula not active",
     )
 
 
-def _evaluate_market_readiness(db, *, market: str, bootstrap_started_at=None) -> MarketReadinessCompletion:
+def _evaluate_market_readiness(
+    db,
+    *,
+    market: str,
+    bootstrap_started_at=None,
+    expected_formula_version: str | None = None,
+) -> MarketReadinessCompletion:
     from ..services.bootstrap_readiness_service import BootstrapReadinessService
 
     market_code = normalize_market(market)
-    readiness = BootstrapReadinessService().evaluate(
-        db,
-        enabled_markets=[market_code],
-        bootstrap_started_at=bootstrap_started_at,
-    )
+    readiness_kwargs = {
+        "enabled_markets": [market_code],
+        "bootstrap_started_at": bootstrap_started_at,
+    }
+    if expected_formula_version is not None:
+        readiness_kwargs["expected_formula_versions"] = {
+            market_code: expected_formula_version,
+        }
+    readiness = BootstrapReadinessService().evaluate(db, **readiness_kwargs)
     market_result = readiness.market_results.get(market_code)
     result_market = market_result.market if market_result else market_code
     if market_result and market_result.ready:
@@ -424,6 +441,11 @@ def queue_local_runtime_bootstrap(*, primary_market: str, enabled_markets: Itera
     )
     primary = plan.primary_market
     enabled = list(plan.enabled_markets)
+    completion_formula_kwargs = (
+        {"expected_formula_version": BALANCED_RS_FORMULA_VERSION}
+        if fresh_install
+        else {}
+    )
 
     market_plans_by_code = {market_plan.market: market_plan for market_plan in plan.market_plans}
     primary_plan = market_plans_by_code[primary]
@@ -438,7 +460,10 @@ def queue_local_runtime_bootstrap(*, primary_market: str, enabled_markets: Itera
         primary_task = _queue_market_bootstrap_workflow(
             primary_plan,
             completion_task=complete_local_runtime_bootstrap,
-            completion_kwargs={"primary_market": primary},
+            completion_kwargs={
+                "primary_market": primary,
+                **completion_formula_kwargs,
+            },
             errback_task=fail_local_runtime_bootstrap,
             errback_kwargs={"primary_market": primary},
         )
@@ -453,7 +478,10 @@ def queue_local_runtime_bootstrap(*, primary_market: str, enabled_markets: Itera
             background_task = _queue_market_bootstrap_workflow(
                 market_plan,
                 completion_task=complete_background_market_bootstrap,
-                completion_kwargs={"market": market_plan.market},
+                completion_kwargs={
+                    "market": market_plan.market,
+                    **completion_formula_kwargs,
+                },
                 errback_task=fail_background_market_bootstrap,
                 errback_kwargs={"market": market_plan.market},
             )
@@ -493,6 +521,7 @@ def queue_local_runtime_bootstrap(*, primary_market: str, enabled_markets: Itera
 def complete_local_runtime_bootstrap(
     primary_market: str,
     enabled_markets: Iterable[str] | None = None,
+    expected_formula_version: str | None = None,
 ) -> dict:
     from ..services.runtime_preferences_service import (
         get_runtime_preferences,
@@ -508,6 +537,7 @@ def complete_local_runtime_bootstrap(
             db,
             market=primary_market,
             bootstrap_started_at=prefs.bootstrap_started_at,
+            expected_formula_version=expected_formula_version,
         )
         if not completion.ready:
             reason = _mark_readiness_failure(db, completion)
@@ -539,7 +569,10 @@ def complete_local_runtime_bootstrap(
     name="app.tasks.runtime_bootstrap_tasks.complete_background_market_bootstrap",
     queue="celery",
 )
-def complete_background_market_bootstrap(market: str) -> dict:
+def complete_background_market_bootstrap(
+    market: str,
+    expected_formula_version: str | None = None,
+) -> dict:
     from ..services.runtime_preferences_service import get_runtime_preferences
 
     db = SessionLocal()
@@ -549,6 +582,7 @@ def complete_background_market_bootstrap(market: str) -> dict:
             db,
             market=market,
             bootstrap_started_at=prefs.bootstrap_started_at,
+            expected_formula_version=expected_formula_version,
         )
         if completion.ready:
             return {
