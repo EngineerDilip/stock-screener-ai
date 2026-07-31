@@ -265,12 +265,15 @@ def _is_fresh_install_at_dispatch() -> bool:
 
     db = SessionLocal()
     try:
+        manifest = BootstrapRunManifestRepository().load(db)
+        if manifest is not None and manifest.fresh_install:
+            return True
         return BootstrapReadinessService().is_pristine_installation(db)
     finally:
         db.close()
 ```
 
-Capture it before `build_bootstrap_plan()`, store it on `BootstrapQueueManifestRecorder`, and forward it through `record_runtime_bootstrap_run()` and every `BootstrapRunManifest.create()` call.
+An existing `fresh_install=true` manifest is sticky: a retry after universe or price hydration must remain on the guarded activation path even though the database is no longer pristine. Capture the decision before `build_bootstrap_plan()`, store it on `BootstrapQueueManifestRecorder`, and forward it through `record_runtime_bootstrap_run()` and every `BootstrapRunManifest.create()` call.
 
 - [ ] **Step 9: Run focused tests**
 
