@@ -10,7 +10,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
+from app.domain.relative_strength import LEGACY_RS_FORMULA_VERSION
 from app.infra.db.models.feature_store import FeatureRun
+from app.infra.db.models.relative_strength import MarketRsFormulaPointer, MarketRsRun
+from app.models.industry import IBDGroupRank
 import app.models.scan_result  # noqa: F401
 import app.models.stock  # noqa: F401
 import app.models.stock_universe  # noqa: F401
@@ -199,6 +202,97 @@ def test_sql_service_ignores_inactive_universe_rows_for_core_readiness(readiness
     assert result.missing_markets == ["US"]
     assert result.market_results["US"].core_ready is False
     assert result.market_results["US"].scan_ready is True
+
+
+def test_pristine_installation_ignores_formula_pointer_provisioning(readiness_db) -> None:
+    readiness_db.add(
+        MarketRsFormulaPointer(
+            market="US",
+            formula_version=LEGACY_RS_FORMULA_VERSION,
+        )
+    )
+    readiness_db.commit()
+
+    assert BootstrapReadinessService().is_pristine_installation(readiness_db) is True
+
+
+def test_pristine_installation_rejects_inactive_universe_rows(readiness_db) -> None:
+    readiness_db.add(
+        StockUniverse(
+            symbol="OLD",
+            name="Old Corp",
+            market="US",
+            exchange="NYSE",
+            currency="USD",
+            timezone="America/New_York",
+            is_active=False,
+        )
+    )
+    readiness_db.commit()
+
+    service = BootstrapReadinessService()
+    assert service.is_empty_system(readiness_db) is True
+    assert service.is_pristine_installation(readiness_db) is False
+
+
+@pytest.mark.parametrize(
+    "persisted_row",
+    [
+        StockPrice(
+            symbol="ORPHAN",
+            date=date(2026, 5, 1),
+            open=100,
+            high=101,
+            low=99,
+            close=100,
+            volume=1_000,
+        ),
+        StockFundamental(symbol="ORPHAN", market_cap=1_000_000),
+        Scan(scan_id="pristine-check", criteria={}, status="completed"),
+        FeatureRun(
+            as_of_date=date(2026, 5, 1),
+            run_type="daily_snapshot",
+            status="completed",
+        ),
+        IBDGroupRank(
+            market="US",
+            industry_group="Software",
+            date=date(2026, 5, 1),
+            rank=1,
+            avg_rs_rating=90,
+            rs_formula_version=LEGACY_RS_FORMULA_VERSION,
+        ),
+        MarketRsRun(
+            market="US",
+            as_of_date=date(2026, 5, 1),
+            formula_version=LEGACY_RS_FORMULA_VERSION,
+            status="completed",
+            benchmark_symbol="SPY",
+            benchmark_as_of_date=date(2026, 5, 1),
+            universe_hash="hash",
+            expected_symbol_count=0,
+            eligible_symbol_count=0,
+            excluded_symbol_count=0,
+            diagnostics_json={},
+        ),
+    ],
+    ids=[
+        "price",
+        "fundamental",
+        "scan",
+        "feature-run",
+        "group-rank",
+        "market-rs-run",
+    ],
+)
+def test_pristine_installation_rejects_any_durable_data(
+    readiness_db,
+    persisted_row,
+) -> None:
+    readiness_db.add(persisted_row)
+    readiness_db.commit()
+
+    assert BootstrapReadinessService().is_pristine_installation(readiness_db) is False
 
 
 @pytest.mark.parametrize(

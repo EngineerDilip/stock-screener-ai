@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 
 from ..domain.markets.catalog import get_market_catalog
 from ..infra.db.models.feature_store import FeatureRun
+from ..infra.db.models.relative_strength import MarketRsRun
+from ..models.industry import IBDGroupRank
 from ..models.scan_result import SCAN_TRIGGER_SOURCE_AUTO, Scan
 from ..models.stock import StockFundamental, StockPrice
 from ..models.stock_universe import StockUniverse
@@ -52,6 +54,20 @@ class BootstrapReadinessService:
             self._has_active_universe_rows(db)
             or self._has_price_rows(db)
             or self._has_fundamental_rows(db)
+        )
+
+    def is_pristine_installation(self, db: Session) -> bool:
+        persisted_queries = (
+            db.query(StockUniverse.id),
+            db.query(StockPrice.id),
+            db.query(StockFundamental.id),
+            db.query(Scan.id),
+            db.query(FeatureRun.id),
+            db.query(IBDGroupRank.id),
+            db.query(MarketRsRun.id),
+        )
+        return not any(
+            query.limit(1).first() is not None for query in persisted_queries
         )
 
     def has_core_market_data(self, db: Session, market: str) -> bool:

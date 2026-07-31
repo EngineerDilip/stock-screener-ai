@@ -5,6 +5,13 @@ from __future__ import annotations
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def classify_unit_test_bootstraps_as_non_fresh(monkeypatch):
+    from app.tasks import runtime_bootstrap_tasks as module
+
+    monkeypatch.setattr(module, "_is_fresh_install_at_dispatch", lambda: False)
+
+
 class _FakeSignature:
     def __init__(self, task: str, *, args=None, kwargs=None):
         self.task = task
@@ -358,12 +365,13 @@ def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chai
     monkeypatch.setattr(
         module,
         "record_runtime_bootstrap_run",
-        lambda *, primary_market, enabled_markets, primary_task_id, market_task_ids, queue_state: (
+        lambda *, primary_market, enabled_markets, fresh_install, primary_task_id, market_task_ids, queue_state: (
             events.append(("record", queue_state, primary_task_id, dict(market_task_ids))),
             recorded_runs.append(
                 {
                     "primary_market": primary_market,
                     "enabled_markets": tuple(enabled_markets),
+                    "fresh_install": fresh_install,
                     "primary_task_id": primary_task_id,
                     "market_task_ids": dict(market_task_ids),
                     "queue_state": queue_state,
@@ -406,6 +414,7 @@ def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chai
         {
             "primary_market": "US",
             "enabled_markets": ("US", "HK", "TW"),
+            "fresh_install": False,
             "primary_task_id": None,
             "market_task_ids": {},
             "queue_state": "queueing",
@@ -413,6 +422,7 @@ def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chai
         {
             "primary_market": "US",
             "enabled_markets": ("US", "HK", "TW"),
+            "fresh_install": False,
             "primary_task_id": "primary-task-123",
             "market_task_ids": {
                 "US": "primary-task-123",
@@ -422,6 +432,7 @@ def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chai
         {
             "primary_market": "US",
             "enabled_markets": ("US", "HK", "TW"),
+            "fresh_install": False,
             "primary_task_id": "primary-task-123",
             "market_task_ids": {
                 "US": "primary-task-123",
@@ -432,6 +443,7 @@ def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chai
         {
             "primary_market": "US",
             "enabled_markets": ("US", "HK", "TW"),
+            "fresh_install": False,
             "primary_task_id": "primary-task-123",
             "market_task_ids": {
                 "US": "primary-task-123",
@@ -443,6 +455,7 @@ def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chai
         {
             "primary_market": "US",
             "enabled_markets": ("US", "HK", "TW"),
+            "fresh_install": False,
             "primary_task_id": "primary-task-123",
             "market_task_ids": {
                 "US": "primary-task-123",
@@ -452,6 +465,48 @@ def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chai
             "queue_state": "queued",
         },
     ]
+
+
+@pytest.mark.parametrize("fresh_install", [True, False])
+def test_queue_bootstrap_captures_pristine_installation_once(
+    monkeypatch,
+    fresh_install,
+):
+    from app.tasks import runtime_bootstrap_tasks as module
+
+    class _FakeAsyncResult:
+        def __init__(self, task_id: str) -> None:
+            self.id = task_id
+
+    classifications = []
+    saved = []
+
+    def _classify():
+        classifications.append(fresh_install)
+        return fresh_install
+
+    monkeypatch.setattr(module, "_is_fresh_install_at_dispatch", _classify)
+    monkeypatch.setattr(
+        module,
+        "record_runtime_bootstrap_run",
+        lambda **payload: saved.append(payload) or payload,
+    )
+    monkeypatch.setattr(
+        module,
+        "_queue_market_bootstrap_workflow",
+        lambda market_plan, **_kwargs: _FakeAsyncResult(
+            f"task-{market_plan.market.lower()}"
+        ),
+    )
+
+    module.queue_local_runtime_bootstrap(
+        primary_market="US",
+        enabled_markets=("US", "HK"),
+    )
+
+    assert classifications == [fresh_install]
+    assert saved
+    assert {record["fresh_install"] for record in saved} == {fresh_install}
 
 
 def test_queue_local_runtime_bootstrap_does_not_dispatch_when_initial_manifest_fails(monkeypatch):
@@ -495,11 +550,20 @@ def test_queue_local_runtime_bootstrap_logs_late_manifest_update_failure(monkeyp
     def _queue(market_plan, **_kwargs):
         return _FakeAsyncResult(f"task-{market_plan.market.lower()}")
 
-    def _record(*, primary_market, enabled_markets, primary_task_id, market_task_ids, queue_state):
+    def _record(
+        *,
+        primary_market,
+        enabled_markets,
+        fresh_install,
+        primary_task_id,
+        market_task_ids,
+        queue_state,
+    ):
         recorded_runs.append(
             {
                 "primary_market": primary_market,
                 "enabled_markets": tuple(enabled_markets),
+                "fresh_install": fresh_install,
                 "primary_task_id": primary_task_id,
                 "market_task_ids": dict(market_task_ids),
                 "queue_state": queue_state,
@@ -521,6 +585,7 @@ def test_queue_local_runtime_bootstrap_logs_late_manifest_update_failure(monkeyp
         {
             "primary_market": "US",
             "enabled_markets": ("US", "HK"),
+            "fresh_install": False,
             "primary_task_id": None,
             "market_task_ids": {},
             "queue_state": "queueing",
@@ -528,6 +593,7 @@ def test_queue_local_runtime_bootstrap_logs_late_manifest_update_failure(monkeyp
         {
             "primary_market": "US",
             "enabled_markets": ("US", "HK"),
+            "fresh_install": False,
             "primary_task_id": "task-us",
             "market_task_ids": {"US": "task-us"},
             "queue_state": "partial",
@@ -535,6 +601,7 @@ def test_queue_local_runtime_bootstrap_logs_late_manifest_update_failure(monkeyp
         {
             "primary_market": "US",
             "enabled_markets": ("US", "HK"),
+            "fresh_install": False,
             "primary_task_id": "task-us",
             "market_task_ids": {"US": "task-us", "HK": "task-hk"},
             "queue_state": "partial",
@@ -542,6 +609,7 @@ def test_queue_local_runtime_bootstrap_logs_late_manifest_update_failure(monkeyp
         {
             "primary_market": "US",
             "enabled_markets": ("US", "HK"),
+            "fresh_install": False,
             "primary_task_id": "task-us",
             "market_task_ids": {"US": "task-us", "HK": "task-hk"},
             "queue_state": "queued",
@@ -569,10 +637,11 @@ def test_queue_local_runtime_bootstrap_records_partial_manifest_when_background_
     monkeypatch.setattr(
         module,
         "record_runtime_bootstrap_run",
-        lambda *, primary_market, enabled_markets, primary_task_id, market_task_ids, queue_state: recorded_runs.append(
+        lambda *, primary_market, enabled_markets, fresh_install, primary_task_id, market_task_ids, queue_state: recorded_runs.append(
             {
                 "primary_market": primary_market,
                 "enabled_markets": tuple(enabled_markets),
+                "fresh_install": fresh_install,
                 "primary_task_id": primary_task_id,
                 "market_task_ids": dict(market_task_ids),
                 "queue_state": queue_state,
@@ -590,6 +659,7 @@ def test_queue_local_runtime_bootstrap_records_partial_manifest_when_background_
         {
             "primary_market": "US",
             "enabled_markets": ("US", "HK"),
+            "fresh_install": False,
             "primary_task_id": None,
             "market_task_ids": {},
             "queue_state": "queueing",
@@ -597,6 +667,7 @@ def test_queue_local_runtime_bootstrap_records_partial_manifest_when_background_
         {
             "primary_market": "US",
             "enabled_markets": ("US", "HK"),
+            "fresh_install": False,
             "primary_task_id": "primary-task-123",
             "market_task_ids": {"US": "primary-task-123"},
             "queue_state": "partial",
@@ -604,6 +675,7 @@ def test_queue_local_runtime_bootstrap_records_partial_manifest_when_background_
         {
             "primary_market": "US",
             "enabled_markets": ("US", "HK"),
+            "fresh_install": False,
             "primary_task_id": "primary-task-123",
             "market_task_ids": {"US": "primary-task-123"},
             "queue_state": "dispatch_failed",

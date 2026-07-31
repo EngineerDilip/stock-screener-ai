@@ -84,6 +84,7 @@ class BootstrapQueueManifestRecorder:
     primary_market: str
     enabled_markets: list[str]
     market_task_ids: dict[str, str]
+    fresh_install: bool = False
     primary_task_id: str | None = None
 
     @classmethod
@@ -92,11 +93,13 @@ class BootstrapQueueManifestRecorder:
         *,
         primary_market: str,
         enabled_markets: Iterable[str],
+        fresh_install: bool = False,
     ) -> "BootstrapQueueManifestRecorder":
         return cls(
             primary_market=primary_market,
             enabled_markets=list(enabled_markets),
             market_task_ids={},
+            fresh_install=fresh_install,
         )
 
     def record_queueing(self) -> None:
@@ -136,6 +139,7 @@ class BootstrapQueueManifestRecorder:
         record_runtime_bootstrap_run(
             primary_market=self.primary_market,
             enabled_markets=self.enabled_markets,
+            fresh_install=self.fresh_install,
             primary_task_id=self.primary_task_id,
             market_task_ids=self.market_task_ids,
             queue_state=queue_state.value,
@@ -326,6 +330,7 @@ def record_runtime_bootstrap_run(
     *,
     primary_market: str,
     enabled_markets: Iterable[str],
+    fresh_install: bool = False,
     primary_task_id: str | None = None,
     market_task_ids: dict[str, str | None] | None = None,
     queue_state: BootstrapQueueState | str = BootstrapQueueState.QUEUED,
@@ -337,6 +342,7 @@ def record_runtime_bootstrap_run(
             BootstrapRunManifest.create(
                 primary_market=primary_market,
                 enabled_markets=enabled_markets,
+                fresh_install=fresh_install,
                 primary_task_id=primary_task_id,
                 market_task_ids=market_task_ids or {},
                 queue_state=queue_state,
@@ -395,7 +401,18 @@ def _mark_readiness_failure(db, completion: MarketReadinessCompletion) -> str:
     return failure.result_reason
 
 
+def _is_fresh_install_at_dispatch() -> bool:
+    from ..services.bootstrap_readiness_service import BootstrapReadinessService
+
+    db = SessionLocal()
+    try:
+        return BootstrapReadinessService().is_pristine_installation(db)
+    finally:
+        db.close()
+
+
 def queue_local_runtime_bootstrap(*, primary_market: str, enabled_markets: Iterable[str]) -> str:
+    fresh_install = _is_fresh_install_at_dispatch()
     plan = build_bootstrap_plan(
         primary_market=primary_market,
         enabled_markets=enabled_markets,
@@ -408,6 +425,7 @@ def queue_local_runtime_bootstrap(*, primary_market: str, enabled_markets: Itera
     manifest_recorder = BootstrapQueueManifestRecorder.create(
         primary_market=primary,
         enabled_markets=enabled,
+        fresh_install=fresh_install,
     )
     manifest_recorder.record_queueing()
 

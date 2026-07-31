@@ -37,6 +37,7 @@ class BootstrapQueueState(str, Enum):
 class BootstrapRunManifest:
     primary_market: str
     enabled_markets: tuple[str, ...]
+    fresh_install: bool = False
     primary_task_id: str | None = None
     market_task_ids: Mapping[str, str | None] = field(default_factory=dict)
     queue_state: BootstrapQueueState | str = BootstrapQueueState.QUEUED
@@ -64,6 +65,7 @@ class BootstrapRunManifest:
         return cls(
             primary_market=str(payload["primary_market"]),
             enabled_markets=tuple(payload.get("enabled_markets") or ()),
+            fresh_install=payload.get("fresh_install") is True,
             primary_task_id=(
                 str(payload["primary_task_id"])
                 if payload.get("primary_task_id") is not None
@@ -86,6 +88,7 @@ class BootstrapRunManifest:
         *,
         primary_market: str,
         enabled_markets: Iterable[str],
+        fresh_install: bool = False,
         primary_task_id: str | None = None,
         market_task_ids: Mapping[str, str | None] | None = None,
         queue_state: BootstrapQueueState | str = BootstrapQueueState.QUEUED,
@@ -94,6 +97,7 @@ class BootstrapRunManifest:
         return cls(
             primary_market=primary_market,
             enabled_markets=tuple(enabled_markets),
+            fresh_install=fresh_install,
             primary_task_id=primary_task_id,
             market_task_ids=dict(market_task_ids or {}),
             queue_state=queue_state,
@@ -104,6 +108,7 @@ class BootstrapRunManifest:
         payload: dict[str, Any] = {
             "primary_market": self.primary_market,
             "enabled_markets": list(self.enabled_markets),
+            "fresh_install": self.fresh_install,
             "primary_task_id": self.primary_task_id,
             "market_task_ids": dict(self.market_task_ids),
             "queue_state": self.queue_state.value,

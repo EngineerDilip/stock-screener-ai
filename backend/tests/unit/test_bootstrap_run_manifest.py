@@ -83,3 +83,26 @@ def test_bootstrap_run_manifest_rejects_unknown_queue_state():
             enabled_markets=("US",),
             queue_state="almost_queued",
         )
+
+
+def test_bootstrap_manifest_round_trips_fresh_install() -> None:
+    from app.services.bootstrap_run_manifest import BootstrapRunManifest
+
+    manifest = BootstrapRunManifest.create(
+        primary_market="US",
+        enabled_markets=("US", "HK"),
+        fresh_install=True,
+    )
+
+    assert manifest.to_payload()["fresh_install"] is True
+    assert BootstrapRunManifest.from_payload(manifest.to_payload()).fresh_install is True
+
+
+def test_bootstrap_manifest_treats_legacy_payload_as_non_fresh() -> None:
+    from app.services.bootstrap_run_manifest import BootstrapRunManifest
+
+    manifest = BootstrapRunManifest.from_payload(
+        {"primary_market": "US", "enabled_markets": ["US"]}
+    )
+
+    assert manifest.fresh_install is False
