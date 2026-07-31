@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,6 +18,11 @@ from app.infra.db.models.feature_store import FeatureRun, FeatureRunPointer
 from app.infra.db.models.relative_strength import MarketRsFormulaPointer, MarketRsRun
 from app.infra.db.repositories.feature_run_repo import SqlFeatureRunRepository
 from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
+from app.models.industry import IBDGroupRank
+from app.services.market_rs_rollout_executor import (
+    MarketRsRolloutExecutor,
+    MarketRsRolloutRequest,
+)
 from app.services.market_rs_rollout_service import (
     ActivationValidationReport,
     MarketRsRolloutService,
@@ -50,6 +56,34 @@ def _seed_activation_candidates(db_session):
     )
     db_session.add(rs_run)
     db_session.flush()
+    db_session.add_all(
+        [
+            IBDGroupRank(
+                market="US",
+                industry_group="Software",
+                date=through_date,
+                rank=1,
+                avg_rs_rating=91,
+                avg_rs_rating_1m=89,
+                avg_rs_rating_3m=86,
+                num_stocks=10,
+                rs_formula_version=BALANCED_RS_FORMULA_VERSION,
+                market_rs_run_id=rs_run.id,
+            ),
+            IBDGroupRank(
+                market="US",
+                industry_group="Banks",
+                date=through_date,
+                rank=2,
+                avg_rs_rating=75,
+                avg_rs_rating_1m=73,
+                avg_rs_rating_3m=70,
+                num_stocks=8,
+                rs_formula_version=BALANCED_RS_FORMULA_VERSION,
+                market_rs_run_id=rs_run.id,
+            ),
+        ]
+    )
     old_feature = FeatureRun(
         as_of_date=date(2026, 4, 9),
         run_type="daily_snapshot",
@@ -223,3 +257,120 @@ def test_failure_after_market_pointer_flush_rolls_back_both_pointers(
         "latest_published_market:US",
     ).run_id == old_id
     assert invalidations == []
+
+
+def test_shared_executor_activates_exact_group_and_history_identity(
+    db_session,
+    tmp_path,
+    monkeypatch,
+):
+    from app.tasks import group_history_tasks
+
+    rs_run_id, candidate_id, _old_id = _seed_activation_candidates(db_session)
+    service = _service(MarketRsRunRepository(), SqlFeatureRunRepository)
+    report = SimpleNamespace(
+        ok=True,
+        failed_count=0,
+        to_dict=lambda: {"failed_count": 0},
+    )
+    monkeypatch.setattr(service, "backfill", lambda *args, **kwargs: report)
+
+    def _export_static(*, static_staging_dir, **_kwargs):
+        (static_staging_dir / "manifest.json").write_text(
+            '{"schema_version":"static-site-v3"}',
+            encoding="utf-8",
+        )
+
+    def _validate(*args, static_staging_dir, **kwargs):
+        manifest_hash = MarketRsStaticArtifactValidator.bundle_fingerprint(
+            static_staging_dir,
+            market="US",
+        ).sha256
+        return _validation(rs_run_id, candidate_id, manifest_hash)
+
+    monkeypatch.setattr(service, "validate_activation", _validate)
+    monkeypatch.setattr(
+        service.validator,
+        "revalidate_static",
+        lambda *args, **kwargs: (),
+    )
+    invalidations = MagicMock()
+    live_publish = MagicMock()
+    monkeypatch.setattr(
+        activation_module,
+        "bump_group_rankings_epoch",
+        invalidations,
+    )
+    executor = MarketRsRolloutExecutor(
+        rollout_service=service,
+        feature_snapshot_builder=lambda **_kwargs: candidate_id,
+        static_exporter=_export_static,
+        live_group_publisher=live_publish,
+    )
+
+    outcome = executor.execute(
+        db_session,
+        request=MarketRsRolloutRequest(
+            market="US",
+            through_date=date(2026, 4, 10),
+            activate=True,
+            static_staging_dir=tmp_path / "stage",
+        ),
+    )
+
+    db_session.expire_all()
+    repository = MarketRsRunRepository()
+    assert outcome.activated is True
+    assert repository.active_formula(db_session, market="US") == (
+        BALANCED_RS_FORMULA_VERSION
+    )
+    run = repository.get_completed_exact(
+        db_session,
+        market="US",
+        as_of_date=date(2026, 4, 10),
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+    )
+    groups = (
+        db_session.query(IBDGroupRank)
+        .filter(
+            IBDGroupRank.market == "US",
+            IBDGroupRank.date == date(2026, 4, 10),
+            IBDGroupRank.rs_formula_version == BALANCED_RS_FORMULA_VERSION,
+        )
+        .all()
+    )
+    assert run is not None
+    assert groups
+    assert {row.market_rs_run_id for row in groups} == {run.id}
+    assert all(row.avg_rs_rating_1m is not None for row in groups)
+    assert all(row.avg_rs_rating_3m is not None for row in groups)
+
+    feature_pointer = db_session.get(
+        FeatureRunPointer,
+        "latest_published_market:US",
+    )
+    feature_run = db_session.get(FeatureRun, feature_pointer.run_id)
+    assert feature_run.id == candidate_id
+    assert feature_run.config_json == {
+        "market": "US",
+        "rs_formula_version": BALANCED_RS_FORMULA_VERSION,
+        "market_rs_run_id": run.id,
+        "rs_as_of_date": "2026-04-10",
+        "rs_universe_size": 1,
+    }
+
+    calendar = MagicMock()
+    calendar.last_completed_trading_day.return_value = date(2026, 4, 10)
+    monkeypatch.setattr(
+        group_history_tasks,
+        "get_market_calendar_service",
+        lambda: calendar,
+    )
+    target = group_history_tasks._resolve_current_group_history_target(
+        db_session,
+        market="US",
+    )
+    assert target.formula_version == BALANCED_RS_FORMULA_VERSION
+    assert target.through_date == date(2026, 4, 10)
+    invalidations.assert_called_once_with("US")
+    live_publish.assert_called_once_with("US")

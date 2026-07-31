@@ -86,6 +86,30 @@ def test_ensure_group_history_invalidates_cache_and_publishes_us_snapshot(
     db.close.assert_called_once()
 
 
+def test_group_history_target_uses_active_formula_pointer(monkeypatch):
+    from app.infra.db.repositories import market_rs_repo
+    from app.tasks import group_history_tasks as module
+
+    repository = Mock()
+    repository.active_formula.return_value = "balanced-percentile-v1"
+    monkeypatch.setattr(
+        market_rs_repo,
+        "MarketRsRunRepository",
+        lambda: repository,
+    )
+    calendar = Mock()
+    calendar.last_completed_trading_day.return_value = date(2026, 6, 30)
+    monkeypatch.setattr(module, "get_market_calendar_service", lambda: calendar)
+    db = Mock()
+
+    target = module._resolve_current_group_history_target(db, market="us")
+
+    assert target.market == "US"
+    assert target.formula_version == "balanced-percentile-v1"
+    assert target.through_date == date(2026, 6, 30)
+    repository.active_formula.assert_called_once_with(db, market="US")
+
+
 def test_strict_group_history_task_raises_when_readiness_remains_incomplete(
     monkeypatch,
 ):
