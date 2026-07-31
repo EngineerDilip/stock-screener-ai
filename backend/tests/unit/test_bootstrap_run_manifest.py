@@ -264,6 +264,24 @@ def test_repository_can_supersede_a_legacy_manifest_without_generation_ownership
         engine.dispose()
 
 
+def test_partial_manifest_reconciles_after_every_enabled_market_finishes() -> None:
+    from app.services.bootstrap_run_manifest import BootstrapRunManifest
+
+    manifest = BootstrapRunManifest.create(
+        primary_market="US",
+        enabled_markets=("US", "HK"),
+        dispatch_id="dispatch-current",
+        queue_state="partial",
+    ).with_renewed_ownership()
+
+    after_primary = manifest.finish_market(market="US", succeeded=True)
+    completed = after_primary.finish_market(market="HK", succeeded=True)
+
+    assert after_primary.queue_state.value == "partial"
+    assert completed.queue_state.value == "completed"
+    assert completed.has_active_ownership() is False
+
+
 def test_repository_allows_a_new_dispatch_after_the_current_one_is_terminal() -> None:
     from app.services.bootstrap_run_manifest import (
         BootstrapRunManifest,

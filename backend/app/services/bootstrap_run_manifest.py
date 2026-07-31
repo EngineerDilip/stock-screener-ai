@@ -275,7 +275,10 @@ class BootstrapRunManifest:
         return deadline > (now or datetime.now(timezone.utc))
 
     def reconcile_terminal_state(self) -> BootstrapRunManifest:
-        if self.queue_state == BootstrapQueueState.QUEUED:
+        if self.queue_state in {
+            BootstrapQueueState.PARTIAL,
+            BootstrapQueueState.QUEUED,
+        }:
             expected = set(self.enabled_markets)
         elif self.queue_state == BootstrapQueueState.DISPATCH_FAILED:
             expected = {

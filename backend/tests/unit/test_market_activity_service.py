@@ -86,7 +86,7 @@ def test_runtime_activity_status_reports_primary_bootstrap_progress(
     assert payload["bootstrap"]["app_ready"] is False
     assert payload["bootstrap"]["current_stage"] == "Price Refresh"
     assert payload["bootstrap"]["progress_mode"] == "determinate"
-    assert payload["bootstrap"]["percent"] == pytest.approx(12.5)
+    assert payload["bootstrap"]["percent"] == pytest.approx(10.71)
     assert payload["summary"]["active_market_count"] == 2
     assert payload["summary"]["active_markets"] == ["US", "HK"]
     us_market = next(item for item in payload["markets"] if item["market"] == "US")
@@ -886,7 +886,7 @@ def test_runtime_activity_status_reports_active_background_bootstrap_progress_af
     assert payload["bootstrap"]["state"] == "ready"
     assert payload["bootstrap"]["app_ready"] is True
     assert payload["bootstrap"]["progress_mode"] == "determinate"
-    assert payload["bootstrap"]["percent"] == pytest.approx(38.67)
+    assert payload["bootstrap"]["percent"] == pytest.approx(33.14)
     assert payload["bootstrap"]["current"] == 1200
     assert payload["bootstrap"]["total"] == 3750
     assert payload["bootstrap"]["current_stage"] == "Fundamentals Refresh"
@@ -1216,10 +1216,25 @@ def test_runtime_activity_status_exposes_bootstrap_stage_metadata(
         {"key": "universe", "label": "Universe Refresh"},
         {"key": "prices", "label": "Price Refresh"},
         {"key": "fundamentals", "label": "Fundamentals Refresh"},
+        {"key": "market_rs", "label": "Market RS"},
         {"key": "breadth", "label": "Breadth Calculation"},
         {"key": "groups", "label": "Group Rankings"},
         {"key": "scan", "label": "Scan"},
     ]
+
+
+def test_completed_market_rs_stage_contributes_bootstrap_progress() -> None:
+    from app.services.runtime_activity_contract import RuntimeActivityRecord
+    from app.services.runtime_activity_presenter import _bootstrap_progress_percent
+
+    record = RuntimeActivityRecord.create(
+        market="US",
+        stage_key="market_rs",
+        lifecycle="bootstrap",
+        status="completed",
+    )
+
+    assert _bootstrap_progress_percent(record) == 57.14
 
 
 def test_runtime_activity_status_returns_idle_markets_without_activity(
