@@ -1,140 +1,98 @@
-"""Shared execution boundary for guarded balanced Market RS rollout."""
+"""Guarded balanced Market RS activation orchestration."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Protocol
 
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
+from app.services.market_rs_activation_coverage import (
+    market_rs_activation_start_date,
+)
 from app.services.market_rs_rollout_contracts import normalize_rollout_market
 from app.services.market_rs_rollout_service import MarketRsRolloutService
 
 
-class MarketRsRolloutExecutionError(RuntimeError):
+class MarketRsActivationExecutionError(RuntimeError):
     pass
 
 
+class FeatureSnapshotBuilder(Protocol):
+    def __call__(self, *, market: str, through_date: date) -> int: ...
+
+
+class StaticExporter(Protocol):
+    def __call__(
+        self,
+        *,
+        market: str,
+        feature_run_id: int,
+        static_staging_dir: Path,
+    ) -> None: ...
+
+
+class LiveGroupPublisher(Protocol):
+    def __call__(self, market: str) -> None: ...
+
+
 @dataclass(frozen=True)
-class MarketRsRolloutRequest:
+class MarketRsActivationRequest:
     market: str
     through_date: date
-    start_date: date | None = None
-    activate: bool = False
-    static_staging_dir: Path | None = None
+    static_staging_dir: Path
 
 
 @dataclass(frozen=True)
-class MarketRsRolloutOutcome:
+class MarketRsActivationOutcome:
     backfill: dict[str, Any]
-    activated: bool
     market: str
     formula_version: str
-    feature_run_id: int | None = None
-    validation: dict[str, Any] | None = None
-    static_staging_dir: str | None = None
+    feature_run_id: int
+    validation: dict[str, Any]
+    static_staging_dir: str
 
     def to_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
+        return {
             "backfill": dict(self.backfill),
-            "activated": self.activated,
+            "activated": True,
+            "market": self.market,
+            "formula_version": self.formula_version,
+            "feature_run_id": self.feature_run_id,
+            "validation": dict(self.validation),
+            "static_staging_dir": self.static_staging_dir,
         }
-        if self.activated:
-            payload.update(
-                market=self.market,
-                formula_version=self.formula_version,
-                feature_run_id=self.feature_run_id,
-                validation=dict(self.validation or {}),
-                static_staging_dir=self.static_staging_dir,
-            )
-        return payload
 
 
-def validate_static_staging_directory(path: Path | None) -> Path:
-    if path is None:
-        raise MarketRsRolloutExecutionError(
-            "--activate requires --static-staging-dir"
-        )
+def validate_static_staging_directory(path: Path) -> Path:
     if not path.is_absolute():
-        raise MarketRsRolloutExecutionError(
+        raise MarketRsActivationExecutionError(
             "--static-staging-dir must be an absolute path"
         )
     resolved = path.resolve()
     serving_dir = Path(settings.static_export_output_dir).expanduser().resolve()
     if resolved == serving_dir:
-        raise MarketRsRolloutExecutionError(
+        raise MarketRsActivationExecutionError(
             "--static-staging-dir must not be the configured serving directory"
         )
     if resolved.exists() and any(resolved.iterdir()):
-        raise MarketRsRolloutExecutionError(
-            "--static-staging-dir must be empty"
-        )
+        raise MarketRsActivationExecutionError("--static-staging-dir must be empty")
     resolved.mkdir(parents=True, exist_ok=True)
     return resolved
 
 
-def build_balanced_feature_snapshot(*, market: str, through_date: date) -> int:
-    from app.interfaces.tasks.feature_store_tasks import build_daily_snapshot
-
-    result = build_daily_snapshot.run(
-        market=market,
-        as_of_date_str=through_date.isoformat(),
-        universe_name=f"market:{market}",
-        publish_pointer_key=f"rollout_rs:{BALANCED_RS_FORMULA_VERSION}:{market}",
-        static_daily_mode=True,
-        ignore_runtime_market_gate=True,
-        skip_if_published=False,
-        rs_formula_version_override=BALANCED_RS_FORMULA_VERSION,
-    )
-    if not isinstance(result, dict) or result.get("status") != "published":
-        raise MarketRsRolloutExecutionError(
-            f"Balanced Feature snapshot did not publish: {result}"
-        )
-    run_id = result.get("run_id")
-    if run_id is None:
-        raise MarketRsRolloutExecutionError(
-            "Balanced Feature snapshot returned no run ID"
-        )
-    return int(run_id)
-
-
-def export_static_v3(
-    *,
-    market: str,
-    feature_run_id: int,
-    static_staging_dir: Path,
-) -> None:
-    from app.database import SessionLocal
-    from app.services.static_site_export_service import StaticSiteExportService
-
-    StaticSiteExportService(SessionLocal).export(
-        static_staging_dir,
-        clean=True,
-        markets=(market,),
-        rs_formula_version_overrides={market: BALANCED_RS_FORMULA_VERSION},
-        feature_run_ids_by_market={market: feature_run_id},
-    )
-
-
-def publish_live_groups(market: str) -> None:
-    from app.services.ui_snapshot_service import safe_publish_groups_bootstrap
-
-    if market == "US":
-        safe_publish_groups_bootstrap()
-
-
-class MarketRsRolloutExecutor:
+class MarketRsActivationExecutor:
     def __init__(
         self,
         *,
         rollout_service: MarketRsRolloutService,
-        feature_snapshot_builder: Callable[..., int],
-        static_exporter: Callable[..., None],
-        live_group_publisher: Callable[[str], None],
+        feature_snapshot_builder: FeatureSnapshotBuilder,
+        static_exporter: StaticExporter,
+        live_group_publisher: LiveGroupPublisher,
     ) -> None:
         self.rollout_service = rollout_service
         self.feature_snapshot_builder = feature_snapshot_builder
@@ -145,29 +103,19 @@ class MarketRsRolloutExecutor:
         self,
         db: Session,
         *,
-        request: MarketRsRolloutRequest,
-    ) -> MarketRsRolloutOutcome:
+        request: MarketRsActivationRequest,
+    ) -> MarketRsActivationOutcome:
         market = normalize_rollout_market(request.market)
-        staging_dir = (
-            validate_static_staging_directory(request.static_staging_dir)
-            if request.activate
-            else None
-        )
+        staging_dir = validate_static_staging_directory(request.static_staging_dir)
+        coverage_start_date = market_rs_activation_start_date(request.through_date)
         report = self.rollout_service.backfill(
             db,
             market=market,
             through_date=request.through_date,
-            start_date=request.start_date,
+            coverage_start_date=coverage_start_date,
         )
-        if not request.activate:
-            return MarketRsRolloutOutcome(
-                backfill=report.to_dict(),
-                activated=False,
-                market=market,
-                formula_version=BALANCED_RS_FORMULA_VERSION,
-            )
         if not report.ok or report.failed_count:
-            raise MarketRsRolloutExecutionError(
+            raise MarketRsActivationExecutionError(
                 "One or more required backfill dates failed; repair the reported "
                 "dates before activation"
             )
@@ -188,9 +136,10 @@ class MarketRsRolloutExecutor:
             through_date=request.through_date,
             feature_run_id=feature_run_id,
             static_staging_dir=staging_dir,
+            coverage_start_date=coverage_start_date,
         )
         if not validation.ok:
-            raise MarketRsRolloutExecutionError(
+            raise MarketRsActivationExecutionError(
                 "Activation validation failed: " + "; ".join(validation.errors)
             )
         self.rollout_service.activate(
@@ -202,12 +151,20 @@ class MarketRsRolloutExecutor:
             static_staging_dir=staging_dir,
         )
         self.live_group_publisher(market)
-        return MarketRsRolloutOutcome(
+        return MarketRsActivationOutcome(
             backfill=report.to_dict(),
-            activated=True,
             market=market,
             formula_version=BALANCED_RS_FORMULA_VERSION,
             feature_run_id=feature_run_id,
             validation=validation.to_dict(),
             static_staging_dir=str(staging_dir),
         )
+
+
+__all__ = [
+    "MarketRsActivationExecutionError",
+    "MarketRsActivationExecutor",
+    "MarketRsActivationOutcome",
+    "MarketRsActivationRequest",
+    "validate_static_staging_directory",
+]

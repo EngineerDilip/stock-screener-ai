@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
 
@@ -37,6 +37,7 @@ class BootstrapQueueState(str, Enum):
 class BootstrapRunManifest:
     primary_market: str
     enabled_markets: tuple[str, ...]
+    dispatch_id: str | None = None
     fresh_install: bool = False
     primary_task_id: str | None = None
     market_task_ids: Mapping[str, str | None] = field(default_factory=dict)
@@ -58,13 +59,20 @@ class BootstrapRunManifest:
                 for market, task_id in self.market_task_ids.items()
             },
         )
-        object.__setattr__(self, "queue_state", BootstrapQueueState.parse(self.queue_state))
+        object.__setattr__(
+            self, "queue_state", BootstrapQueueState.parse(self.queue_state)
+        )
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> "BootstrapRunManifest":
         return cls(
             primary_market=str(payload["primary_market"]),
             enabled_markets=tuple(payload.get("enabled_markets") or ()),
+            dispatch_id=(
+                str(payload["dispatch_id"])
+                if payload.get("dispatch_id") is not None
+                else None
+            ),
             fresh_install=payload.get("fresh_install") is True,
             primary_task_id=(
                 str(payload["primary_task_id"])
@@ -88,6 +96,7 @@ class BootstrapRunManifest:
         *,
         primary_market: str,
         enabled_markets: Iterable[str],
+        dispatch_id: str | None = None,
         fresh_install: bool = False,
         primary_task_id: str | None = None,
         market_task_ids: Mapping[str, str | None] | None = None,
@@ -97,6 +106,7 @@ class BootstrapRunManifest:
         return cls(
             primary_market=primary_market,
             enabled_markets=tuple(enabled_markets),
+            dispatch_id=dispatch_id,
             fresh_install=fresh_install,
             primary_task_id=primary_task_id,
             market_task_ids=dict(market_task_ids or {}),
@@ -108,6 +118,7 @@ class BootstrapRunManifest:
         payload: dict[str, Any] = {
             "primary_market": self.primary_market,
             "enabled_markets": list(self.enabled_markets),
+            "dispatch_id": self.dispatch_id,
             "fresh_install": self.fresh_install,
             "primary_task_id": self.primary_task_id,
             "market_task_ids": dict(self.market_task_ids),
@@ -120,7 +131,9 @@ class BootstrapRunManifest:
 
 class BootstrapRunManifestRepository:
     def load(self, db: Session) -> BootstrapRunManifest | None:
-        setting = db.query(AppSetting).filter(AppSetting.key == BOOTSTRAP_RUN_KEY).first()
+        setting = (
+            db.query(AppSetting).filter(AppSetting.key == BOOTSTRAP_RUN_KEY).first()
+        )
         if setting is None:
             return None
         try:
@@ -137,7 +150,12 @@ class BootstrapRunManifestRepository:
         manifest: BootstrapRunManifest,
     ) -> dict[str, Any]:
         encoded = json.dumps(manifest.to_payload())
-        setting = db.query(AppSetting).filter(AppSetting.key == BOOTSTRAP_RUN_KEY).first()
+        setting = (
+            db.query(AppSetting)
+            .filter(AppSetting.key == BOOTSTRAP_RUN_KEY)
+            .with_for_update()
+            .first()
+        )
         if setting is None:
             setting = AppSetting(
                 key=BOOTSTRAP_RUN_KEY,
@@ -147,6 +165,20 @@ class BootstrapRunManifestRepository:
             )
             db.add(setting)
         else:
+            try:
+                current_payload = json.loads(setting.value)
+                current = BootstrapRunManifest.from_payload(current_payload)
+            except (json.JSONDecodeError, TypeError, KeyError, ValueError):
+                current = None
+            if (
+                current is not None
+                and manifest.dispatch_id is not None
+                and current.dispatch_id == manifest.dispatch_id
+                and not current.fresh_install
+                and manifest.fresh_install
+            ):
+                manifest = replace(manifest, fresh_install=False)
+                encoded = json.dumps(manifest.to_payload())
             setting.value = encoded
             setting.category = RUNTIME_ACTIVITY_CATEGORY
             setting.description = BOOTSTRAP_RUN_DESCRIPTION

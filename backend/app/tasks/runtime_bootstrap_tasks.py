@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Iterable
+from uuid import uuid4
 
 from celery import chain
 from celery.exceptions import Retry
@@ -24,9 +24,9 @@ from ..services.market_activity_service import (
     mark_market_activity_completed,
     mark_market_activity_failed,
     mark_market_activity_progress,
+    save_runtime_bootstrap_run,
 )
 from ..services.bootstrap_run_manifest import (
-    BootstrapRunManifest,
     BootstrapQueueState,
     BootstrapRunManifestRepository,
 )
@@ -85,6 +85,7 @@ class BootstrapQueueManifestRecorder:
     primary_market: str
     enabled_markets: list[str]
     market_task_ids: dict[str, str]
+    dispatch_id: str
     fresh_install: bool = False
     primary_task_id: str | None = None
 
@@ -100,6 +101,7 @@ class BootstrapQueueManifestRecorder:
             primary_market=primary_market,
             enabled_markets=list(enabled_markets),
             market_task_ids={},
+            dispatch_id=uuid4().hex,
             fresh_install=fresh_install,
         )
 
@@ -140,6 +142,7 @@ class BootstrapQueueManifestRecorder:
         record_runtime_bootstrap_run(
             primary_market=self.primary_market,
             enabled_markets=self.enabled_markets,
+            dispatch_id=self.dispatch_id,
             fresh_install=self.fresh_install,
             primary_task_id=self.primary_task_id,
             market_task_ids=self.market_task_ids,
@@ -251,7 +254,9 @@ def wait_for_bootstrap_price_warmup(
     db = SessionLocal()
     try:
         warmup_metadata = get_price_cache().get_warmup_metadata(market=market_code)
-        as_of_date = get_market_calendar_service().last_completed_trading_day(market_code)
+        as_of_date = get_market_calendar_service().last_completed_trading_day(
+            market_code
+        )
         retries = getattr(getattr(self, "request", None), "retries", 0) or 0
         decision = evaluate_bootstrap_price_warmup_wait(
             db,
@@ -335,6 +340,7 @@ def record_runtime_bootstrap_run(
     *,
     primary_market: str,
     enabled_markets: Iterable[str],
+    dispatch_id: str | None = None,
     fresh_install: bool = False,
     primary_task_id: str | None = None,
     market_task_ids: dict[str, str | None] | None = None,
@@ -342,17 +348,15 @@ def record_runtime_bootstrap_run(
 ) -> dict:
     db = SessionLocal()
     try:
-        return BootstrapRunManifestRepository().save(
+        return save_runtime_bootstrap_run(
             db,
-            BootstrapRunManifest.create(
-                primary_market=primary_market,
-                enabled_markets=enabled_markets,
-                fresh_install=fresh_install,
-                primary_task_id=primary_task_id,
-                market_task_ids=market_task_ids or {},
-                queue_state=queue_state,
-                queued_at=datetime.now(timezone.utc).isoformat(),
-            ),
+            primary_market=primary_market,
+            enabled_markets=enabled_markets,
+            dispatch_id=dispatch_id,
+            fresh_install=fresh_install,
+            primary_task_id=primary_task_id,
+            market_task_ids=market_task_ids or {},
+            queue_state=BootstrapQueueState.parse(queue_state).value,
         )
     finally:
         db.close()
@@ -435,7 +439,21 @@ def _is_fresh_install_at_dispatch() -> bool:
         db.close()
 
 
-def queue_local_runtime_bootstrap(*, primary_market: str, enabled_markets: Iterable[str]) -> str:
+def _consume_fresh_install_if_complete(db) -> bool:
+    from ..infra.db.repositories.market_rs_repo import MarketRsRunRepository
+    from ..services.fresh_balanced_rs_bootstrap_lifecycle import (
+        FreshBalancedRsBootstrapLifecycle,
+    )
+
+    return FreshBalancedRsBootstrapLifecycle(
+        manifest_repository=BootstrapRunManifestRepository(),
+        formula_repository=MarketRsRunRepository(),
+    ).consume_if_complete(db)
+
+
+def queue_local_runtime_bootstrap(
+    *, primary_market: str, enabled_markets: Iterable[str]
+) -> str:
     fresh_install = _is_fresh_install_at_dispatch()
     plan = build_bootstrap_plan(
         primary_market=primary_market,
@@ -450,7 +468,9 @@ def queue_local_runtime_bootstrap(*, primary_market: str, enabled_markets: Itera
         else {}
     )
 
-    market_plans_by_code = {market_plan.market: market_plan for market_plan in plan.market_plans}
+    market_plans_by_code = {
+        market_plan.market: market_plan for market_plan in plan.market_plans
+    }
     primary_plan = market_plans_by_code[primary]
     manifest_recorder = BootstrapQueueManifestRecorder.create(
         primary_market=primary,
@@ -531,7 +551,9 @@ def complete_local_runtime_bootstrap(
         set_bootstrap_state,
     )
 
-    del enabled_markets  # Legacy Celery payload compatibility; readiness is primary-only.
+    del (
+        enabled_markets
+    )  # Legacy Celery payload compatibility; readiness is primary-only.
     primary_market = normalize_market(primary_market)
     db = SessionLocal()
     try:
@@ -551,6 +573,8 @@ def complete_local_runtime_bootstrap(
                 "market": completion.market,
                 "reason": reason,
             }
+        if expected_formula_version == BALANCED_RS_FORMULA_VERSION:
+            _consume_fresh_install_if_complete(db)
         set_bootstrap_state(db, "ready")
     finally:
         db.close()
@@ -588,6 +612,8 @@ def complete_background_market_bootstrap(
             expected_formula_version=expected_formula_version,
         )
         if completion.ready:
+            if expected_formula_version == BALANCED_RS_FORMULA_VERSION:
+                _consume_fresh_install_if_complete(db)
             return {
                 "status": "ready",
                 "market": completion.market,

@@ -45,8 +45,7 @@ class MarketRsBackfillService:
             return exc.reason_code
         name = type(exc).__name__
         snake = "".join(
-            ("_" + char.lower()) if char.isupper() else char
-            for char in name
+            ("_" + char.lower()) if char.isupper() else char for char in name
         ).lstrip("_")
         return f"{stage}_{snake}" if snake else f"{stage}_failed"
 
@@ -68,11 +67,14 @@ class MarketRsBackfillService:
         *,
         market: str,
         through_date: date,
+        probe_start_date: date | None = None,
     ) -> date | None:
         normalized = normalize_rollout_market(market)
         available_start = self._earliest_available_price_date(db, normalized)
         if available_start is None or available_start > through_date:
             return None
+        if probe_start_date is not None:
+            available_start = max(available_start, probe_start_date)
         sessions = self.calendar_service.trading_days(
             normalized,
             available_start,
@@ -98,6 +100,7 @@ class MarketRsBackfillService:
         market: str,
         through_date: date,
         first_valid_date: date | None = None,
+        coverage_start_date: date | None = None,
     ) -> tuple[date, ...]:
         normalized = normalize_rollout_market(market)
         boundary = first_valid_date or self.earliest_backfillable_date(
@@ -107,6 +110,8 @@ class MarketRsBackfillService:
         )
         if boundary is None:
             return ()
+        if coverage_start_date is not None:
+            boundary = max(boundary, coverage_start_date)
         return tuple(
             session_date
             for session_date in self.calendar_service.trading_days(
@@ -124,6 +129,7 @@ class MarketRsBackfillService:
         market: str,
         through_date: date,
         start_date: date | None = None,
+        coverage_start_date: date | None = None,
     ) -> BackfillReport:
         normalized = normalize_rollout_market(market)
         groups_applicable = (
@@ -133,6 +139,7 @@ class MarketRsBackfillService:
             db,
             market=normalized,
             through_date=through_date,
+            probe_start_date=coverage_start_date,
         )
         if first_valid is None:
             return BackfillReport(
@@ -157,6 +164,7 @@ class MarketRsBackfillService:
             market=normalized,
             through_date=through_date,
             first_valid_date=first_valid,
+            coverage_start_date=coverage_start_date,
         )
         results: list[BackfillDateResult] = []
         for calculation_date in candidates:
@@ -213,9 +221,7 @@ class MarketRsBackfillService:
                         if row.get("market_rs_run_id") is not None
                     }
                     group_run_id = (
-                        next(iter(group_run_ids))
-                        if len(group_run_ids) == 1
-                        else None
+                        next(iter(group_run_ids)) if len(group_run_ids) == 1 else None
                     )
                     if group_run_id != run.id:
                         raise RuntimeError(
@@ -234,9 +240,8 @@ class MarketRsBackfillService:
             except Exception as exc:
                 db.rollback()
                 reason_code = self._reason_code(exc, stage=stage)
-                if (
-                    stage == "group_calculation"
-                    and not isinstance(exc, MarketRsInputUnavailable)
+                if stage == "group_calculation" and not isinstance(
+                    exc, MarketRsInputUnavailable
                 ):
                     reason_code = "group_calculation_failed"
                 diagnostics: dict[str, object] = {
@@ -271,9 +276,7 @@ class MarketRsBackfillService:
             candidate_count=len(candidates),
             completed_count=len(completed),
             failed_count=len(failed),
-            latest_run_id=(
-                completed[-1].market_rs_run_id if completed else None
-            ),
+            latest_run_id=(completed[-1].market_rs_run_id if completed else None),
             group_row_count=sum(item.group_row_count for item in completed),
             results=tuple(results),
         )

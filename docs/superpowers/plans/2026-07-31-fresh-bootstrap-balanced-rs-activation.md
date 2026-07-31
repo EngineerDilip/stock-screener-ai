@@ -4,7 +4,7 @@
 
 **Goal:** Make a genuinely empty live database finish runtime bootstrap with `balanced-horizon-percentile-v2` active, while preserving the explicit guarded rollout for every non-empty database.
 
-**Architecture:** Classify whether the installation is pristine once, before bootstrap dispatch, and persist that decision in the bootstrap run manifest. The classifier ignores schema/provisioning metadata but treats any universe, price, fundamental, Scan, Feature, Group-rank, or Market-RS row as existing data. Fresh-install market plans replace the current balanced shadow calculation with a required task that runs the same backfill, feature publication, static parity validation, and atomic pointer activation as the operator CLI; subsequent Group, Scan, and Group-history stages therefore resolve the balanced formula naturally. Non-empty installations retain the current legacy pointer and manual guarded command.
+**Architecture:** Classify whether the installation is pristine once, before bootstrap dispatch, and persist that decision in the bootstrap run manifest. The classifier ignores schema/provisioning metadata but treats any universe, price, fundamental, Scan, Feature, Group-rank, or Market-RS row as existing data. Fresh-install market plans replace the current balanced shadow calculation with a required task that runs bounded backfill, feature publication, static parity validation, and atomic pointer activation; subsequent Group, Scan, and Group-history stages therefore resolve the balanced formula naturally. The fresh marker survives interrupted activation and is consumed once all enabled Market pointers are balanced. Non-empty installations retain the current legacy pointer and manual guarded command.
 
 **Tech Stack:** Python 3.11+, FastAPI, Celery chains, SQLAlchemy, PostgreSQL/SQLite test fixtures, pytest, Docker Compose.
 
@@ -14,10 +14,11 @@
 
 - A fresh installation is determined once at bootstrap dispatch by `BootstrapReadinessService.is_pristine_installation()` and must not be reclassified after universe or price data arrives.
 - `is_pristine_installation()` must return false for inactive universe rows and derived/user records even when `is_empty_system()` still considers the runtime empty.
-- Automatic activation applies only to a bootstrap run captured as fresh; non-empty databases and later repair bootstraps retain the existing explicit operator rollout.
+- Automatic activation applies only to an unfinished bootstrap run captured as fresh. The marker is consumed after all enabled Markets activate, so non-empty databases, later repair bootstraps, and explicit rollbacks retain operator control.
 - Do not initialize a formula pointer directly to balanced before a completed canonical Market RS run, matching Group snapshot, and published Feature run exist.
 - A fresh primary market must not become runtime-ready unless its active formula pointer is `balanced-horizon-percentile-v2`.
 - Backfill and activation failures must leave both the Market RS and Feature pointers unchanged and fail the owning bootstrap market chain.
+- Guarded activation backfills and validates only the 187-calendar-day window needed for 6M Group changes, 12-week RRG tails, and the latest daily Feature/scan publication.
 - Reuse the existing six-month Group-history service and its explicit current-universe fallback policy; do not backdate or fabricate universe lifecycle events.
 - Preserve legacy Market RS/Group rows for rollback and do not modify prices, watchlists, user scans, themes, or runtime market choices outside existing bootstrap behavior.
 - Keep the existing `python -m app.scripts.backfill_market_rs` interface and validation semantics for operators.
@@ -30,7 +31,13 @@
 ### New files
 
 - `backend/app/services/market_rs_rollout_executor.py`
-  - Owns the complete reusable shadow-backfill/validation/activation workflow currently embedded in the CLI.
+  - Owns the strict guarded activation workflow; shadow backfill remains a direct rollout-service operation.
+- `backend/app/services/market_rs_activation_coverage.py`
+  - Defines the bounded activation history window shared by backfill and validation.
+- `backend/app/services/fresh_balanced_rs_bootstrap_lifecycle.py`
+  - Consumes fresh-install identity once every enabled Market formula pointer is balanced.
+- `backend/app/wiring/market_rs_activation.py`
+  - Hosts task, static-export, and live-publication adapters outside the service layer.
 - `backend/tests/unit/test_market_rs_rollout_executor.py`
   - Verifies orchestration order, rejection behavior, pointer safety, and typed outcomes.
 

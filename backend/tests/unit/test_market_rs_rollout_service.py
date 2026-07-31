@@ -60,17 +60,69 @@ def test_candidate_dates_start_at_first_probe_with_two_eligible_stocks():
         lambda _db, _market: sessions[0]
     )
 
-    assert service.earliest_backfillable_date(
-        MagicMock(),
-        market="us",
-        through_date=sessions[-1],
-    ) == sessions[1]
+    assert (
+        service.earliest_backfillable_date(
+            MagicMock(),
+            market="us",
+            through_date=sessions[-1],
+        )
+        == sessions[1]
+    )
     assert service.candidate_dates(
         MagicMock(),
         market="US",
         through_date=sessions[-1],
         first_valid_date=sessions[1],
     ) == (sessions[1], sessions[2])
+
+
+def test_candidate_dates_honor_activation_coverage_start() -> None:
+    sessions = [
+        date(2026, 1, 2),
+        date(2026, 4, 1),
+        date(2026, 7, 29),
+    ]
+    calendar = MagicMock()
+    calendar.trading_days.return_value = sessions
+    service = _service(calendar=calendar)
+
+    assert service.candidate_dates(
+        MagicMock(),
+        market="US",
+        through_date=sessions[-1],
+        first_valid_date=sessions[0],
+        coverage_start_date=date(2026, 1, 23),
+    ) == (sessions[1], sessions[2])
+
+
+def test_earliest_backfillable_probe_starts_at_activation_coverage() -> None:
+    coverage_start = date(2026, 1, 23)
+    through_date = date(2026, 7, 29)
+    calendar = MagicMock()
+    calendar.trading_days.return_value = [coverage_start, through_date]
+    loader = MagicMock()
+    loader.load.return_value = SimpleNamespace(
+        excess_returns_by_symbol={"AAA": {}, "BBB": {}},
+    )
+    service = _service(calendar=calendar, loader=loader)
+    service.backfill_service._earliest_available_price_date = (  # type: ignore[method-assign]
+        lambda _db, _market: date(2024, 1, 2)
+    )
+
+    assert (
+        service.earliest_backfillable_date(
+            MagicMock(),
+            market="US",
+            through_date=through_date,
+            probe_start_date=coverage_start,
+        )
+        == coverage_start
+    )
+    calendar.trading_days.assert_called_once_with(
+        "US",
+        coverage_start,
+        through_date,
+    )
 
 
 def test_earliest_backfillable_date_does_not_hide_unexpected_loader_errors():
@@ -127,7 +179,9 @@ def test_backfill_resumes_completed_stock_run_and_reports_all_failures(monkeypat
     assert report.latest_run_id == 12
     assert [item.as_of_date for item in report.results] == list(dates)
     assert report.results[1].reason_code == "group_calculation_failed"
-    assert [call.kwargs["as_of_date"] for call in snapshot.calculate.call_args_list] == [
+    assert [
+        call.kwargs["as_of_date"] for call in snapshot.calculate.call_args_list
+    ] == [
         dates[0],
         dates[1],
         dates[2],
@@ -398,9 +452,13 @@ def test_validation_collects_feature_and_static_errors_without_short_circuiting(
     )
 
     assert validation.ok is False
-    assert any("not published for the activation date" in error for error in validation.errors)
+    assert any(
+        "not published for the activation date" in error for error in validation.errors
+    )
     assert any("rs_formula_version" in error for error in validation.errors)
-    assert any("Missing staged static-site-v3 manifest" in error for error in validation.errors)
+    assert any(
+        "Missing staged static-site-v3 manifest" in error for error in validation.errors
+    )
 
 
 def test_successful_activation_revalidates_then_commits_both_pointers(
@@ -428,8 +486,8 @@ def test_successful_activation_revalidates_then_commits_both_pointers(
             "rs_universe_size": 2,
         },
     )
-    feature_repository.repoint_published.side_effect = (
-        lambda *a, **k: events.append("feature")
+    feature_repository.repoint_published.side_effect = lambda *a, **k: events.append(
+        "feature"
     )
     service = _service(
         repository=repository,

@@ -205,9 +205,9 @@ The dialog shows each task's display name and description, schedule, last run ti
 
 ### Fresh database activation
 
-Runtime bootstrap classifies a pristine installation once, before dispatch, and records that decision in the bootstrap manifest. Formula-pointer and application-setting provisioning are allowed; any universe, price, fundamental, scan, Feature run, Group rank, or Market RS run makes the database non-pristine.
+Runtime bootstrap classifies a pristine installation once, before dispatch, and records that decision in the bootstrap manifest. Formula-pointer and application-setting provisioning are allowed; any universe, price, fundamental, scan, Feature run, Group rank, or Market RS run makes the database non-pristine. The fresh marker survives an interrupted initial bootstrap, then is consumed after every enabled Market has activated balanced RS. A later repair bootstrap or explicit rollback therefore cannot silently re-activate balanced RS.
 
-A pristine installation runs balanced Market RS backfill and guarded activation as a required stage for every enabled Market. Backfill, balanced Feature publication, staged static parity validation, and the two-pointer transaction must all succeed. The primary Market is not marked ready unless its formula pointer is `balanced-horizon-percentile-v2`. A failure leaves both active pointers unchanged and marks that bootstrap chain failed; correct the reported input or coverage problem and resume bootstrap.
+A pristine installation runs balanced Market RS backfill and guarded activation as a required stage for every enabled Market. Activation materializes trading sessions from 187 calendar days before the latest completed session through that latest session. This covers the 6M Group-rank lookup plus tolerance, exceeds the 12-week RRG minimum, and includes the current daily Feature snapshot used by the latest scan. It does not calculate every historical session in the database. Backfill, balanced Feature publication, staged static parity validation, and the two-pointer transaction must all succeed. The primary Market is not marked ready unless its formula pointer is `balanced-horizon-percentile-v2`. A failure leaves both active pointers unchanged and marks that bootstrap chain failed; correct the reported input or coverage problem and resume bootstrap.
 
 Group history runs after activation, so its 1W/1M/3M/6M rank changes, movers, and RRG snapshots use the same balanced formula identity. The bootstrap may use the current active universe for historical dates when point-in-time membership is unavailable; this avoids an empty 12-week window but carries the documented survivor-bias tradeoff.
 
@@ -272,7 +272,7 @@ python -m app.scripts.backfill_market_rs \
   --activate
 ```
 
-The command resumes the backfill, builds a balanced Feature snapshot, stages `static-site-v3`, and checks stock/Group coverage, 1–99 ranges, contiguous deterministic Group ranks, exact formula/run/universe metadata on every Scan shard and row, live/static stock and Group parity, and formula-isolated RRG state. Approval records a fingerprint of the root manifest plus the complete staged Market tree, so any file change invalidates activation. Any failed gate exits nonzero without changing either active pointer. A successful validation updates the Market formula pointer and `latest_published_market:<MARKET>` Feature pointer in one database transaction, then invalidates Group caches and republishes the US bootstrap snapshot when applicable.
+The command calculates and validates the bounded 187-day activation window, builds a balanced Feature snapshot for `through-date`, stages `static-site-v3`, and checks stock/Group coverage, 1–99 ranges, contiguous deterministic Group ranks, exact formula/run/universe metadata on every Scan shard and row, live/static stock and Group parity, and formula-isolated RRG state. `--start-date` is shadow-backfill-only and is rejected with `--activate`. Approval records a fingerprint of the root manifest plus the complete staged Market tree, so any file change invalidates activation. Any failed gate exits nonzero without changing either active pointer. A successful validation updates the Market formula pointer and `latest_published_market:<MARKET>` Feature pointer in one database transaction, then invalidates Group caches and republishes the US bootstrap snapshot when applicable.
 
 After success, verify the JSON has `activated: true`, the expected formula/run IDs, and no validation errors. In the live app, refresh Groups and a Scan and confirm:
 
@@ -295,23 +295,54 @@ Confirm the workflow publishes `static-site-v3`, updates the Market's `static-rr
 
 ### 5. Roll back one Market
 
-Rollback must restore both saved pointers together. First verify the recorded legacy Feature run is still `published`, then replace `<LEGACY_FEATURE_RUN_ID>` in this transaction:
+Rollback is explicit and preserves all balanced and legacy history. Do not roll back while the initial bootstrap or another activation command is running. Once a fresh bootstrap has completed, its fresh-install marker has already been consumed, so a later bootstrap will not undo this rollback.
+
+Restore both saved pointers together. First verify the recorded legacy Feature run is still `published` and its `config_json` names `legacy-linear-v1`, then replace `<LEGACY_FEATURE_RUN_ID>` in this transaction:
 
 ```sql
 BEGIN;
 
-UPDATE market_rs_formula_pointers
-SET formula_version = 'legacy-linear-v1', updated_at = CURRENT_TIMESTAMP
-WHERE market = 'US';
+DO $$
+DECLARE
+  changed_rows integer;
+BEGIN
+  UPDATE market_rs_formula_pointers
+  SET formula_version = 'legacy-linear-v1', updated_at = CURRENT_TIMESTAMP
+  WHERE market = 'US';
+  GET DIAGNOSTICS changed_rows = ROW_COUNT;
+  IF changed_rows <> 1 THEN
+    RAISE EXCEPTION 'Expected one Market RS pointer, changed %', changed_rows;
+  END IF;
 
-UPDATE feature_run_pointers
-SET run_id = <LEGACY_FEATURE_RUN_ID>, updated_at = CURRENT_TIMESTAMP
-WHERE key = 'latest_published_market:US';
+  UPDATE feature_run_pointers
+  SET run_id = <LEGACY_FEATURE_RUN_ID>, updated_at = CURRENT_TIMESTAMP
+  WHERE key = 'latest_published_market:US';
+  GET DIAGNOSTICS changed_rows = ROW_COUNT;
+  IF changed_rows <> 1 THEN
+    RAISE EXCEPTION 'Expected one Feature pointer, changed %', changed_rows;
+  END IF;
+END $$;
 
 COMMIT;
 ```
 
-If either row was not updated, roll back the transaction and investigate rather than leaving split pointers. After restoration, invalidate the affected Market's Group-ranking cache and republish/reload the live Groups bootstrap. Regenerate rollback artifacts with the workflow's explicit formula input (and the appropriate `market_group`):
+The block aborts before commit unless each pointer update affects exactly one row. If it raises, issue `ROLLBACK` and investigate rather than leaving split pointers.
+
+After commit, invalidate the affected Market's Group-ranking cache. For US, also republish the live Groups bootstrap snapshot:
+
+```bash
+python - <<'PY'
+from app.services.group_rankings_cache import bump_group_rankings_epoch
+from app.services.ui_snapshot_service import safe_publish_groups_bootstrap
+
+bump_group_rankings_epoch("US")
+safe_publish_groups_bootstrap()
+PY
+```
+
+For a non-US Market, change the argument to `bump_group_rankings_epoch()` and omit `safe_publish_groups_bootstrap()`. Restarting the API is not a substitute for the cache epoch bump when Redis is retained.
+
+Regenerate rollback artifacts with the workflow's explicit formula input (and the appropriate `market_group`):
 
 ```bash
 gh workflow run static-site.yml \

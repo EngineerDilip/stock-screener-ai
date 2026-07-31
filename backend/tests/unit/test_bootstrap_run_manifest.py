@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -95,7 +97,9 @@ def test_bootstrap_manifest_round_trips_fresh_install() -> None:
     )
 
     assert manifest.to_payload()["fresh_install"] is True
-    assert BootstrapRunManifest.from_payload(manifest.to_payload()).fresh_install is True
+    assert (
+        BootstrapRunManifest.from_payload(manifest.to_payload()).fresh_install is True
+    )
 
 
 def test_bootstrap_manifest_treats_legacy_payload_as_non_fresh() -> None:
@@ -106,3 +110,69 @@ def test_bootstrap_manifest_treats_legacy_payload_as_non_fresh() -> None:
     )
 
     assert manifest.fresh_install is False
+
+
+def test_manifest_does_not_resurrect_consumed_fresh_marker_for_same_dispatch() -> None:
+    from app.services.bootstrap_run_manifest import (
+        BootstrapRunManifest,
+        BootstrapRunManifestRepository,
+    )
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    try:
+        repository = BootstrapRunManifestRepository()
+        queueing = BootstrapRunManifest.create(
+            primary_market="US",
+            enabled_markets=("US", "HK"),
+            fresh_install=True,
+            dispatch_id="dispatch-a",
+            queue_state="queueing",
+        )
+        repository.save(db, queueing)
+        repository.save(db, replace(queueing, fresh_install=False))
+
+        repository.save(db, replace(queueing, queue_state="queued"))
+
+        assert repository.load(db).fresh_install is False
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_new_dispatch_can_record_a_new_fresh_classification() -> None:
+    from app.services.bootstrap_run_manifest import (
+        BootstrapRunManifest,
+        BootstrapRunManifestRepository,
+    )
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    try:
+        repository = BootstrapRunManifestRepository()
+        repository.save(
+            db,
+            BootstrapRunManifest.create(
+                primary_market="US",
+                enabled_markets=("US",),
+                fresh_install=False,
+                dispatch_id="dispatch-a",
+            ),
+        )
+
+        repository.save(
+            db,
+            BootstrapRunManifest.create(
+                primary_market="US",
+                enabled_markets=("US",),
+                fresh_install=True,
+                dispatch_id="dispatch-b",
+            ),
+        )
+
+        assert repository.load(db).fresh_install is True
+    finally:
+        db.close()
+        engine.dispose()

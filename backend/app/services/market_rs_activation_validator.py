@@ -74,8 +74,7 @@ class MarketRsActivationValidator:
             return None
         if not balanced_run_has_required_price_basis(run):
             errors.append(
-                f"Market RS run for {calculation_date} has an "
-                "incompatible price basis."
+                f"Market RS run for {calculation_date} has an incompatible price basis."
             )
         if len(run.rows) != int(run.eligible_symbol_count):
             errors.append(
@@ -131,8 +130,7 @@ class MarketRsActivationValidator:
             }
         except Exception as exc:
             errors.append(
-                f"Could not reconstruct expected Groups for "
-                f"{calculation_date}: {exc}"
+                f"Could not reconstruct expected Groups for {calculation_date}: {exc}"
             )
         stored_groups = {row.industry_group for row in group_rows}
         missing_groups = sorted(expected_groups - stored_groups)
@@ -157,9 +155,7 @@ class MarketRsActivationValidator:
         if [row.industry_group for row in ordered] != [
             row.industry_group for row in deterministic
         ]:
-            errors.append(
-                f"Non-deterministic Group rank order for {calculation_date}."
-            )
+            errors.append(f"Non-deterministic Group rank order for {calculation_date}.")
         return run
 
     @staticmethod
@@ -211,6 +207,7 @@ class MarketRsActivationValidator:
         through_date: date,
         feature_run_id: int,
         static_staging_dir: Path,
+        coverage_start_date: date | None = None,
     ) -> ActivationValidationReport:
         normalized = normalize_rollout_market(market)
         errors: list[str] = []
@@ -218,6 +215,7 @@ class MarketRsActivationValidator:
             db,
             market=normalized,
             through_date=through_date,
+            probe_start_date=coverage_start_date,
         )
         candidates = (
             self.backfill_service.candidate_dates(
@@ -225,14 +223,13 @@ class MarketRsActivationValidator:
                 market=normalized,
                 through_date=through_date,
                 first_valid_date=first_valid,
+                coverage_start_date=coverage_start_date,
             )
             if first_valid is not None
             else ()
         )
         if not candidates:
-            errors.append(
-                "No required balanced Market RS candidate dates were found."
-            )
+            errors.append("No required balanced Market RS candidate dates were found.")
 
         latest_run = None
         for calculation_date in candidates:
@@ -284,9 +281,7 @@ class MarketRsActivationValidator:
                 rrg_status = static_result.rrg_status
                 errors.extend(static_result.errors)
             except Exception as exc:
-                errors.append(
-                    f"Staged static artifact validation failed: {exc}"
-                )
+                errors.append(f"Staged static artifact validation failed: {exc}")
         elif not (Path(static_staging_dir) / "manifest.json").is_file():
             errors.append(f"Missing staged {STATIC_SITE_SCHEMA_VERSION} manifest.")
 

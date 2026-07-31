@@ -11,8 +11,8 @@ import pytest
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
 from app.services.market_rs_inputs import MarketRsInputUnavailable
 from app.services.market_rs_rollout_executor import (
-    MarketRsRolloutExecutionError,
-    MarketRsRolloutOutcome,
+    MarketRsActivationExecutionError,
+    MarketRsActivationOutcome,
 )
 
 
@@ -94,7 +94,9 @@ def test_calculate_market_rs_snapshot_resolves_bootstrap_date_when_omitted(monke
 
 
 def test_calculate_market_rs_snapshot_returns_input_diagnostics(monkeypatch):
-    module, fake_db, _fake_calendar, fake_service = _patch_task_dependencies(monkeypatch)
+    module, fake_db, _fake_calendar, fake_service = _patch_task_dependencies(
+        monkeypatch
+    )
     fake_service.calculate.side_effect = MarketRsInputUnavailable(
         "benchmark missing",
         reason_code="benchmark_anchor_missing",
@@ -164,14 +166,14 @@ def _patch_bootstrap_rollout_dependencies(monkeypatch):
     failed = MagicMock()
     monkeypatch.setattr(module, "SessionLocal", lambda: db)
     monkeypatch.setattr(module, "get_market_calendar_service", lambda: calendar)
-    monkeypatch.setattr(module, "get_market_rs_rollout_executor", lambda: executor)
+    monkeypatch.setattr(module, "get_market_rs_activation_executor", lambda: executor)
     monkeypatch.setattr(module, "mark_market_activity_started", started)
     monkeypatch.setattr(module, "mark_market_activity_completed", completed)
     monkeypatch.setattr(module, "mark_market_activity_failed", failed)
     return module, db, calendar, executor, started, completed, failed
 
 
-def test_bootstrap_balanced_market_rs_requires_activated_outcome(monkeypatch):
+def test_bootstrap_balanced_market_rs_requires_successful_activation(monkeypatch):
     (
         module,
         db,
@@ -181,13 +183,13 @@ def test_bootstrap_balanced_market_rs_requires_activated_outcome(monkeypatch):
         completed,
         failed,
     ) = _patch_bootstrap_rollout_dependencies(monkeypatch)
-    executor.execute.return_value = MarketRsRolloutOutcome(
+    executor.execute.return_value = MarketRsActivationOutcome(
         backfill={"failed_count": 0},
-        activated=True,
         market="US",
         formula_version=BALANCED_RS_FORMULA_VERSION,
         feature_run_id=99,
         validation={"ok": True},
+        static_staging_dir="/tmp/stage",
     )
 
     result = module.bootstrap_balanced_market_rs.run(
@@ -197,7 +199,7 @@ def test_bootstrap_balanced_market_rs_requires_activated_outcome(monkeypatch):
 
     assert result["status"] == "activated"
     assert result["formula_version"] == BALANCED_RS_FORMULA_VERSION
-    assert executor.execute.call_args.kwargs["request"].activate is True
+    assert executor.execute.call_args.kwargs["request"].market == "US"
     calendar.last_completed_trading_day.assert_called_once_with("US")
     started.assert_called_once()
     completed.assert_called_once()
@@ -208,8 +210,8 @@ def test_bootstrap_balanced_market_rs_requires_activated_outcome(monkeypatch):
 @pytest.mark.parametrize(
     "failure",
     [
-        MarketRsRolloutExecutionError("static validation failed"),
-        RuntimeError("rollout returned without activation"),
+        MarketRsActivationExecutionError("static validation failed"),
+        RuntimeError("adapter failed"),
     ],
 )
 def test_bootstrap_balanced_market_rs_stops_chain_on_rollout_failure(
@@ -219,15 +221,7 @@ def test_bootstrap_balanced_market_rs_stops_chain_on_rollout_failure(
     module, db, _calendar, executor, _started, completed, failed = (
         _patch_bootstrap_rollout_dependencies(monkeypatch)
     )
-    if isinstance(failure, MarketRsRolloutExecutionError):
-        executor.execute.side_effect = failure
-    else:
-        executor.execute.return_value = MarketRsRolloutOutcome(
-            backfill={"failed_count": 0},
-            activated=False,
-            market="US",
-            formula_version=BALANCED_RS_FORMULA_VERSION,
-        )
+    executor.execute.side_effect = failure
 
     with pytest.raises(type(failure), match=str(failure)):
         module.bootstrap_balanced_market_rs.run(market="US")

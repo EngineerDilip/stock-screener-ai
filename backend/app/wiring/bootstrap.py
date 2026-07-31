@@ -21,7 +21,9 @@ if TYPE_CHECKING:
     from app.scanners.scan_orchestrator import ScanOrchestrator
     from app.services.alphavantage_service import AlphaVantageService
     from app.services.benchmark_cache_service import BenchmarkCacheService
-    from app.services.canonical_group_ranking_service import CanonicalGroupRankingService
+    from app.services.canonical_group_ranking_service import (
+        CanonicalGroupRankingService,
+    )
     from app.services.data_source_service import DataSourceService
     from app.services.eps_rating_service import EPSRatingService
     from app.services.finviz_service import FinvizService
@@ -36,9 +38,11 @@ if TYPE_CHECKING:
     from app.services.market_rs_inputs import MarketRsInputLoader
     from app.domain.scanning.ports import MarketRsReader
     from app.services.market_rs_snapshot_service import MarketRsSnapshotService
-    from app.services.market_rs_rollout_executor import MarketRsRolloutExecutor
+    from app.services.market_rs_rollout_executor import MarketRsActivationExecutor
     from app.services.market_rs_rollout_service import MarketRsRolloutService
-    from app.services.group_rank_snapshot_coordinator import GroupRankSnapshotCoordinator
+    from app.services.group_rank_snapshot_coordinator import (
+        GroupRankSnapshotCoordinator,
+    )
     from app.services.group_rank_snapshot_reader import GroupRankSnapshotReader
     from app.wiring.market_rs_services import MarketRsServices
     from app.services.point_in_time_universe_service import PointInTimeUniverseService
@@ -119,7 +123,6 @@ class RuntimeServices:
         self._hybrid_fundamentals_service: HybridFundamentalsService | None = None
         self._stock_data_provider: DataPrepStockDataProvider | None = None
         self._scan_orchestrator: ScanOrchestrator | None = None
-        self._market_rs_rollout_executor: MarketRsRolloutExecutor | None = None
 
     def session_factory(self) -> SessionFactory:
         return self._session_factory
@@ -155,8 +158,12 @@ class RuntimeServices:
         if self._cache_bundle is None:
             with self._init_lock:
                 if self._cache_bundle is None:
-                    from app.services.benchmark_cache_service import BenchmarkCacheService
-                    from app.services.fundamentals_cache_service import FundamentalsCacheService
+                    from app.services.benchmark_cache_service import (
+                        BenchmarkCacheService,
+                    )
+                    from app.services.fundamentals_cache_service import (
+                        FundamentalsCacheService,
+                    )
                     from app.services.price_cache_service import PriceCacheService
 
                     redis_client = get_redis_client()
@@ -220,14 +227,12 @@ class RuntimeServices:
                     )
                     ranking_repository = GroupRankingRepository()
                     legacy_adapter = LegacyGroupRankPrefetchAdapter()
-                    historical_calculator = (
-                        GroupRankHistoricalCalculator(
-                            input_loader=input_loader,
-                            ranking_calculator=ranking_calculator,
-                            repository=ranking_repository,
-                            calendar_service=self.market_calendar_service(),
-                            legacy_adapter=legacy_adapter,
-                        )
+                    historical_calculator = GroupRankHistoricalCalculator(
+                        input_loader=input_loader,
+                        ranking_calculator=ranking_calculator,
+                        repository=ranking_repository,
+                        calendar_service=self.market_calendar_service(),
+                        legacy_adapter=legacy_adapter,
                     )
                     self._group_rank_service = IBDGroupRankService(
                         price_cache=cache_bundle.price,
@@ -268,7 +273,9 @@ class RuntimeServices:
                     from app.services.market_taxonomy_service import (
                         get_market_taxonomy_service,
                     )
-                    from app.services.rrg_history_provider import build_rrg_history_provider
+                    from app.services.rrg_history_provider import (
+                        build_rrg_history_provider,
+                    )
                     from app.services.rrg_service import RRGService
 
                     self._rrg_service = RRGService(
@@ -311,7 +318,10 @@ class RuntimeServices:
         if self._groq_key_manager is None:
             with self._init_lock:
                 if self._groq_key_manager is None:
-                    from app.services.llm.groq_key_manager import GroqKeyManager, _get_keys_from_settings
+                    from app.services.llm.groq_key_manager import (
+                        GroqKeyManager,
+                        _get_keys_from_settings,
+                    )
 
                     self._groq_key_manager = GroqKeyManager(
                         keys=_get_keys_from_settings() or []
@@ -322,7 +332,10 @@ class RuntimeServices:
         if self._zai_key_manager is None:
             with self._init_lock:
                 if self._zai_key_manager is None:
-                    from app.services.llm.zai_key_manager import ZAIKeyManager, _get_keys_from_settings
+                    from app.services.llm.zai_key_manager import (
+                        ZAIKeyManager,
+                        _get_keys_from_settings,
+                    )
 
                     self._zai_key_manager = ZAIKeyManager(
                         keys=_get_keys_from_settings() or []
@@ -342,7 +355,9 @@ class RuntimeServices:
         if self._market_calendar_service is None:
             with self._init_lock:
                 if self._market_calendar_service is None:
-                    from app.services.market_calendar_service import MarketCalendarService
+                    from app.services.market_calendar_service import (
+                        MarketCalendarService,
+                    )
 
                     self._market_calendar_service = MarketCalendarService()
         return self._market_calendar_service
@@ -365,24 +380,8 @@ class RuntimeServices:
     def market_rs_rollout_service(self) -> MarketRsRolloutService:
         return self.canonical_rs_runtime().rollout_service()
 
-    def market_rs_rollout_executor(self) -> MarketRsRolloutExecutor:
-        if self._market_rs_rollout_executor is None:
-            with self._init_lock:
-                if self._market_rs_rollout_executor is None:
-                    from app.services.market_rs_rollout_executor import (
-                        MarketRsRolloutExecutor,
-                        build_balanced_feature_snapshot,
-                        export_static_v3,
-                        publish_live_groups,
-                    )
-
-                    self._market_rs_rollout_executor = MarketRsRolloutExecutor(
-                        rollout_service=self.market_rs_rollout_service(),
-                        feature_snapshot_builder=build_balanced_feature_snapshot,
-                        static_exporter=export_static_v3,
-                        live_group_publisher=publish_live_groups,
-                    )
-        return self._market_rs_rollout_executor
+    def market_rs_activation_executor(self) -> MarketRsActivationExecutor:
+        return self.canonical_rs_runtime().activation_executor()
 
     def market_rs_reader(self) -> MarketRsReader:
         return self.market_rs_services().reader
@@ -397,7 +396,9 @@ class RuntimeServices:
         if self._github_release_sync_service is None:
             with self._init_lock:
                 if self._github_release_sync_service is None:
-                    from app.services.github_release_sync_service import GitHubReleaseSyncService
+                    from app.services.github_release_sync_service import (
+                        GitHubReleaseSyncService,
+                    )
                     from app.config import settings
 
                     self._github_release_sync_service = GitHubReleaseSyncService(
@@ -409,7 +410,9 @@ class RuntimeServices:
         if self._security_master_resolver is None:
             with self._init_lock:
                 if self._security_master_resolver is None:
-                    from app.services.security_master_service import security_master_resolver
+                    from app.services.security_master_service import (
+                        security_master_resolver,
+                    )
 
                     self._security_master_resolver = security_master_resolver
         return self._security_master_resolver
@@ -485,7 +488,9 @@ class RuntimeServices:
         if self._ticker_validation_service is None:
             with self._init_lock:
                 if self._ticker_validation_service is None:
-                    from app.services.ticker_validation_service import TickerValidationService
+                    from app.services.ticker_validation_service import (
+                        TickerValidationService,
+                    )
 
                     self._ticker_validation_service = TickerValidationService()
         return self._ticker_validation_service
@@ -494,7 +499,9 @@ class RuntimeServices:
         if self._provider_snapshot_service is None:
             with self._init_lock:
                 if self._provider_snapshot_service is None:
-                    from app.services.provider_snapshot_service import ProviderSnapshotService
+                    from app.services.provider_snapshot_service import (
+                        ProviderSnapshotService,
+                    )
 
                     cache_bundle = self.cache_bundle()
                     self._provider_snapshot_service = ProviderSnapshotService(
@@ -508,7 +515,9 @@ class RuntimeServices:
         if self._daily_price_bundle_service is None:
             with self._init_lock:
                 if self._daily_price_bundle_service is None:
-                    from app.services.daily_price_bundle_service import DailyPriceBundleService
+                    from app.services.daily_price_bundle_service import (
+                        DailyPriceBundleService,
+                    )
 
                     self._daily_price_bundle_service = DailyPriceBundleService(
                         market_calendar=self.market_calendar_service(),
@@ -519,7 +528,9 @@ class RuntimeServices:
         if self._hybrid_fundamentals_service is None:
             with self._init_lock:
                 if self._hybrid_fundamentals_service is None:
-                    from app.services.hybrid_fundamentals_service import HybridFundamentalsService
+                    from app.services.hybrid_fundamentals_service import (
+                        HybridFundamentalsService,
+                    )
 
                     self._hybrid_fundamentals_service = HybridFundamentalsService(
                         price_cache=self.cache_bundle().price,
@@ -582,7 +593,6 @@ class RuntimeServices:
             self._hybrid_fundamentals_service = None
             self._stock_data_provider = None
             self._scan_orchestrator = None
-            self._market_rs_rollout_executor = None
 
 
 _runtime_services_ctx: ContextVar[RuntimeServices | None] = ContextVar(
@@ -667,7 +677,9 @@ def get_runtime_services(request: Request) -> RuntimeServices:
     """FastAPI dependency getter for process runtime services."""
     runtime = getattr(request.app.state, "runtime_services", None)
     if runtime is None:
-        raise RuntimeError("RuntimeServices are not initialized on app.state.runtime_services")
+        raise RuntimeError(
+            "RuntimeServices are not initialized on app.state.runtime_services"
+        )
     return runtime
 
 
@@ -688,8 +700,6 @@ def _resolve_runtime_services(request: Request | None = None) -> RuntimeServices
     )
 
 
-
-
 def get_uow() -> Iterator[SqlUnitOfWork]:
     """Yield a SqlUnitOfWork bound to SessionLocal.
 
@@ -701,8 +711,6 @@ def get_uow() -> Iterator[SqlUnitOfWork]:
 
     uow = SqlUnitOfWork(SessionLocal)
     yield uow
-
-
 
 
 def get_job_backend() -> JobBackend:
@@ -797,9 +805,9 @@ def get_market_rs_rollout_service() -> MarketRsRolloutService:
     return _resolve_runtime_services().market_rs_rollout_service()
 
 
-def get_market_rs_rollout_executor() -> MarketRsRolloutExecutor:
-    """Return the process-scoped guarded Market RS rollout executor."""
-    return _resolve_runtime_services().market_rs_rollout_executor()
+def get_market_rs_activation_executor() -> MarketRsActivationExecutor:
+    """Return the process-scoped guarded Market RS activation executor."""
+    return _resolve_runtime_services().market_rs_activation_executor()
 
 
 def get_market_rs_reader() -> MarketRsReader:
@@ -875,8 +883,6 @@ def get_daily_price_bundle_service() -> DailyPriceBundleService:
 def get_hybrid_fundamentals_service() -> HybridFundamentalsService:
     """Return process-scoped hybrid fundamentals service."""
     return _resolve_runtime_services().hybrid_fundamentals_service()
-
-
 
 
 def get_create_scan_use_case() -> CreateScanUseCase:

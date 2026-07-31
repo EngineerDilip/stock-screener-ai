@@ -12,6 +12,7 @@ from app.services.group_rank_snapshot_coordinator import GroupRankSnapshotCoordi
 from app.services.group_rank_snapshot_reader import GroupRankSnapshotReader
 from app.services.market_calendar_service import MarketCalendarService
 from app.services.market_rs_inputs import MarketRsInputLoader
+from app.services.market_rs_rollout_executor import MarketRsActivationExecutor
 from app.services.market_rs_rollout_service import MarketRsRolloutService
 from app.services.market_rs_snapshot_service import MarketRsSnapshotService
 from app.services.point_in_time_universe_service import PointInTimeUniverseService
@@ -36,6 +37,7 @@ class CanonicalRsRuntime:
         self._services: MarketRsServices | None = None
         self._canonical_group_service: CanonicalGroupRankingService | None = None
         self._rollout_service: MarketRsRolloutService | None = None
+        self._activation_executor: MarketRsActivationExecutor | None = None
         self._snapshot_reader: GroupRankSnapshotReader | None = None
         self._snapshot_coordinator: GroupRankSnapshotCoordinator | None = None
 
@@ -92,6 +94,19 @@ class CanonicalRsRuntime:
                         canonical_group_service=self.canonical_group_service(),
                     )
         return self._rollout_service
+
+    def activation_executor(self) -> MarketRsActivationExecutor:
+        if self._activation_executor is None:
+            with self._lock:
+                if self._activation_executor is None:
+                    from app.wiring.market_rs_activation import (
+                        create_market_rs_activation_executor,
+                    )
+
+                    self._activation_executor = create_market_rs_activation_executor(
+                        self.rollout_service()
+                    )
+        return self._activation_executor
 
     def group_rank_snapshot_reader(self) -> GroupRankSnapshotReader:
         if self._snapshot_reader is None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -11,7 +12,6 @@ from sqlalchemy.orm import Session
 
 from ..models.app_settings import AppSetting
 from ..services.bootstrap_run_manifest import (
-    BOOTSTRAP_RUN_KEY,
     BootstrapRunManifest,
     BootstrapRunManifestRepository,
 )
@@ -69,7 +69,9 @@ def _load_market_activity(db: Session, market: str) -> dict[str, Any] | None:
     return record.to_payload()
 
 
-def _record_from_payload(payload: dict[str, Any] | None) -> RuntimeActivityRecord | None:
+def _record_from_payload(
+    payload: dict[str, Any] | None,
+) -> RuntimeActivityRecord | None:
     if not isinstance(payload, dict):
         return None
     try:
@@ -113,9 +115,8 @@ def _live_runtime_activity_task(
 
 def _running_activity_has_live_owner(record: RuntimeActivityRecord) -> bool:
     current_task = _live_runtime_activity_task(record)
-    return (
-        current_task is _LIVE_RUNTIME_TASK_LOOKUP_FAILED
-        or isinstance(current_task, dict)
+    return current_task is _LIVE_RUNTIME_TASK_LOOKUP_FAILED or isinstance(
+        current_task, dict
     )
 
 
@@ -135,7 +136,10 @@ def _should_override_stale_running_owner(
         return False
     if not incoming_task_id:
         return False
-    if existing.task_id == incoming_task_id and existing.stage_key == incoming_stage_key:
+    if (
+        existing.task_id == incoming_task_id
+        and existing.stage_key == incoming_stage_key
+    ):
         return False
 
     now = parse_activity_timestamp(_utcnow_iso())
@@ -156,7 +160,9 @@ def save_runtime_bootstrap_run(
     db: Session,
     *,
     primary_market: str,
-    enabled_markets: list[str],
+    enabled_markets: Iterable[str],
+    dispatch_id: str | None = None,
+    fresh_install: bool = False,
     primary_task_id: str | None = None,
     market_task_ids: dict[str, str | None] | None = None,
     queue_state: str = "queued",
@@ -166,6 +172,8 @@ def save_runtime_bootstrap_run(
         BootstrapRunManifest.create(
             primary_market=primary_market,
             enabled_markets=enabled_markets,
+            dispatch_id=dispatch_id,
+            fresh_install=fresh_install,
             primary_task_id=primary_task_id,
             market_task_ids=market_task_ids or {},
             queue_state=queue_state,

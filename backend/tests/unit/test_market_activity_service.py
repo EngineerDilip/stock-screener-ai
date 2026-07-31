@@ -45,7 +45,9 @@ class _FakeLock:
         return self._tasks.get(market)
 
 
-def test_runtime_activity_status_reports_primary_bootstrap_progress(db_session, monkeypatch):
+def test_runtime_activity_status_reports_primary_bootstrap_progress(
+    db_session, monkeypatch
+):
     from app.services import market_activity_service as module
 
     module.mark_market_activity_started(
@@ -60,7 +62,9 @@ def test_runtime_activity_status_reports_primary_bootstrap_progress(db_session, 
     monkeypatch.setattr(
         module,
         "get_runtime_bootstrap_status",
-        lambda _db: _bootstrap_status(required=True, enabled=["US", "HK"], state="running"),
+        lambda _db: _bootstrap_status(
+            required=True, enabled=["US", "HK"], state="running"
+        ),
     )
     monkeypatch.setattr(
         module,
@@ -94,13 +98,16 @@ def test_runtime_activity_status_reports_primary_bootstrap_progress(db_session, 
     assert us_market["percent"] == 50.0
 
 
-def test_runtime_activity_status_exposes_bootstrap_run_task_manifest(db_session, monkeypatch):
+def test_runtime_activity_status_exposes_bootstrap_run_task_manifest(
+    db_session, monkeypatch
+):
     from app.services import market_activity_service as module
 
     module.save_runtime_bootstrap_run(
         db_session,
         primary_market="US",
         enabled_markets=["US", "HK", "TW"],
+        fresh_install=True,
         primary_task_id="primary-task-123",
         market_task_ids={
             "US": "primary-task-123",
@@ -111,13 +118,16 @@ def test_runtime_activity_status_exposes_bootstrap_run_task_manifest(db_session,
     monkeypatch.setattr(
         module,
         "get_runtime_bootstrap_status",
-        lambda _db: _bootstrap_status(required=True, enabled=["US", "HK", "TW"], state="running"),
+        lambda _db: _bootstrap_status(
+            required=True, enabled=["US", "HK", "TW"], state="running"
+        ),
     )
     monkeypatch.setattr(module, "get_data_fetch_lock", lambda: _FakeLock())
 
     payload = module.get_runtime_activity_status(db_session)
 
     assert payload["bootstrap"]["queue_state"] == "queued"
+    assert module._load_runtime_bootstrap_run(db_session)["fresh_install"] is True
     assert payload["bootstrap"]["task_id"] == "primary-task-123"
     assert payload["bootstrap"]["market_task_ids"] == {
         "US": "primary-task-123",
@@ -242,9 +252,7 @@ def test_market_activity_persists_only_canonical_state_fields(db_session):
     )
 
     setting = (
-        db_session.query(AppSetting)
-        .filter(AppSetting.key == _activity_key("JP"))
-        .one()
+        db_session.query(AppSetting).filter(AppSetting.key == _activity_key("JP")).one()
     )
     persisted = json.loads(setting.value)
 
@@ -691,7 +699,9 @@ def test_failed_activity_is_sticky_against_later_stage_updates(db_session, monke
     monkeypatch.setattr(
         module,
         "get_runtime_bootstrap_status",
-        lambda _db: _bootstrap_status(required=True, enabled=["HK"], primary="HK", state="failed"),
+        lambda _db: _bootstrap_status(
+            required=True, enabled=["HK"], primary="HK", state="failed"
+        ),
     )
     monkeypatch.setattr(module, "get_data_fetch_lock", lambda: _FakeLock())
 
@@ -703,7 +713,9 @@ def test_failed_activity_is_sticky_against_later_stage_updates(db_session, monke
     assert hk_market["message"] == "Price refresh failed"
 
 
-def test_failed_group_activity_is_replaced_when_bootstrap_scan_starts(db_session, monkeypatch):
+def test_failed_group_activity_is_replaced_when_bootstrap_scan_starts(
+    db_session, monkeypatch
+):
     from app.services import market_activity_service as module
 
     module.mark_market_activity_failed(
@@ -729,7 +741,9 @@ def test_failed_group_activity_is_replaced_when_bootstrap_scan_starts(db_session
     monkeypatch.setattr(
         module,
         "get_runtime_bootstrap_status",
-        lambda _db: _bootstrap_status(required=True, enabled=["HK"], primary="HK", state="running"),
+        lambda _db: _bootstrap_status(
+            required=True, enabled=["HK"], primary="HK", state="running"
+        ),
     )
     monkeypatch.setattr(module, "get_data_fetch_lock", lambda: _FakeLock())
 
@@ -774,7 +788,9 @@ def test_failed_hard_activity_is_not_replaced_when_bootstrap_scan_starts(
     monkeypatch.setattr(
         module,
         "get_runtime_bootstrap_status",
-        lambda _db: _bootstrap_status(required=True, enabled=["HK"], primary="HK", state="failed"),
+        lambda _db: _bootstrap_status(
+            required=True, enabled=["HK"], primary="HK", state="failed"
+        ),
     )
     monkeypatch.setattr(module, "get_data_fetch_lock", lambda: _FakeLock())
 
@@ -810,7 +826,9 @@ def test_failed_activity_can_replace_completed_record(db_session, monkeypatch):
     monkeypatch.setattr(
         module,
         "get_runtime_bootstrap_status",
-        lambda _db: _bootstrap_status(required=True, enabled=["HK"], primary="HK", state="failed"),
+        lambda _db: _bootstrap_status(
+            required=True, enabled=["HK"], primary="HK", state="failed"
+        ),
     )
     monkeypatch.setattr(module, "get_data_fetch_lock", lambda: _FakeLock())
 
@@ -851,7 +869,9 @@ def test_runtime_activity_status_reports_active_background_bootstrap_progress_af
     monkeypatch.setattr(
         module,
         "get_runtime_bootstrap_status",
-        lambda _db: _bootstrap_status(required=False, enabled=["US", "HK"], state="ready"),
+        lambda _db: _bootstrap_status(
+            required=False, enabled=["US", "HK"], state="ready"
+        ),
     )
     monkeypatch.setattr(module, "get_data_fetch_lock", lambda: _FakeLock())
 
@@ -903,7 +923,9 @@ def test_runtime_activity_status_does_not_stage_weight_running_price_refresh_at_
     monkeypatch.setattr(
         module,
         "get_runtime_bootstrap_status",
-        lambda _db: _bootstrap_status(required=False, enabled=["US", "JP"], state="ready"),
+        lambda _db: _bootstrap_status(
+            required=False, enabled=["US", "JP"], state="ready"
+        ),
     )
     monkeypatch.setattr(module, "get_data_fetch_lock", lambda: _FakeLock())
 
@@ -950,7 +972,9 @@ def test_runtime_activity_status_ignores_non_bootstrap_secondary_progress_after_
     monkeypatch.setattr(
         module,
         "get_runtime_bootstrap_status",
-        lambda _db: _bootstrap_status(required=False, enabled=["US", "HK"], state="ready"),
+        lambda _db: _bootstrap_status(
+            required=False, enabled=["US", "HK"], state="ready"
+        ),
     )
     monkeypatch.setattr(
         module,
@@ -1031,7 +1055,9 @@ def test_mark_market_activity_queued_does_not_overwrite_newer_state_for_same_tas
     monkeypatch.setattr(
         module,
         "get_runtime_bootstrap_status",
-        lambda _db: _bootstrap_status(required=False, enabled=["US", "HK"], state="ready"),
+        lambda _db: _bootstrap_status(
+            required=False, enabled=["US", "HK"], state="ready"
+        ),
     )
     monkeypatch.setattr(module, "get_data_fetch_lock", lambda: _FakeLock())
 
@@ -1043,7 +1069,9 @@ def test_mark_market_activity_queued_does_not_overwrite_newer_state_for_same_tas
     assert hk_market["task_id"] == "secondary-task-123"
 
 
-def test_runtime_activity_status_surfaces_concurrent_market_refreshes(db_session, monkeypatch):
+def test_runtime_activity_status_surfaces_concurrent_market_refreshes(
+    db_session, monkeypatch
+):
     from app.services import market_activity_service as module
 
     module.mark_market_activity_started(
@@ -1065,15 +1093,27 @@ def test_runtime_activity_status_surfaces_concurrent_market_refreshes(db_session
     monkeypatch.setattr(
         module,
         "get_runtime_bootstrap_status",
-        lambda _db: _bootstrap_status(required=False, enabled=["US", "HK"], state="ready"),
+        lambda _db: _bootstrap_status(
+            required=False, enabled=["US", "HK"], state="ready"
+        ),
     )
     monkeypatch.setattr(
         module,
         "get_data_fetch_lock",
         lambda: _FakeLock(
             {
-                "US": {"task_id": "task-us", "current": 20, "total": 100, "progress": 20.0},
-                "HK": {"task_id": "task-hk", "current": 80, "total": 100, "progress": 80.0},
+                "US": {
+                    "task_id": "task-us",
+                    "current": 20,
+                    "total": 100,
+                    "progress": 20.0,
+                },
+                "HK": {
+                    "task_id": "task-hk",
+                    "current": 80,
+                    "total": 100,
+                    "progress": 80.0,
+                },
             }
         ),
     )
@@ -1084,7 +1124,9 @@ def test_runtime_activity_status_surfaces_concurrent_market_refreshes(db_session
     assert payload["summary"]["active_market_count"] == 2
     assert payload["summary"]["active_markets"] == ["US", "HK"]
     assert {
-        item["market"]: item["percent"] for item in payload["markets"] if item["status"] == "running"
+        item["market"]: item["percent"]
+        for item in payload["markets"]
+        if item["status"] == "running"
     } == {"US": 20.0, "HK": 80.0}
 
 
@@ -1103,7 +1145,9 @@ def test_runtime_activity_status_surfaces_failed_market_stage(db_session, monkey
     monkeypatch.setattr(
         module,
         "get_runtime_bootstrap_status",
-        lambda _db: _bootstrap_status(required=False, enabled=["JP"], primary="JP", state="ready"),
+        lambda _db: _bootstrap_status(
+            required=False, enabled=["JP"], primary="JP", state="ready"
+        ),
     )
     monkeypatch.setattr(module, "get_data_fetch_lock", lambda: _FakeLock())
 
@@ -1133,7 +1177,9 @@ def test_runtime_activity_supports_scan_stage_progress(db_session, monkeypatch):
     monkeypatch.setattr(
         module,
         "get_runtime_bootstrap_status",
-        lambda _db: _bootstrap_status(required=False, enabled=["HK"], primary="HK", state="ready"),
+        lambda _db: _bootstrap_status(
+            required=False, enabled=["HK"], primary="HK", state="ready"
+        ),
     )
     monkeypatch.setattr(module, "get_data_fetch_lock", lambda: _FakeLock())
 
@@ -1146,7 +1192,9 @@ def test_runtime_activity_supports_scan_stage_progress(db_session, monkeypatch):
     assert hk_market["percent"] == 25.0
 
 
-def test_runtime_activity_status_exposes_bootstrap_stage_metadata(db_session, monkeypatch):
+def test_runtime_activity_status_exposes_bootstrap_stage_metadata(
+    db_session, monkeypatch
+):
     from app.services import market_activity_service as module
 
     monkeypatch.setattr(
@@ -1168,13 +1216,17 @@ def test_runtime_activity_status_exposes_bootstrap_stage_metadata(db_session, mo
     ]
 
 
-def test_runtime_activity_status_returns_idle_markets_without_activity(db_session, monkeypatch):
+def test_runtime_activity_status_returns_idle_markets_without_activity(
+    db_session, monkeypatch
+):
     from app.services import market_activity_service as module
 
     monkeypatch.setattr(
         module,
         "get_runtime_bootstrap_status",
-        lambda _db: _bootstrap_status(required=False, enabled=["US", "HK"], state="ready"),
+        lambda _db: _bootstrap_status(
+            required=False, enabled=["US", "HK"], state="ready"
+        ),
     )
     monkeypatch.setattr(module, "get_data_fetch_lock", lambda: _FakeLock())
 
@@ -1203,7 +1255,9 @@ def test_runtime_activity_status_hides_background_warning_when_secondary_work_is
     monkeypatch.setattr(
         module,
         "get_runtime_bootstrap_status",
-        lambda _db: _bootstrap_status(required=False, enabled=["US", "HK"], state="ready"),
+        lambda _db: _bootstrap_status(
+            required=False, enabled=["US", "HK"], state="ready"
+        ),
     )
     monkeypatch.setattr(module, "get_data_fetch_lock", lambda: _FakeLock())
 

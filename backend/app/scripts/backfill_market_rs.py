@@ -11,11 +11,13 @@ from typing import Any
 
 from app.database import SessionLocal
 from app.services.market_rs_rollout_executor import (
-    MarketRsRolloutExecutionError,
-    MarketRsRolloutRequest,
-    validate_static_staging_directory,
+    MarketRsActivationExecutionError,
+    MarketRsActivationRequest,
 )
-from app.wiring.bootstrap import get_market_rs_rollout_executor
+from app.wiring.bootstrap import (
+    get_market_rs_activation_executor,
+    get_market_rs_rollout_service,
+)
 
 
 class RolloutCommandFailed(RuntimeError):
@@ -42,29 +44,33 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def execute_rollout(options: argparse.Namespace) -> dict[str, Any]:
-    try:
-        staging_dir = (
-            validate_static_staging_directory(options.static_staging_dir)
-            if options.activate
-            else None
+    if options.activate and options.start_date is not None:
+        raise RolloutCommandFailed(
+            "--start-date is only valid for shadow backfill; activation uses "
+            "the required bounded history window"
         )
-    except MarketRsRolloutExecutionError as exc:
-        raise RolloutCommandFailed(str(exc)) from exc
-
     db = SessionLocal()
     try:
-        try:
-            outcome = get_market_rs_rollout_executor().execute(
+        if not options.activate:
+            report = get_market_rs_rollout_service().backfill(
                 db,
-                request=MarketRsRolloutRequest(
+                market=options.market,
+                through_date=options.through_date,
+                start_date=options.start_date,
+            )
+            return {"backfill": report.to_dict(), "activated": False}
+        if options.static_staging_dir is None:
+            raise RolloutCommandFailed("--activate requires --static-staging-dir")
+        try:
+            outcome = get_market_rs_activation_executor().execute(
+                db,
+                request=MarketRsActivationRequest(
                     market=options.market,
                     through_date=options.through_date,
-                    start_date=options.start_date,
-                    activate=options.activate,
-                    static_staging_dir=staging_dir,
+                    static_staging_dir=options.static_staging_dir,
                 ),
             )
-        except MarketRsRolloutExecutionError as exc:
+        except MarketRsActivationExecutionError as exc:
             raise RolloutCommandFailed(str(exc)) from exc
         return outcome.to_dict()
     finally:

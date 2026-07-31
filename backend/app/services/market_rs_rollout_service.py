@@ -43,9 +43,7 @@ class MarketRsRolloutService:
         canonical_group_service: CanonicalGroupRankingService,
         feature_run_repository_factory: FeatureRunRepositoryFactory | None = None,
     ) -> None:
-        feature_factory = (
-            feature_run_repository_factory or SqlFeatureRunRepository
-        )
+        feature_factory = feature_run_repository_factory or SqlFeatureRunRepository
         self.backfill_service = MarketRsBackfillService(
             calendar_service=calendar_service,
             input_loader=input_loader,
@@ -70,11 +68,13 @@ class MarketRsRolloutService:
         *,
         market: str,
         through_date: date,
+        probe_start_date: date | None = None,
     ) -> date | None:
         return self.backfill_service.earliest_backfillable_date(
             db,
             market=market,
             through_date=through_date,
+            probe_start_date=probe_start_date,
         )
 
     def candidate_dates(
@@ -84,12 +84,14 @@ class MarketRsRolloutService:
         market: str,
         through_date: date,
         first_valid_date: date | None = None,
+        coverage_start_date: date | None = None,
     ) -> tuple[date, ...]:
         return self.backfill_service.candidate_dates(
             db,
             market=market,
             through_date=through_date,
             first_valid_date=first_valid_date,
+            coverage_start_date=coverage_start_date,
         )
 
     def backfill(
@@ -99,12 +101,14 @@ class MarketRsRolloutService:
         market: str,
         through_date: date,
         start_date: date | None = None,
+        coverage_start_date: date | None = None,
     ) -> BackfillReport:
         return self.backfill_service.backfill(
             db,
             market=market,
             through_date=through_date,
             start_date=start_date,
+            coverage_start_date=coverage_start_date,
         )
 
     def validate_activation(
@@ -115,6 +119,7 @@ class MarketRsRolloutService:
         through_date: date,
         feature_run_id: int,
         static_staging_dir: Path,
+        coverage_start_date: date | None = None,
     ) -> ActivationValidationReport:
         return self.validator.validate(
             db,
@@ -122,6 +127,7 @@ class MarketRsRolloutService:
             through_date=through_date,
             feature_run_id=feature_run_id,
             static_staging_dir=static_staging_dir,
+            coverage_start_date=coverage_start_date,
         )
 
     def revalidate_static(

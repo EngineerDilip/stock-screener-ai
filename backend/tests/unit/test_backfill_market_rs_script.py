@@ -10,8 +10,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.services.market_rs_rollout_executor import (
-    MarketRsRolloutExecutionError,
-    MarketRsRolloutOutcome,
+    MarketRsActivationExecutionError,
+    MarketRsActivationOutcome,
 )
 
 
@@ -28,55 +28,36 @@ def _options(tmp_path: Path, *, activate: bool) -> Namespace:
 def test_dry_run_prints_report_and_never_activates(monkeypatch, tmp_path):
     from app.scripts import backfill_market_rs as module
 
-    executor = MagicMock()
-    executor.execute.return_value = MarketRsRolloutOutcome(
-        backfill={"ok": True},
-        activated=False,
-        market="US",
-        formula_version="balanced-percentile-v1",
-    )
-    monkeypatch.setattr(module, "get_market_rs_rollout_executor", lambda: executor)
+    rollout = MagicMock()
+    rollout.backfill.return_value.to_dict.return_value = {"ok": True}
+    monkeypatch.setattr(module, "get_market_rs_rollout_service", lambda: rollout)
     db = MagicMock()
     monkeypatch.setattr(module, "SessionLocal", lambda: db)
 
     result = module.execute_rollout(_options(tmp_path, activate=False))
 
     assert result == {"backfill": {"ok": True}, "activated": False}
-    request = executor.execute.call_args.kwargs["request"]
-    assert request.activate is False
-    assert request.static_staging_dir is None
+    assert rollout.backfill.call_args.kwargs == {
+        "market": "US",
+        "through_date": date(2026, 4, 10),
+        "start_date": None,
+    }
     db.close.assert_called_once_with()
-
-
-def test_activate_requires_empty_non_serving_absolute_staging_directory(
-    monkeypatch,
-    tmp_path,
-):
-    from app.scripts import backfill_market_rs as module
-
-    stage = tmp_path / "stage"
-    stage.mkdir()
-    (stage / "existing.json").write_text("{}", encoding="utf-8")
-    options = _options(tmp_path, activate=True)
-
-    with pytest.raises(module.RolloutCommandFailed, match="must be empty"):
-        module.execute_rollout(options)
 
 
 def test_activate_delegates_once_and_preserves_outcome(monkeypatch, tmp_path):
     from app.scripts import backfill_market_rs as module
 
     executor = MagicMock()
-    executor.execute.return_value = MarketRsRolloutOutcome(
+    executor.execute.return_value = MarketRsActivationOutcome(
         backfill={"ok": True, "failed_count": 0},
-        activated=True,
         market="US",
         formula_version="balanced-percentile-v1",
         feature_run_id=99,
         validation={"ok": True},
         static_staging_dir=str((tmp_path / "stage").resolve()),
     )
-    monkeypatch.setattr(module, "get_market_rs_rollout_executor", lambda: executor)
+    monkeypatch.setattr(module, "get_market_rs_activation_executor", lambda: executor)
     db = MagicMock()
     monkeypatch.setattr(module, "SessionLocal", lambda: db)
 
@@ -86,14 +67,26 @@ def test_activate_delegates_once_and_preserves_outcome(monkeypatch, tmp_path):
     assert result["formula_version"] == "balanced-percentile-v1"
     executor.execute.assert_called_once()
     request = executor.execute.call_args.kwargs["request"]
-    assert request.activate is True
-    assert request.static_staging_dir == (tmp_path / "stage").resolve()
+    assert request.static_staging_dir == tmp_path / "stage"
+
+
+def test_activate_rejects_shadow_resume_start_date(tmp_path: Path) -> None:
+    from app.scripts import backfill_market_rs as module
+
+    options = _options(tmp_path, activate=True)
+    options.start_date = date(2026, 4, 1)
+
+    with pytest.raises(
+        module.RolloutCommandFailed,
+        match="--start-date is only valid for shadow backfill",
+    ):
+        module.execute_rollout(options)
 
 
 def test_publish_live_groups_does_not_duplicate_activation_cache_invalidation(
     monkeypatch,
 ):
-    from app.services import market_rs_rollout_executor as module
+    from app.wiring import market_rs_activation as module
     from app.services import group_rankings_cache, ui_snapshot_service
 
     bump_epoch = MagicMock()
@@ -115,14 +108,16 @@ def test_executor_failure_is_exposed_as_command_failure(monkeypatch, tmp_path):
     from app.scripts import backfill_market_rs as module
 
     executor = MagicMock()
-    executor.execute.side_effect = MarketRsRolloutExecutionError(
+    executor.execute.side_effect = MarketRsActivationExecutionError(
         "required backfill dates failed"
     )
-    monkeypatch.setattr(module, "get_market_rs_rollout_executor", lambda: executor)
+    monkeypatch.setattr(module, "get_market_rs_activation_executor", lambda: executor)
     db = MagicMock()
     monkeypatch.setattr(module, "SessionLocal", lambda: db)
 
-    with pytest.raises(module.RolloutCommandFailed, match="required backfill dates failed"):
+    with pytest.raises(
+        module.RolloutCommandFailed, match="required backfill dates failed"
+    ):
         module.execute_rollout(_options(tmp_path, activate=True))
 
     db.close.assert_called_once_with()

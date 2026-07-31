@@ -89,7 +89,7 @@ def test_runtime_services_reuses_and_resets_canonical_market_rs_dependencies():
     repository = runtime.market_rs_run_repository()
     snapshot_service = runtime.market_rs_snapshot_service()
     rollout_service = runtime.market_rs_rollout_service()
-    rollout_executor = runtime.market_rs_rollout_executor()
+    activation_executor = runtime.market_rs_activation_executor()
     reader = runtime.market_rs_reader()
 
     assert runtime.point_in_time_universe_service() is point_in_time
@@ -97,8 +97,8 @@ def test_runtime_services_reuses_and_resets_canonical_market_rs_dependencies():
     assert runtime.market_rs_run_repository() is repository
     assert runtime.market_rs_snapshot_service() is snapshot_service
     assert runtime.market_rs_rollout_service() is rollout_service
-    assert runtime.market_rs_rollout_executor() is rollout_executor
-    assert rollout_executor.rollout_service is rollout_service
+    assert runtime.market_rs_activation_executor() is activation_executor
+    assert activation_executor.rollout_service is rollout_service
     assert runtime.market_rs_reader() is reader
 
     runtime.reset_for_tests()
@@ -108,7 +108,7 @@ def test_runtime_services_reuses_and_resets_canonical_market_rs_dependencies():
     assert runtime.market_rs_run_repository() is not repository
     assert runtime.market_rs_snapshot_service() is not snapshot_service
     assert runtime.market_rs_rollout_service() is not rollout_service
-    assert runtime.market_rs_rollout_executor() is not rollout_executor
+    assert runtime.market_rs_activation_executor() is not activation_executor
     assert runtime.market_rs_reader() is not reader
 
 

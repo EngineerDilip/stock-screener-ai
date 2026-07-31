@@ -18,12 +18,12 @@ from app.services.market_activity_service import (
     mark_market_activity_started,
 )
 from app.services.market_rs_inputs import MarketRsInputUnavailable
-from app.services.market_rs_rollout_executor import MarketRsRolloutRequest
+from app.services.market_rs_rollout_executor import MarketRsActivationRequest
 from app.tasks.market_queues import normalize_market
 from app.tasks.transient_database import retry_transient_database_error
 from app.wiring.bootstrap import (
     get_market_calendar_service,
-    get_market_rs_rollout_executor,
+    get_market_rs_activation_executor,
     get_market_rs_snapshot_service,
 )
 
@@ -72,9 +72,7 @@ def bootstrap_balanced_market_rs(
 ) -> dict[str, object]:
     market_code = normalize_market(market)
     lifecycle = activity_lifecycle or "bootstrap"
-    through_date = get_market_calendar_service().last_completed_trading_day(
-        market_code
-    )
+    through_date = get_market_calendar_service().last_completed_trading_day(market_code)
     db = SessionLocal()
     task_name = getattr(self, "name", BOOTSTRAP_BALANCED_MARKET_RS_TASK_NAME)
     task_id = getattr(getattr(self, "request", None), "id", None)
@@ -88,20 +86,15 @@ def bootstrap_balanced_market_rs(
             task_id=task_id,
             message="Preparing balanced Market RS publication",
         )
-        with TemporaryDirectory(
-            prefix=f"market-rs-{market_code.lower()}-"
-        ) as raw_dir:
-            outcome = get_market_rs_rollout_executor().execute(
+        with TemporaryDirectory(prefix=f"market-rs-{market_code.lower()}-") as raw_dir:
+            outcome = get_market_rs_activation_executor().execute(
                 db,
-                request=MarketRsRolloutRequest(
+                request=MarketRsActivationRequest(
                     market=market_code,
                     through_date=through_date,
-                    activate=True,
                     static_staging_dir=Path(raw_dir),
                 ),
             )
-        if not outcome.activated:
-            raise RuntimeError("rollout returned without activation")
         mark_market_activity_completed(
             db,
             market=market_code,

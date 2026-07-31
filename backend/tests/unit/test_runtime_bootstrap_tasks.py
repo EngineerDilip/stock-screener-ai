@@ -38,7 +38,9 @@ class _FakeTask:
 def test_bootstrap_plan_uses_semantic_operations_instead_of_task_name_strings():
     from app.domain.bootstrap.plan import BootstrapOperation, build_bootstrap_plan
 
-    market_plan = build_bootstrap_plan(primary_market="US", enabled_markets=["US"]).market_plans[0]
+    market_plan = build_bootstrap_plan(
+        primary_market="US", enabled_markets=["US"]
+    ).market_plans[0]
 
     assert [stage.operation for stage in market_plan.stages] == [
         BootstrapOperation.REFRESH_STOCK_UNIVERSE,
@@ -94,33 +96,37 @@ def test_non_us_bootstrap_uses_market_feature_snapshot(monkeypatch):
     )
     monkeypatch.setattr(
         "app.tasks.group_rank_tasks.calculate_daily_group_rankings_with_gapfill",
-        _FakeTask("app.tasks.group_rank_tasks.calculate_daily_group_rankings_with_gapfill"),
+        _FakeTask(
+            "app.tasks.group_rank_tasks.calculate_daily_group_rankings_with_gapfill"
+        ),
     )
     monkeypatch.setattr(
         "app.interfaces.tasks.feature_store_tasks.build_daily_snapshot",
         _FakeTask("app.interfaces.tasks.feature_store_tasks.build_daily_snapshot"),
     )
-    market_plan = build_bootstrap_plan(primary_market="HK", enabled_markets=["HK"]).market_plans[0]
+    market_plan = build_bootstrap_plan(
+        primary_market="HK", enabled_markets=["HK"]
+    ).market_plans[0]
     signatures = module._build_market_bootstrap_signatures(market_plan)
     task_names = [signature.task for signature in signatures]
 
-    assert "app.tasks.runtime_bootstrap_tasks.queue_market_bootstrap_scan" not in task_names
+    assert (
+        "app.tasks.runtime_bootstrap_tasks.queue_market_bootstrap_scan"
+        not in task_names
+    )
     assert "app.interfaces.tasks.feature_store_tasks.build_daily_snapshot" in task_names
     assert "app.tasks.breadth_tasks.calculate_daily_breadth_with_gapfill" in task_names
-    assert (
-        "app.tasks.group_rank_tasks.calculate_daily_group_rankings"
-        in task_names
-    )
+    assert "app.tasks.group_rank_tasks.calculate_daily_group_rankings" in task_names
     breadth = next(
         signature
         for signature in signatures
-        if signature.task == "app.tasks.breadth_tasks.calculate_daily_breadth_with_gapfill"
+        if signature.task
+        == "app.tasks.breadth_tasks.calculate_daily_breadth_with_gapfill"
     )
     groups = next(
         signature
         for signature in signatures
-        if signature.task
-        == "app.tasks.group_rank_tasks.calculate_daily_group_rankings"
+        if signature.task == "app.tasks.group_rank_tasks.calculate_daily_group_rankings"
     )
     assert breadth.kwargs["execution_policy"] == "refresh_guarded"
     assert groups.kwargs["execution_policy"] == "refresh_guarded"
@@ -129,7 +135,9 @@ def test_non_us_bootstrap_uses_market_feature_snapshot(monkeypatch):
     assert snapshot.kwargs["universe_name"] == "market:HK"
     assert snapshot.kwargs["publish_pointer_key"] == "latest_published_market:HK"
     assert snapshot.kwargs["bootstrap_cache_only_if_covered"] is True
-    assert [signature.kwargs.get("activity_lifecycle") for signature in signatures] == ["bootstrap"] * 10
+    assert [signature.kwargs.get("activity_lifecycle") for signature in signatures] == [
+        "bootstrap"
+    ] * 10
     assert signatures[-1].task == "app.tasks.group_history_tasks.ensure_group_history"
 
 
@@ -171,14 +179,18 @@ def test_runtime_bootstrap_signatures_follow_bootstrap_plan(monkeypatch):
     )
     monkeypatch.setattr(
         "app.tasks.group_rank_tasks.calculate_daily_group_rankings_with_gapfill",
-        _FakeTask("app.tasks.group_rank_tasks.calculate_daily_group_rankings_with_gapfill"),
+        _FakeTask(
+            "app.tasks.group_rank_tasks.calculate_daily_group_rankings_with_gapfill"
+        ),
     )
     monkeypatch.setattr(
         "app.interfaces.tasks.feature_store_tasks.build_daily_snapshot",
         _FakeTask("app.interfaces.tasks.feature_store_tasks.build_daily_snapshot"),
     )
 
-    market_plan = build_bootstrap_plan(primary_market="HK", enabled_markets=["HK"]).market_plans[0]
+    market_plan = build_bootstrap_plan(
+        primary_market="HK", enabled_markets=["HK"]
+    ).market_plans[0]
     signatures = module._build_market_bootstrap_signatures(market_plan)
 
     assert [signature.task for signature in signatures] == [
@@ -240,14 +252,18 @@ def test_us_primary_bootstrap_loads_ibd_mappings_before_prices(monkeypatch):
     )
     monkeypatch.setattr(
         "app.tasks.group_rank_tasks.calculate_daily_group_rankings_with_gapfill",
-        _FakeTask("app.tasks.group_rank_tasks.calculate_daily_group_rankings_with_gapfill"),
+        _FakeTask(
+            "app.tasks.group_rank_tasks.calculate_daily_group_rankings_with_gapfill"
+        ),
     )
     monkeypatch.setattr(
         "app.interfaces.tasks.feature_store_tasks.build_daily_snapshot",
         _FakeTask("app.interfaces.tasks.feature_store_tasks.build_daily_snapshot"),
     )
 
-    market_plan = build_bootstrap_plan(primary_market="US", enabled_markets=["US"]).market_plans[0]
+    market_plan = build_bootstrap_plan(
+        primary_market="US", enabled_markets=["US"]
+    ).market_plans[0]
     signatures = module._build_market_bootstrap_signatures(market_plan)
     task_names = [signature.task for signature in signatures]
 
@@ -285,13 +301,19 @@ def test_bootstrap_includes_every_daily_pipeline_compute_step():
     from datetime import date
 
     from app.domain.bootstrap.plan import build_bootstrap_plan
-    from app.tasks.daily_market_pipeline_tasks import _build_daily_market_pipeline_signatures
+    from app.tasks.daily_market_pipeline_tasks import (
+        _build_daily_market_pipeline_signatures,
+    )
     from app.tasks.runtime_bootstrap_tasks import _build_market_bootstrap_signatures
 
-    daily = {s.task for s in _build_daily_market_pipeline_signatures("US", date(2026, 6, 1))}
+    daily = {
+        s.task for s in _build_daily_market_pipeline_signatures("US", date(2026, 6, 1))
+    }
     daily_compute = {t for t in daily if "guard" not in t and "smart_refresh" not in t}
 
-    plan = build_bootstrap_plan(primary_market="US", enabled_markets=["US"]).market_plans[0]
+    plan = build_bootstrap_plan(
+        primary_market="US", enabled_markets=["US"]
+    ).market_plans[0]
     bootstrap = {s.task for s in _build_market_bootstrap_signatures(plan)}
 
     if "app.tasks.group_rank_tasks.calculate_daily_group_rankings" in bootstrap:
@@ -300,10 +322,14 @@ def test_bootstrap_includes_every_daily_pipeline_compute_step():
         )
 
     missing = daily_compute - bootstrap
-    assert not missing, f"daily-pipeline compute steps missing from bootstrap: {missing}"
+    assert not missing, (
+        f"daily-pipeline compute steps missing from bootstrap: {missing}"
+    )
 
 
-def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chains(monkeypatch):
+def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chains(
+    monkeypatch,
+):
     from app.tasks import runtime_bootstrap_tasks as module
 
     class _FakeAsyncResult:
@@ -329,7 +355,9 @@ def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chai
                 }
             )
             return _FakeAsyncResult(
-                "primary-task-123" if len(applied_chains) == 1 else f"background-task-{len(applied_chains)}"
+                "primary-task-123"
+                if len(applied_chains) == 1
+                else f"background-task-{len(applied_chains)}"
             )
 
     monkeypatch.setattr(
@@ -345,7 +373,9 @@ def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chai
     monkeypatch.setattr(
         module,
         "complete_background_market_bootstrap",
-        _FakeTask("app.tasks.runtime_bootstrap_tasks.complete_background_market_bootstrap"),
+        _FakeTask(
+            "app.tasks.runtime_bootstrap_tasks.complete_background_market_bootstrap"
+        ),
     )
     monkeypatch.setattr(
         module,
@@ -365,8 +395,10 @@ def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chai
     monkeypatch.setattr(
         module,
         "record_runtime_bootstrap_run",
-        lambda *, primary_market, enabled_markets, fresh_install, primary_task_id, market_task_ids, queue_state: (
-            events.append(("record", queue_state, primary_task_id, dict(market_task_ids))),
+        lambda *, primary_market, enabled_markets, dispatch_id, fresh_install, primary_task_id, market_task_ids, queue_state: (
+            events.append(
+                ("record", queue_state, primary_task_id, dict(market_task_ids))
+            ),
             recorded_runs.append(
                 {
                     "primary_market": primary_market,
@@ -398,11 +430,23 @@ def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chai
         },
     )
     assert market_chains == [
-        ["task:US", "app.tasks.runtime_bootstrap_tasks.complete_local_runtime_bootstrap"],
-        ["task:HK", "app.tasks.runtime_bootstrap_tasks.complete_background_market_bootstrap"],
-        ["task:TW", "app.tasks.runtime_bootstrap_tasks.complete_background_market_bootstrap"],
+        [
+            "task:US",
+            "app.tasks.runtime_bootstrap_tasks.complete_local_runtime_bootstrap",
+        ],
+        [
+            "task:HK",
+            "app.tasks.runtime_bootstrap_tasks.complete_background_market_bootstrap",
+        ],
+        [
+            "task:TW",
+            "app.tasks.runtime_bootstrap_tasks.complete_background_market_bootstrap",
+        ],
     ]
-    assert applied_chains[0]["errback"].task == "app.tasks.runtime_bootstrap_tasks.fail_local_runtime_bootstrap"
+    assert (
+        applied_chains[0]["errback"].task
+        == "app.tasks.runtime_bootstrap_tasks.fail_local_runtime_bootstrap"
+    )
     assert applied_chains[0]["errback"].kwargs == {
         "primary_market": "US",
     }
@@ -467,7 +511,9 @@ def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chai
     ]
 
 
-def test_queue_local_runtime_bootstrap_does_not_dispatch_when_initial_manifest_fails(monkeypatch):
+def test_queue_local_runtime_bootstrap_does_not_dispatch_when_initial_manifest_fails(
+    monkeypatch,
+):
     from app.tasks import runtime_bootstrap_tasks as module
 
     applied = []
@@ -512,6 +558,7 @@ def test_queue_local_runtime_bootstrap_logs_late_manifest_update_failure(monkeyp
         *,
         primary_market,
         enabled_markets,
+        dispatch_id,
         fresh_install,
         primary_task_id,
         market_task_ids,
@@ -571,7 +618,7 @@ def test_queue_local_runtime_bootstrap_logs_late_manifest_update_failure(monkeyp
             "primary_task_id": "task-us",
             "market_task_ids": {"US": "task-us", "HK": "task-hk"},
             "queue_state": "queued",
-        }
+        },
     ]
 
 
@@ -595,15 +642,17 @@ def test_queue_local_runtime_bootstrap_records_partial_manifest_when_background_
     monkeypatch.setattr(
         module,
         "record_runtime_bootstrap_run",
-        lambda *, primary_market, enabled_markets, fresh_install, primary_task_id, market_task_ids, queue_state: recorded_runs.append(
-            {
-                "primary_market": primary_market,
-                "enabled_markets": tuple(enabled_markets),
-                "fresh_install": fresh_install,
-                "primary_task_id": primary_task_id,
-                "market_task_ids": dict(market_task_ids),
-                "queue_state": queue_state,
-            }
+        lambda *, primary_market, enabled_markets, dispatch_id, fresh_install, primary_task_id, market_task_ids, queue_state: (
+            recorded_runs.append(
+                {
+                    "primary_market": primary_market,
+                    "enabled_markets": tuple(enabled_markets),
+                    "fresh_install": fresh_install,
+                    "primary_task_id": primary_task_id,
+                    "market_task_ids": dict(market_task_ids),
+                    "queue_state": queue_state,
+                }
+            )
         ),
     )
 
@@ -785,7 +834,9 @@ def test_complete_local_runtime_bootstrap_evaluates_only_primary_market(monkeypa
     assert session.closed is True
 
 
-def test_complete_local_runtime_bootstrap_reports_primary_readiness_failure(monkeypatch):
+def test_complete_local_runtime_bootstrap_reports_primary_readiness_failure(
+    monkeypatch,
+):
     from app.services.bootstrap_readiness_service import (
         BootstrapReadiness,
         MarketBootstrapReadiness,
@@ -913,7 +964,9 @@ def test_complete_local_runtime_bootstrap_uses_requested_market_readiness(monkey
     }
 
 
-def test_complete_background_market_bootstrap_marks_market_failure_without_global_state(monkeypatch):
+def test_complete_background_market_bootstrap_marks_market_failure_without_global_state(
+    monkeypatch,
+):
     from app.services.bootstrap_readiness_service import (
         BootstrapReadiness,
         MarketBootstrapReadiness,
@@ -953,7 +1006,9 @@ def test_complete_background_market_bootstrap_marks_market_failure_without_globa
     )
     monkeypatch.setattr(
         "app.services.runtime_preferences_service.set_bootstrap_state",
-        lambda *_args, **_kwargs: pytest.fail("background completion must not mutate global bootstrap state"),
+        lambda *_args, **_kwargs: pytest.fail(
+            "background completion must not mutate global bootstrap state"
+        ),
     )
     monkeypatch.setattr(
         module,

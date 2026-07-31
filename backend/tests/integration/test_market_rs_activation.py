@@ -20,8 +20,8 @@ from app.infra.db.repositories.feature_run_repo import SqlFeatureRunRepository
 from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
 from app.models.industry import IBDGroupRank
 from app.services.market_rs_rollout_executor import (
-    MarketRsRolloutExecutor,
-    MarketRsRolloutRequest,
+    MarketRsActivationExecutor,
+    MarketRsActivationRequest,
 )
 from app.services.market_rs_rollout_service import (
     ActivationValidationReport,
@@ -160,7 +160,9 @@ def test_activation_switches_market_and_feature_pointers_in_one_commit(
         tmp_path,
         market="US",
     ).sha256
-    monkeypatch.setattr(service.validator, "revalidate_static", lambda *args, **kwargs: ())
+    monkeypatch.setattr(
+        service.validator, "revalidate_static", lambda *args, **kwargs: ()
+    )
 
     service.activate(
         db_session,
@@ -175,10 +177,13 @@ def test_activation_switches_market_and_feature_pointers_in_one_commit(
     assert db_session.get(MarketRsFormulaPointer, "US").formula_version == (
         BALANCED_RS_FORMULA_VERSION
     )
-    assert db_session.get(
-        FeatureRunPointer,
-        "latest_published_market:US",
-    ).run_id == candidate_id
+    assert (
+        db_session.get(
+            FeatureRunPointer,
+            "latest_published_market:US",
+        ).run_id
+        == candidate_id
+    )
 
 
 def test_activation_invalidates_group_cache_after_commit(
@@ -194,7 +199,9 @@ def test_activation_invalidates_group_cache_after_commit(
         tmp_path,
         market="US",
     ).sha256
-    monkeypatch.setattr(service.validator, "revalidate_static", lambda *args, **kwargs: ())
+    monkeypatch.setattr(
+        service.validator, "revalidate_static", lambda *args, **kwargs: ()
+    )
     invalidations: list[tuple[str, bool]] = []
     monkeypatch.setattr(
         activation_module,
@@ -230,7 +237,9 @@ def test_failure_after_market_pointer_flush_rolls_back_both_pointers(
         tmp_path,
         market="US",
     ).sha256
-    monkeypatch.setattr(service.validator, "revalidate_static", lambda *args, **kwargs: ())
+    monkeypatch.setattr(
+        service.validator, "revalidate_static", lambda *args, **kwargs: ()
+    )
     invalidations: list[str] = []
     monkeypatch.setattr(
         activation_module,
@@ -252,10 +261,13 @@ def test_failure_after_market_pointer_flush_rolls_back_both_pointers(
     assert db_session.get(MarketRsFormulaPointer, "US").formula_version == (
         LEGACY_RS_FORMULA_VERSION
     )
-    assert db_session.get(
-        FeatureRunPointer,
-        "latest_published_market:US",
-    ).run_id == old_id
+    assert (
+        db_session.get(
+            FeatureRunPointer,
+            "latest_published_market:US",
+        ).run_id
+        == old_id
+    )
     assert invalidations == []
 
 
@@ -301,7 +313,7 @@ def test_shared_executor_activates_exact_group_and_history_identity(
         "bump_group_rankings_epoch",
         invalidations,
     )
-    executor = MarketRsRolloutExecutor(
+    executor = MarketRsActivationExecutor(
         rollout_service=service,
         feature_snapshot_builder=lambda **_kwargs: candidate_id,
         static_exporter=_export_static,
@@ -310,17 +322,16 @@ def test_shared_executor_activates_exact_group_and_history_identity(
 
     outcome = executor.execute(
         db_session,
-        request=MarketRsRolloutRequest(
+        request=MarketRsActivationRequest(
             market="US",
             through_date=date(2026, 4, 10),
-            activate=True,
             static_staging_dir=tmp_path / "stage",
         ),
     )
 
     db_session.expire_all()
     repository = MarketRsRunRepository()
-    assert outcome.activated is True
+    assert outcome.market == "US"
     assert repository.active_formula(db_session, market="US") == (
         BALANCED_RS_FORMULA_VERSION
     )

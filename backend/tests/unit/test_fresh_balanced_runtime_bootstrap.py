@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
+from app.services.bootstrap_run_manifest import BootstrapRunManifest
 
 
 def test_fresh_dispatch_identity_survives_partial_bootstrap(monkeypatch) -> None:
@@ -35,6 +36,64 @@ def test_fresh_dispatch_identity_survives_partial_bootstrap(monkeypatch) -> None
     db.close.assert_called_once_with()
 
 
+def test_fresh_activation_marker_is_consumed_after_all_markets_activate() -> None:
+    from app.services.fresh_balanced_rs_bootstrap_lifecycle import (
+        FreshBalancedRsBootstrapLifecycle,
+    )
+
+    manifest_repository = MagicMock()
+    manifest_repository.load.return_value = BootstrapRunManifest.create(
+        primary_market="US",
+        enabled_markets=("US", "HK"),
+        fresh_install=True,
+    )
+    formula_repository = MagicMock()
+    formula_repository.active_formula.return_value = BALANCED_RS_FORMULA_VERSION
+    lifecycle = FreshBalancedRsBootstrapLifecycle(
+        manifest_repository=manifest_repository,
+        formula_repository=formula_repository,
+    )
+    db = MagicMock()
+
+    assert lifecycle.consume_if_complete(db) is True
+
+    saved = manifest_repository.save.call_args.args[1]
+    assert saved.fresh_install is False
+    assert saved.enabled_markets == ("US", "HK")
+    assert [
+        call.kwargs["market"]
+        for call in formula_repository.active_formula.call_args_list
+    ] == [
+        "US",
+        "HK",
+    ]
+
+
+def test_fresh_activation_marker_survives_partial_market_activation() -> None:
+    from app.services.fresh_balanced_rs_bootstrap_lifecycle import (
+        FreshBalancedRsBootstrapLifecycle,
+    )
+
+    manifest_repository = MagicMock()
+    manifest_repository.load.return_value = BootstrapRunManifest.create(
+        primary_market="US",
+        enabled_markets=("US", "HK"),
+        fresh_install=True,
+    )
+    formula_repository = MagicMock()
+    formula_repository.active_formula.side_effect = [
+        BALANCED_RS_FORMULA_VERSION,
+        "legacy-linear-v1",
+    ]
+    lifecycle = FreshBalancedRsBootstrapLifecycle(
+        manifest_repository=manifest_repository,
+        formula_repository=formula_repository,
+    )
+
+    assert lifecycle.consume_if_complete(MagicMock()) is False
+    manifest_repository.save.assert_not_called()
+
+
 @pytest.mark.parametrize("fresh_install", [True, False])
 def test_queue_bootstrap_captures_pristine_installation_once(
     monkeypatch,
@@ -56,9 +115,7 @@ def test_queue_bootstrap_captures_pristine_installation_once(
         return fresh_install
 
     def _queue(market_plan, **kwargs):
-        queued_operations.append(
-            [stage.operation for stage in market_plan.stages]
-        )
+        queued_operations.append([stage.operation for stage in market_plan.stages])
         completion_payloads.append(dict(kwargs["completion_kwargs"]))
         return _FakeAsyncResult(f"task-{market_plan.market.lower()}")
 
@@ -87,14 +144,12 @@ def test_queue_bootstrap_captures_pristine_installation_once(
     assert all(expected_operation in operations for operations in queued_operations)
     if fresh_install:
         assert all(
-            payload["expected_formula_version"]
-            == BALANCED_RS_FORMULA_VERSION
+            payload["expected_formula_version"] == BALANCED_RS_FORMULA_VERSION
             for payload in completion_payloads
         )
     else:
         assert all(
-            "expected_formula_version" not in payload
-            for payload in completion_payloads
+            "expected_formula_version" not in payload for payload in completion_payloads
         )
 
 
@@ -112,8 +167,7 @@ def test_fresh_bootstrap_signature_routes_activation_to_market_queue() -> None:
     activation = next(
         signature
         for signature in signatures
-        if signature.task
-        == "app.tasks.market_rs_tasks.bootstrap_balanced_market_rs"
+        if signature.task == "app.tasks.market_rs_tasks.bootstrap_balanced_market_rs"
     )
 
     assert activation.kwargs == {
@@ -218,9 +272,7 @@ def test_fresh_bootstrap_completion_rejects_legacy_formula_pointer(
         "US": BALANCED_RS_FORMULA_VERSION,
     }
     assert failed_markets[0]["stage_key"] == "market_rs"
-    assert failed_markets[0]["message"] == (
-        "Balanced Market RS activation incomplete"
-    )
+    assert failed_markets[0]["message"] == ("Balanced Market RS activation incomplete")
     if completion_task_name == "complete_local_runtime_bootstrap":
         assert bootstrap_states == ["failed"]
     else:
