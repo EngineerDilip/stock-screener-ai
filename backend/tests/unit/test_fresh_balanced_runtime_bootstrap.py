@@ -175,6 +175,62 @@ def test_fresh_dispatch_identity_survives_partial_bootstrap(monkeypatch) -> None
     db.close.assert_called_once_with()
 
 
+def _seed_startup_daily_price_input(db_session) -> None:
+    db_session.add(
+        StockUniverse(
+            symbol="AAPL",
+            market="US",
+            is_active=True,
+            status=UNIVERSE_STATUS_ACTIVE,
+        )
+    )
+    db_session.add(
+        StockPrice(
+            symbol="AAPL",
+            date=date(2026, 7, 31),
+            open=210.0,
+            high=211.0,
+            low=209.0,
+            close=210.0,
+            adj_close=210.0,
+            volume=1_000_000,
+        )
+    )
+    db_session.commit()
+
+
+def test_fresh_dispatch_rejects_raw_data_without_startup_marker(
+    db_session,
+) -> None:
+    from app.tasks import runtime_bootstrap_tasks as module
+
+    _seed_startup_daily_price_input(db_session)
+
+    state = module._balanced_activation_state_at_dispatch(("US", "HK"))
+
+    assert state.fresh_install is False
+    assert state.pending_markets == ()
+
+
+def test_fresh_dispatch_ignores_marked_startup_daily_price_seed(
+    db_session,
+) -> None:
+    from app.services.bootstrap_readiness_service import BootstrapReadinessService
+    from app.tasks import runtime_bootstrap_tasks as module
+
+    BootstrapReadinessService().mark_pre_bootstrap_seed_import(
+        db_session,
+        source="group_history_reconciliation",
+    )
+    db_session.commit()
+    _seed_startup_daily_price_input(db_session)
+
+    state = module._balanced_activation_state_at_dispatch(("US", "HK"))
+
+    assert state.fresh_install is True
+    assert state.pending_markets == ("US", "HK")
+
+
 @pytest.mark.parametrize("fresh_install", [True, False])
 def test_queue_bootstrap_captures_pristine_installation_once(
     monkeypatch,

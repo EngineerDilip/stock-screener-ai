@@ -71,7 +71,7 @@ Bootstrap stages:
 1. **Universe refresh** — seeds the market symbol list. US uses S&P 500 / Russell / NDX via `refresh_stock_universe`; HK / IN / JP / KR / TW / CN / CA / DE / SG / MY / AU use official exchange feeds via `refresh_official_market_universe`.
 2. **Benchmark + price refresh** — imports the GitHub daily price bundle first, accepts recent stale bundles during bootstrap, then live-fetches missing/current-session gaps (`7d` top-up for stale symbols, `2y` for no-history symbols). Under `live_only` this stage skips the bundle and fetches live — see [Market Data Source Mode](#market-data-source-mode).
 3. **Fundamentals refresh** — loads quarterly and annual financials.
-4. **Market RS publication** — on a pristine installation, backfills the canonical balanced-horizon percentile RS history, validates a staged static export, and atomically activates the Market and Feature pointers. A database with any durable market, scan, Feature, Group, or Market RS data keeps the balanced calculation in shadow mode until an operator activates it.
+4. **Market RS publication** — on a pristine installation, backfills the canonical balanced-horizon percentile RS history, validates a staged static export, and atomically activates the Market and Feature pointers. A database with any durable market, breadth, exposure, scan, Feature, Group, or Market RS data keeps the balanced calculation in shadow mode until an operator activates it.
 5. **Breadth calculation** — computes StockBee-style advance/decline data with gap-fill.
 6. **Market exposure** — derives the market-regime exposure state from the refreshed breadth data.
 7. **Group rankings** — averages canonical constituent RS values for each group, using the active formula for that market.
@@ -205,7 +205,7 @@ The dialog shows each task's display name and description, schedule, last run ti
 
 ### Fresh database activation
 
-Runtime bootstrap classifies a pristine installation once, before dispatch, and records that decision in the bootstrap manifest. Formula-pointer and application-setting provisioning are allowed; any universe, price, fundamental, scan, Feature run, Group rank, or Market RS run makes the database non-pristine. The fresh marker survives an interrupted initial bootstrap, then is consumed after every enabled Market has activated balanced RS. A later repair bootstrap or explicit rollback therefore cannot silently re-activate balanced RS.
+Runtime bootstrap classifies a pristine installation once, before dispatch, and records that decision in the bootstrap manifest. Formula-pointer and application-setting provisioning are allowed; any universe, price, fundamental, breadth, exposure, scan, Feature run, Group rank, or Market RS run makes the database non-pristine. The only exception is startup Group-history reconciliation that first records a valid `runtime.bootstrap.pre_bootstrap_seed_import` marker while the database is still pristine; if that startup task imports raw seed rows before the user starts bootstrap, the first dispatch may still use fresh activation as long as no bootstrap output rows exist. A failed reconciliation dispatch clears any marker it just created. The fresh marker survives an interrupted initial bootstrap, then is consumed after every enabled Market has activated balanced RS. A later repair bootstrap or explicit rollback therefore cannot silently re-activate balanced RS.
 
 Each bootstrap dispatch owns a persisted generation for 24 hours, renewed while its market workflows are published. Duplicate starts are rejected by that generation rather than by the display-only bootstrap preference. If the API process dies before dispatch completes or callbacks are lost, the expired generation can be reclaimed by starting bootstrap again; no database edit is required. Lease expiry alone does not invalidate a callback: the still-current generation may finish until a replacement claims ownership, while callbacks from a superseded generation are ignored.
 
@@ -229,7 +229,7 @@ WHERE market = 'US'
 GROUP BY rs_formula_version;
 ```
 
-Non-pristine databases are never auto-activated, including databases that contain only inactive or historical rows. Use the explicit shadow backfill and activation procedure below. This preserves existing data and pointers until every guard passes.
+Non-pristine databases are never auto-activated, including databases that contain only inactive or historical rows and no pre-bootstrap startup seed marker. Use the explicit shadow backfill and activation procedure below. This preserves existing data and pointers until every guard passes.
 
 ### Existing database rollout
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -16,14 +17,22 @@ from app.domain.relative_strength import (
 )
 from app.infra.db.models.feature_store import FeatureRun
 from app.infra.db.models.relative_strength import MarketRsFormulaPointer, MarketRsRun
+from app.models.app_settings import AppSetting
 from app.models.industry import IBDGroupRank
+from app.models.market_breadth import MarketBreadth
+from app.models.market_exposure import MarketExposure
 import app.models.scan_result  # noqa: F401
 import app.models.stock  # noqa: F401
 import app.models.stock_universe  # noqa: F401
 from app.models.scan_result import SCAN_TRIGGER_SOURCE_AUTO, SCAN_TRIGGER_SOURCE_MANUAL, Scan
 from app.models.stock import StockFundamental, StockPrice
 from app.models.stock_universe import StockUniverse
-from app.services.bootstrap_readiness_service import BootstrapReadinessService
+from app.services.bootstrap_readiness_service import (
+    PRE_BOOTSTRAP_SEED_IMPORT_CATEGORY,
+    PRE_BOOTSTRAP_SEED_IMPORT_KEY,
+    PRE_BOOTSTRAP_SEED_IMPORT_SCHEMA_VERSION,
+    BootstrapReadinessService,
+)
 
 
 class FakeBootstrapReadinessService(BootstrapReadinessService):
@@ -257,6 +266,16 @@ def test_pristine_installation_rejects_inactive_universe_rows(readiness_db) -> N
             run_type="daily_snapshot",
             status="completed",
         ),
+        MarketBreadth(
+            market="US",
+            date=date(2026, 5, 1),
+        ),
+        MarketExposure(
+            market="US",
+            date=date(2026, 5, 1),
+            exposure_score=50.0,
+            stance="neutral",
+        ),
         IBDGroupRank(
             market="US",
             industry_group="Software",
@@ -284,6 +303,8 @@ def test_pristine_installation_rejects_inactive_universe_rows(readiness_db) -> N
         "fundamental",
         "scan",
         "feature-run",
+        "market-breadth",
+        "market-exposure",
         "group-rank",
         "market-rs-run",
     ],
@@ -296,6 +317,220 @@ def test_pristine_installation_rejects_any_durable_data(
     readiness_db.commit()
 
     assert BootstrapReadinessService().is_pristine_installation(readiness_db) is False
+
+
+def test_pre_bootstrap_seed_import_requires_marker_for_raw_inputs(
+    readiness_db,
+) -> None:
+    seed_core_market_data(readiness_db)
+
+    service = BootstrapReadinessService()
+    assert service.is_pristine_installation(readiness_db) is False
+    assert service.is_pre_bootstrap_seed_import_installation(readiness_db) is False
+
+
+def test_pre_bootstrap_seed_import_marker_requires_pristine_state(
+    readiness_db,
+) -> None:
+    seed_core_market_data(readiness_db)
+
+    service = BootstrapReadinessService()
+
+    assert (
+        service.mark_pre_bootstrap_seed_import(
+            readiness_db,
+            source="group_history_reconciliation",
+        )
+        is False
+    )
+    assert service.has_pre_bootstrap_seed_import_marker(readiness_db) is False
+
+
+def test_pre_bootstrap_seed_import_marker_allows_raw_bootstrap_inputs(
+    readiness_db,
+) -> None:
+    service = BootstrapReadinessService()
+    assert (
+        service.mark_pre_bootstrap_seed_import(
+            readiness_db,
+            source="group_history_reconciliation",
+        )
+        is True
+    )
+    readiness_db.commit()
+    seed_core_market_data(readiness_db)
+
+    assert service.is_pristine_installation(readiness_db) is False
+    assert service.is_pre_bootstrap_seed_import_installation(readiness_db) is True
+
+
+@pytest.mark.parametrize(
+    ("value", "category"),
+    [
+        ("not-json", PRE_BOOTSTRAP_SEED_IMPORT_CATEGORY),
+        (
+            json.dumps(
+                {
+                    "schema_version": PRE_BOOTSTRAP_SEED_IMPORT_SCHEMA_VERSION + 1,
+                    "sources": ["group_history_reconciliation"],
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ),
+            PRE_BOOTSTRAP_SEED_IMPORT_CATEGORY,
+        ),
+        (
+            json.dumps(
+                {
+                    "schema_version": PRE_BOOTSTRAP_SEED_IMPORT_SCHEMA_VERSION,
+                    "sources": [],
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ),
+            PRE_BOOTSTRAP_SEED_IMPORT_CATEGORY,
+        ),
+        (
+            json.dumps(
+                {
+                    "schema_version": PRE_BOOTSTRAP_SEED_IMPORT_SCHEMA_VERSION,
+                    "sources": ["group_history_reconciliation"],
+                    "updated_at": "not-a-date",
+                }
+            ),
+            PRE_BOOTSTRAP_SEED_IMPORT_CATEGORY,
+        ),
+        (
+            json.dumps(
+                {
+                    "schema_version": PRE_BOOTSTRAP_SEED_IMPORT_SCHEMA_VERSION,
+                    "sources": ["group_history_reconciliation"],
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ),
+            "other",
+        ),
+    ],
+    ids=[
+        "malformed-json",
+        "wrong-schema",
+        "empty-sources",
+        "invalid-updated-at",
+        "wrong-category",
+    ],
+)
+def test_pre_bootstrap_seed_import_rejects_invalid_marker_metadata(
+    readiness_db,
+    value,
+    category,
+) -> None:
+    readiness_db.add(
+        AppSetting(
+            key=PRE_BOOTSTRAP_SEED_IMPORT_KEY,
+            value=value,
+            category=category,
+        )
+    )
+    readiness_db.commit()
+    seed_core_market_data(readiness_db)
+
+    service = BootstrapReadinessService()
+
+    assert service.has_pre_bootstrap_seed_import_marker(readiness_db) is False
+    assert service.is_pre_bootstrap_seed_import_installation(readiness_db) is False
+
+
+def test_pre_bootstrap_seed_import_keeps_valid_old_startup_marker(
+    readiness_db,
+) -> None:
+    readiness_db.add(
+        AppSetting(
+            key=PRE_BOOTSTRAP_SEED_IMPORT_KEY,
+            value=json.dumps(
+                {
+                    "schema_version": PRE_BOOTSTRAP_SEED_IMPORT_SCHEMA_VERSION,
+                    "sources": ["group_history_reconciliation"],
+                    "updated_at": datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat(),
+                }
+            ),
+            category=PRE_BOOTSTRAP_SEED_IMPORT_CATEGORY,
+        )
+    )
+    readiness_db.commit()
+    seed_core_market_data(readiness_db)
+
+    assert (
+        BootstrapReadinessService().is_pre_bootstrap_seed_import_installation(
+            readiness_db
+        )
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    "persisted_row",
+    [
+        Scan(scan_id="seed-only-scan", criteria={}, status="completed"),
+        FeatureRun(
+            as_of_date=date(2026, 5, 1),
+            run_type="daily_snapshot",
+            status="completed",
+        ),
+        MarketBreadth(
+            market="US",
+            date=date(2026, 5, 1),
+        ),
+        MarketExposure(
+            market="US",
+            date=date(2026, 5, 1),
+            exposure_score=50.0,
+            stance="neutral",
+        ),
+        IBDGroupRank(
+            market="US",
+            industry_group="Software",
+            date=date(2026, 5, 1),
+            rank=1,
+            avg_rs_rating=90,
+            rs_formula_version=LEGACY_RS_FORMULA_VERSION,
+        ),
+        MarketRsRun(
+            market="US",
+            as_of_date=date(2026, 5, 1),
+            formula_version=LEGACY_RS_FORMULA_VERSION,
+            status="completed",
+            benchmark_symbol="SPY",
+            benchmark_as_of_date=date(2026, 5, 1),
+            universe_hash="hash",
+            expected_symbol_count=0,
+            eligible_symbol_count=0,
+            excluded_symbol_count=0,
+            diagnostics_json={},
+        ),
+    ],
+    ids=[
+        "scan",
+        "feature-run",
+        "market-breadth",
+        "market-exposure",
+        "group-rank",
+        "market-rs-run",
+    ],
+)
+def test_pre_bootstrap_seed_import_rejects_bootstrap_outputs(
+    readiness_db,
+    persisted_row,
+) -> None:
+    readiness_db.add(persisted_row)
+    readiness_db.commit()
+
+    service = BootstrapReadinessService()
+    assert (
+        service.mark_pre_bootstrap_seed_import(
+            readiness_db,
+            source="group_history_reconciliation",
+        )
+        is False
+    )
+    assert service.is_pre_bootstrap_seed_import_installation(readiness_db) is False
 
 
 def test_market_readiness_rejects_formula_pointer_mismatch(readiness_db) -> None:
