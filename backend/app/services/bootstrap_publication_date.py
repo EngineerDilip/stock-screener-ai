@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
+from app.domain.relative_strength import (
+    BALANCED_RS_FORMULA_VERSION,
+    balanced_run_has_required_price_basis,
+)
 from app.infra.db.repositories.market_rs_repo import (
     MarketRsFormulaNotConfigured,
     MarketRsRunRepository,
@@ -96,13 +99,41 @@ def resolve_bootstrap_publication_date(
             reason_code="active_formula_not_balanced",
         )
 
-    run = repo.get_latest_completed(
+    window_start = requested_date - timedelta(days=_max_lag_days(max_lag_days))
+    completed_runs = repo.list_completed_runs(
         db,
         market=normalized_market,
         formula_version=active_formula,
+        start_date=window_start,
         through_date=requested_date,
     )
+    latest_run = completed_runs[0] if completed_runs else None
+    run = next(
+        (
+            candidate
+            for candidate in completed_runs
+            if balanced_run_has_required_price_basis(candidate)
+        ),
+        None,
+    )
+    if run is None and latest_run is not None:
+        return _resolution(
+            market=normalized_market,
+            requested_date=requested_date,
+            selected_date=requested_date,
+            formula_version=active_formula,
+            market_rs_run_id=getattr(latest_run, "id", None),
+            lag_days=(requested_date - latest_run.as_of_date).days,
+            reason_code="balanced_run_incompatible",
+        )
     if run is None:
+        latest_run = repo.get_latest_completed(
+            db,
+            market=normalized_market,
+            formula_version=active_formula,
+            through_date=requested_date,
+        )
+    if run is None and latest_run is None:
         return _resolution(
             market=normalized_market,
             requested_date=requested_date,
@@ -110,6 +141,8 @@ def resolve_bootstrap_publication_date(
             formula_version=active_formula,
             reason_code="balanced_run_unavailable",
         )
+    if run is None:
+        run = latest_run
 
     selected_date = run.as_of_date
     lag_days = (requested_date - selected_date).days

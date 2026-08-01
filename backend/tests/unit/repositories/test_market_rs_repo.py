@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from sqlalchemy.orm import sessionmaker
@@ -18,7 +18,6 @@ from app.infra.db.repositories.market_rs_repo import (
     MarketRsFormulaUnsupported,
     MarketRsRunRepository,
 )
-
 
 AS_OF = date(2026, 4, 10)
 
@@ -66,6 +65,66 @@ def test_completed_run_is_invisible_until_rows_and_status_commit(db_session):
         as_of_date=AS_OF,
         formula_version=BALANCED_RS_FORMULA_VERSION,
     ) is None
+
+
+def test_list_completed_runs_filters_window_formula_and_status(db_session):
+    repo = MarketRsRunRepository()
+    db_session.add_all(
+        [
+            MarketRsRun(
+                **_run_kwargs(as_of_date=AS_OF),
+                status="completed",
+                eligible_symbol_count=0,
+                excluded_symbol_count=2,
+                diagnostics_json={},
+            ),
+            MarketRsRun(
+                **_run_kwargs(as_of_date=AS_OF - timedelta(days=1)),
+                status="completed",
+                eligible_symbol_count=0,
+                excluded_symbol_count=2,
+                diagnostics_json={},
+            ),
+            MarketRsRun(
+                **_run_kwargs(as_of_date=AS_OF - timedelta(days=5)),
+                status="completed",
+                eligible_symbol_count=0,
+                excluded_symbol_count=2,
+                diagnostics_json={},
+            ),
+            MarketRsRun(
+                **_run_kwargs(
+                    as_of_date=AS_OF,
+                    formula_version=LEGACY_RS_FORMULA_VERSION,
+                ),
+                status="completed",
+                eligible_symbol_count=0,
+                excluded_symbol_count=2,
+                diagnostics_json={},
+            ),
+            MarketRsRun(
+                **_run_kwargs(as_of_date=AS_OF - timedelta(days=2)),
+                status="failed",
+                eligible_symbol_count=0,
+                excluded_symbol_count=2,
+                diagnostics_json={},
+            ),
+        ]
+    )
+    db_session.commit()
+
+    runs = repo.list_completed_runs(
+        db_session,
+        market="us",
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+        start_date=AS_OF - timedelta(days=3),
+        through_date=AS_OF,
+    )
+
+    assert [run.as_of_date for run in runs] == [
+        AS_OF,
+        AS_OF - timedelta(days=1),
+    ]
 
 
 def test_failed_restart_clears_partial_rows_but_completed_run_is_idempotent(

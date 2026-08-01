@@ -8,6 +8,7 @@ import pytest
 
 from app.domain.relative_strength import (
     BALANCED_RS_FORMULA_VERSION,
+    BALANCED_RS_PRICE_BASIS,
     LEGACY_RS_FORMULA_VERSION,
 )
 from app.services.group_history_bootstrap_service import GroupHistoryBootstrapStatus
@@ -121,9 +122,12 @@ def test_group_history_target_uses_balanced_publication_date(monkeypatch):
 
     repository = Mock()
     repository.active_formula.return_value = BALANCED_RS_FORMULA_VERSION
-    repository.get_latest_completed.return_value = SimpleNamespace(
-        id=42,
-        as_of_date=date(2026, 6, 29),
+    repository.list_completed_runs.return_value = (
+        SimpleNamespace(
+            id=42,
+            as_of_date=date(2026, 6, 29),
+            diagnostics_json={"price_basis": BALANCED_RS_PRICE_BASIS},
+        ),
     )
     monkeypatch.setattr(
         market_rs_repo,
@@ -140,12 +144,14 @@ def test_group_history_target_uses_balanced_publication_date(monkeypatch):
     assert target.market == "US"
     assert target.formula_version == BALANCED_RS_FORMULA_VERSION
     assert target.through_date == date(2026, 6, 29)
-    repository.get_latest_completed.assert_called_once_with(
+    repository.list_completed_runs.assert_called_once_with(
         db,
         market="US",
         formula_version=BALANCED_RS_FORMULA_VERSION,
+        start_date=date(2026, 6, 27),
         through_date=date(2026, 6, 30),
     )
+    repository.get_latest_completed.assert_not_called()
 
 
 def test_strict_group_history_task_raises_when_readiness_remains_incomplete(

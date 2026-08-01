@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
 import math
-from typing import Iterable, Mapping
+from collections.abc import Iterable, Mapping
+from datetime import date, datetime, timezone
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, object_session, selectinload
@@ -20,7 +20,6 @@ from app.infra.db.models.relative_strength import (
     StockRsSnapshot,
 )
 from app.models.industry import IBDGroupRank
-
 
 SUPPORTED_FORMULAS = frozenset(
     {BALANCED_RS_FORMULA_VERSION, LEGACY_RS_FORMULA_VERSION}
@@ -314,6 +313,28 @@ class MarketRsRunRepository:
         return query.order_by(
             MarketRsRun.as_of_date.desc(), MarketRsRun.id.desc()
         ).first()
+
+    def list_completed_runs(
+        self,
+        db: Session,
+        *,
+        market: str,
+        formula_version: str,
+        start_date: date,
+        through_date: date,
+    ) -> tuple[MarketRsRun, ...]:
+        return tuple(
+            db.query(MarketRsRun)
+            .filter(
+                MarketRsRun.market == market.upper(),
+                MarketRsRun.formula_version == formula_version,
+                MarketRsRun.status == "completed",
+                MarketRsRun.as_of_date >= start_date,
+                MarketRsRun.as_of_date <= through_date,
+            )
+            .order_by(MarketRsRun.as_of_date.desc(), MarketRsRun.id.desc())
+            .all()
+        )
 
     def active_formula(self, db: Session, *, market: str) -> str:
         pointer = db.get(MarketRsFormulaPointer, market.upper())
