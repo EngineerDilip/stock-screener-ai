@@ -11,6 +11,9 @@ from app.celery_app import celery_app
 from app.database import SessionLocal
 from app.domain.group_history import GroupHistoryTarget
 from app.domain.markets import get_market_catalog
+from app.services.bootstrap_publication_date import (
+    resolve_bootstrap_publication_date,
+)
 from app.services.group_history_bootstrap_service import GroupHistoryBootstrapService
 from app.services.group_history_execution_service import (
     GroupHistoryExecutionService,
@@ -18,8 +21,8 @@ from app.services.group_history_execution_service import (
 from app.services.group_history_readiness_service import GroupHistoryReadinessService
 from app.services.group_history_reconciliation import (
     GroupHistoryReconciliationRepository,
-    GroupHistoryReservation,
     GroupHistoryReconciliationStatus,
+    GroupHistoryReservation,
 )
 from app.services.group_history_snapshot_coordinator import (
     build_group_history_snapshot_coordinator,
@@ -100,13 +103,23 @@ def _resolve_current_group_history_target(db, *, market: str) -> GroupHistoryTar
     from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
 
     market_code = normalize_market(market)
-    formula_version = MarketRsRunRepository().active_formula(
+    repository = MarketRsRunRepository()
+    formula_version = repository.active_formula(
         db,
         market=market_code,
     )
     if not formula_version:
         raise RuntimeError(f"Active RS formula unavailable for {market_code}")
-    through_date = get_market_calendar_service().last_completed_trading_day(market_code)
+    requested_through_date = get_market_calendar_service().last_completed_trading_day(
+        market_code
+    )
+    through_date = resolve_bootstrap_publication_date(
+        db,
+        market=market_code,
+        requested_date=requested_through_date,
+        formula_version=formula_version,
+        repository=repository,
+    ).selected_date
     return GroupHistoryTarget(
         market=market_code,
         formula_version=formula_version,

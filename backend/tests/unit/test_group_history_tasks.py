@@ -6,7 +6,11 @@ from unittest.mock import Mock
 
 import pytest
 
-from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
+from app.domain.relative_strength import (
+    BALANCED_RS_FORMULA_VERSION,
+    BALANCED_RS_PRICE_BASIS,
+    LEGACY_RS_FORMULA_VERSION,
+)
 from app.services.group_history_bootstrap_service import GroupHistoryBootstrapStatus
 
 
@@ -26,11 +30,11 @@ def _result(*, ready: bool):
 def test_ensure_group_history_invalidates_cache_and_publishes_us_snapshot(
     monkeypatch,
 ):
-    from app.tasks import group_history_tasks as module
     from app.services.group_history_reconciliation import (
         GroupHistoryReservation,
         GroupHistoryTarget,
     )
+    from app.tasks import group_history_tasks as module
 
     db = Mock()
     db.close = Mock()
@@ -92,7 +96,39 @@ def test_group_history_target_uses_active_formula_pointer(monkeypatch):
     from app.tasks import group_history_tasks as module
 
     repository = Mock()
+    repository.active_formula.return_value = LEGACY_RS_FORMULA_VERSION
+    monkeypatch.setattr(
+        market_rs_repo,
+        "MarketRsRunRepository",
+        lambda: repository,
+    )
+    calendar = Mock()
+    calendar.last_completed_trading_day.return_value = date(2026, 6, 30)
+    monkeypatch.setattr(module, "get_market_calendar_service", lambda: calendar)
+    db = Mock()
+
+    target = module._resolve_current_group_history_target(db, market="us")
+
+    assert target.market == "US"
+    assert target.formula_version == LEGACY_RS_FORMULA_VERSION
+    assert target.through_date == date(2026, 6, 30)
+    repository.active_formula.assert_called_once_with(db, market="US")
+    repository.get_latest_completed.assert_not_called()
+
+
+def test_group_history_target_uses_balanced_publication_date(monkeypatch):
+    from app.infra.db.repositories import market_rs_repo
+    from app.tasks import group_history_tasks as module
+
+    repository = Mock()
     repository.active_formula.return_value = BALANCED_RS_FORMULA_VERSION
+    repository.list_completed_runs.return_value = (
+        SimpleNamespace(
+            id=42,
+            as_of_date=date(2026, 6, 29),
+            diagnostics_json={"price_basis": BALANCED_RS_PRICE_BASIS},
+        ),
+    )
     monkeypatch.setattr(
         market_rs_repo,
         "MarketRsRunRepository",
@@ -107,15 +143,22 @@ def test_group_history_target_uses_active_formula_pointer(monkeypatch):
 
     assert target.market == "US"
     assert target.formula_version == BALANCED_RS_FORMULA_VERSION
-    assert target.through_date == date(2026, 6, 30)
-    repository.active_formula.assert_called_once_with(db, market="US")
+    assert target.through_date == date(2026, 6, 29)
+    repository.list_completed_runs.assert_called_once_with(
+        db,
+        market="US",
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+        start_date=date(2026, 6, 25),
+        through_date=date(2026, 6, 30),
+    )
+    repository.get_latest_completed.assert_not_called()
 
 
 def test_strict_group_history_task_raises_when_readiness_remains_incomplete(
     monkeypatch,
 ):
-    from app.tasks import group_history_tasks as module
     from app.services.group_history_reconciliation import GroupHistoryTarget
+    from app.tasks import group_history_tasks as module
 
     db = Mock()
     service = Mock()
@@ -151,11 +194,11 @@ def test_strict_group_history_task_raises_when_readiness_remains_incomplete(
 def test_strict_group_history_task_records_snapshot_publication_failure_once(
     monkeypatch,
 ):
-    from app.tasks import group_history_tasks as module
     from app.services.group_history_reconciliation import (
         GroupHistoryReservation,
         GroupHistoryTarget,
     )
+    from app.tasks import group_history_tasks as module
 
     db = Mock()
     service = Mock()
@@ -475,8 +518,8 @@ def test_skipped_reconciliation_reaches_terminal_ready_without_finalization():
         GroupHistoryExecutionService,
     )
     from app.services.group_history_reconciliation import (
-        GroupHistoryReservation,
         GroupHistoryReconciliationStatus,
+        GroupHistoryReservation,
         GroupHistoryTarget,
     )
 

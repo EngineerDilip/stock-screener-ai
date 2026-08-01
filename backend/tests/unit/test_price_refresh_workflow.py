@@ -19,23 +19,25 @@ def test_full_refresh_header_detection_requires_mapping():
         )
     )
 
-    malformed = SimpleNamespace(
-        request=SimpleNamespace(headers=object())
-    )
-    manual = SimpleNamespace(
-        request=SimpleNamespace(headers={"origin": "manual"})
-    )
+    malformed = SimpleNamespace(request=SimpleNamespace(headers=object()))
+    manual = SimpleNamespace(request=SimpleNamespace(headers={"origin": "manual"}))
 
-    assert workflow._should_reject_full_refresh(
-        PriceRefreshMode.FULL,
-        malformed,
-        None,
-    ) is True
-    assert workflow._should_reject_full_refresh(
-        PriceRefreshMode.FULL,
-        manual,
-        None,
-    ) is False
+    assert (
+        workflow._should_reject_full_refresh(
+            PriceRefreshMode.FULL,
+            malformed,
+            None,
+        )
+        is True
+    )
+    assert (
+        workflow._should_reject_full_refresh(
+            PriceRefreshMode.FULL,
+            manual,
+            None,
+        )
+        is False
+    )
 
 
 def test_price_refresh_outcome_serializes_typed_github_metadata():
@@ -149,7 +151,9 @@ def test_github_only_terminal_completion_does_not_warm_benchmarks():
         update_state=MagicMock(),
     )
 
-    result = workflow.run(task=task, mode="bootstrap", market="JP", activity_lifecycle="bootstrap")
+    result = workflow.run(
+        task=task, mode="bootstrap", market="JP", activity_lifecycle="bootstrap"
+    )
 
     assert result["status"] == "completed"
     assert result["source"] == "github"
@@ -166,3 +170,114 @@ def test_github_only_terminal_completion_does_not_warm_benchmarks():
     live_runner.run.assert_not_called()
     activity_reporter.finalize_success.assert_called_once()
     db.close.assert_called_once()
+
+
+def _execute_live_refresh_with_configured_batch_size(batch_size: int) -> MagicMock:
+    from app.config import settings
+    from app.services.price_refresh_activity import PriceRefreshActivityReporter
+    from app.services.price_refresh_execution import PriceRefreshExecutionSummary
+    from app.services.price_refresh_live_runner import PriceRefreshRetryScheduler
+    from app.services.price_refresh_planning import (
+        PriceRefreshJob,
+        PriceRefreshJobKind,
+        PriceRefreshMode,
+        PriceRefreshPlan,
+    )
+    from app.services.price_refresh_workflow import (
+        PriceRefreshMarketGateway,
+        PriceRefreshWorkflow,
+        PriceRefreshWorkflowDependencies,
+    )
+
+    settings.price_refresh_live_batch_size = batch_size
+    db = MagicMock()
+    price_cache = MagicMock()
+    activity_reporter = MagicMock(spec=PriceRefreshActivityReporter)
+    live_runner = MagicMock()
+    live_runner.run.return_value = PriceRefreshExecutionSummary(
+        refreshed=3,
+        failed=0,
+        failed_symbols=[],
+        processed=3,
+        total=3,
+    )
+    retry_scheduler = MagicMock(spec=PriceRefreshRetryScheduler)
+    gateway = PriceRefreshMarketGateway(
+        normalize_market=lambda market: str(market).upper(),
+        market_tag=lambda market: f"[{market}]",
+        log_extra=lambda market: {"market": market},
+        get_eastern_now=lambda: SimpleNamespace(
+            weekday=lambda: 1,
+            hour=12,
+            date=lambda: date(2026, 6, 9),
+        ),
+        is_trading_day=lambda _day: True,
+        format_market_status=lambda: "open",
+        is_market_enabled_now=lambda _market: True,
+    )
+    workflow = PriceRefreshWorkflow(
+        PriceRefreshWorkflowDependencies(
+            session_factory=lambda: db,
+            price_cache_factory=lambda: price_cache,
+            bulk_fetcher_factory=MagicMock(return_value=object()),
+            warm_benchmarks=MagicMock(),
+            build_refresh_plan=MagicMock(),
+            last_completed_trading_day=lambda _market: date(2026, 6, 8),
+            activity_reporter=activity_reporter,
+            live_runner=live_runner,
+            retry_scheduler=retry_scheduler,
+            market_gateway=gateway,
+            raise_if_transient_database_error=MagicMock(),
+            safe_rollback=MagicMock(),
+        )
+    )
+    task = SimpleNamespace(
+        name="app.tasks.cache_tasks.smart_refresh_cache",
+        request=SimpleNamespace(id="task-jp"),
+        update_state=MagicMock(),
+    )
+    plan = PriceRefreshPlan(
+        symbols=("6758.T", "7203.T", "9984.T"),
+        jobs=(
+            PriceRefreshJob(
+                kind=PriceRefreshJobKind.NO_HISTORY,
+                symbols=("6758.T", "7203.T", "9984.T"),
+                period="2y",
+            ),
+        ),
+        all_symbols=("6758.T", "7203.T", "9984.T"),
+        symbol_markets={"6758.T": "JP", "7203.T": "JP", "9984.T": "JP"},
+    )
+
+    workflow._execute_live_refresh(
+        db,
+        price_cache,
+        task=task,
+        mode=PriceRefreshMode.BOOTSTRAP,
+        market="JP",
+        effective_market="JP",
+        activity_lifecycle="bootstrap",
+        refresh_plan=plan,
+    )
+
+    return live_runner
+
+
+def test_live_refresh_passes_configured_batch_size_to_runner(monkeypatch) -> None:
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "price_refresh_live_batch_size", 137)
+
+    live_runner = _execute_live_refresh_with_configured_batch_size(137)
+
+    assert live_runner.run.call_args.kwargs["batch_size"] == 137
+
+
+def test_live_refresh_clamps_nonpositive_batch_size_to_one(monkeypatch) -> None:
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "price_refresh_live_batch_size", 0)
+
+    live_runner = _execute_live_refresh_with_configured_batch_size(0)
+
+    assert live_runner.run.call_args.kwargs["batch_size"] == 1

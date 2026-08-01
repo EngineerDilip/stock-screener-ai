@@ -2,7 +2,6 @@ from pathlib import Path
 
 import pytest
 
-
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 REPOSITORY_ROOT = BACKEND_ROOT.parent
 LIMITS = {
@@ -12,6 +11,7 @@ LIMITS = {
     "app/wiring/bootstrap.py": 1050,
 }
 EXTRACTED_MODULES = (
+    "app/services/bootstrap_publication_date.py",
     "app/services/group_rank_input_loader.py",
     "app/services/group_rank_historical_calculator.py",
     "app/services/group_ranking_calculator.py",
@@ -24,8 +24,10 @@ EXTRACTED_MODULES = (
     "app/services/market_rs_activation_validator.py",
     "app/services/market_rs_activator.py",
     "app/services/market_rs_backfill_service.py",
+    "app/services/market_rs_bootstrap_date_resolver.py",
     "app/services/market_rs_rollout_contracts.py",
     "app/services/market_rs_static_artifact_validator.py",
+    "app/services/market_session_lag.py",
     "app/wiring/canonical_rs_runtime.py",
 )
 

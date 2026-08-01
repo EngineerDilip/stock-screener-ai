@@ -87,6 +87,16 @@ class BackfillReport:
 
 
 @dataclass(frozen=True)
+class MarketRsBootstrapThroughDateResolution:
+    market: str
+    requested_through_date: date
+    selected_through_date: date
+    benchmark_through_date: date | None
+    benchmark_lag_days: int | None
+    reason_code: str
+
+
+@dataclass(frozen=True)
 class ActivationValidationReport:
     market: str
     formula_version: str
@@ -129,6 +139,7 @@ __all__ = [
     "ActivationValidationReport",
     "BackfillDateResult",
     "BackfillReport",
+    "MarketRsBootstrapThroughDateResolution",
     "MarketRsActivationRejected",
     "normalize_rollout_market",
 ]

@@ -399,8 +399,8 @@ def _create_auto_scan_for_published_run(
     from app.infra.db.models.feature_store import FeatureRunUniverseSymbol
     from app.infra.db.uow import SqlUnitOfWork
     from app.models.scan_result import SCAN_TRIGGER_SOURCE_AUTO
-    from app.services.ui_snapshot_service import safe_publish_scan_bootstrap
     from app.services.scan_execution import cleanup_old_scans
+    from app.services.ui_snapshot_service import safe_publish_scan_bootstrap
     from app.services.universe_resolver import normalize_universe_definition
 
     auto_idempotency_key = f"auto-feature-run:{feature_run_id}"
@@ -520,22 +520,25 @@ def build_daily_snapshot(
         date. Pass False to force a rebuild.
     """
     from app.database import SessionLocal
+    from app.domain.providers.price_symbol_support import split_supported_price_symbols
     from app.domain.scanning.ports import NeverCancelledToken, NullProgressSink
     from app.infra.db.uow import SqlUnitOfWork
     from app.infra.tasks.progress_sink import CeleryProgressSink
-    from app.services.runtime_preferences_service import is_market_enabled_now
-    from app.services.market_calendar_service import MarketCalendarService
-    from app.services.universe_resolver import normalize_universe_definition
     from app.services.bootstrap_cache_coverage import (
         evaluate_bootstrap_cache_coverage,
     )
+    from app.services.bootstrap_publication_date import (
+        resolve_bootstrap_publication_date_with_session,
+    )
+    from app.services.market_calendar_service import MarketCalendarService
+    from app.services.runtime_preferences_service import is_market_enabled_now
+    from app.services.universe_resolver import normalize_universe_definition
     from app.tasks.market_queues import log_extra, normalize_market
-    from app.utils.parallelism import bounded_symbol_workers
-    from app.domain.providers.price_symbol_support import split_supported_price_symbols
     from app.use_cases.feature_store.build_daily_snapshot import (
         BootstrapCacheCoverageInsufficient,
         BuildDailySnapshotCommand,
     )
+    from app.utils.parallelism import bounded_symbol_workers
     from app.wiring.bootstrap import get_build_daily_snapshot_use_case
 
     def _publish_activity(activity_fn, **kwargs) -> None:
@@ -558,11 +561,28 @@ def build_daily_snapshot(
     effective_market = normalize_market(market or "US")
     if effective_market == "SHARED":
         effective_market = "US"
+    activity_lifecycle = activity_lifecycle or "daily_refresh"
     as_of = (
         date.fromisoformat(as_of_date_str)
         if as_of_date_str
         else MarketCalendarService().last_completed_trading_day(effective_market)
     )
+    if as_of_date_str is None and activity_lifecycle == "bootstrap":
+        resolution = resolve_bootstrap_publication_date_with_session(
+            SessionLocal,
+            market=effective_market,
+            requested_date=as_of,
+        )
+        if resolution.selected_date != as_of:
+            logger.info(
+                "Using active Market RS bootstrap publication date for feature "
+                "snapshot (market=%s requested=%s selected=%s reason=%s)",
+                effective_market,
+                as_of,
+                resolution.selected_date,
+                resolution.reason_code,
+            )
+        as_of = resolution.selected_date
     bootstrap_gate_requested = bool(bootstrap_cache_only_if_covered)
     from app.domain.scanning.defaults import (
         get_bootstrap_scan_profile,
@@ -584,7 +604,6 @@ def build_daily_snapshot(
     )
     publish_pointer_key = publish_pointer_key or f"latest_published_market:{effective_market}"
     correlation_id = self.request.id
-    activity_lifecycle = activity_lifecycle or "daily_refresh"
     static_worker_config_requested = static_daily_mode or bootstrap_gate_requested
     effective_bootstrap_coverage_report = bootstrap_coverage_report
 

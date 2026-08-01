@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from threading import RLock
-from typing import Callable
 
 from app.domain.scanning.ports import MarketRsReader
 from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
+from app.services.bounded_history_universe import CurrentActiveFallbackUniverseResolver
 from app.services.canonical_group_ranking_service import CanonicalGroupRankingService
 from app.services.group_rank_snapshot_coordinator import GroupRankSnapshotCoordinator
 from app.services.group_rank_snapshot_reader import GroupRankSnapshotReader
@@ -86,11 +87,22 @@ class CanonicalRsRuntime:
         if self._rollout_service is None:
             with self._lock:
                 if self._rollout_service is None:
+                    rollout_input_loader = MarketRsInputLoader(
+                        point_in_time_universe=CurrentActiveFallbackUniverseResolver(
+                            point_in_time_universe=self.point_in_time_universe_service(),
+                            track_policies=False,
+                        ),
+                        market_calendar=self._market_calendar,
+                    )
+                    repository = self.repository()
                     self._rollout_service = MarketRsRolloutService(
                         calendar_service=self._market_calendar,
-                        input_loader=self.input_loader(),
-                        market_rs_snapshot_service=self.snapshot_service(),
-                        market_rs_repository=self.repository(),
+                        input_loader=rollout_input_loader,
+                        market_rs_snapshot_service=MarketRsSnapshotService(
+                            input_loader=rollout_input_loader,
+                            repository=repository,
+                        ),
+                        market_rs_repository=repository,
                         canonical_group_service=self.canonical_group_service(),
                     )
         return self._rollout_service

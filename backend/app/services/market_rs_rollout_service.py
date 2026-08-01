@@ -18,12 +18,16 @@ from app.services.market_rs_activation_validator import (
 )
 from app.services.market_rs_activator import MarketRsActivator
 from app.services.market_rs_backfill_service import MarketRsBackfillService
+from app.services.market_rs_bootstrap_date_resolver import (
+    MarketRsBootstrapThroughDateResolver,
+)
 from app.services.market_rs_inputs import MarketRsInputLoader
 from app.services.market_rs_rollout_contracts import (
     ActivationValidationReport,
     BackfillDateResult,
     BackfillReport,
     MarketRsActivationRejected,
+    MarketRsBootstrapThroughDateResolution,
 )
 from app.services.market_rs_snapshot_service import MarketRsSnapshotService
 
@@ -61,6 +65,9 @@ class MarketRsRolloutService:
             repository=market_rs_repository,
             feature_run_repository_factory=feature_factory,
             validator=self.validator,
+        )
+        self.bootstrap_date_resolver = MarketRsBootstrapThroughDateResolver(
+            calendar_service=calendar_service,
         )
 
     def earliest_backfillable_date(
@@ -128,6 +135,19 @@ class MarketRsRolloutService:
             through_date=through_date,
         )
 
+    def resolve_bootstrap_through_date(
+        self,
+        db: Session,
+        *,
+        market: str,
+        requested_through_date: date,
+    ) -> MarketRsBootstrapThroughDateResolution:
+        return self.bootstrap_date_resolver.resolve(
+            db,
+            market=market,
+            requested_through_date=requested_through_date,
+        )
+
     def validate_activation(
         self,
         db: Session,
@@ -185,5 +205,6 @@ __all__ = [
     "BackfillDateResult",
     "BackfillReport",
     "MarketRsActivationRejected",
+    "MarketRsBootstrapThroughDateResolution",
     "MarketRsRolloutService",
 ]

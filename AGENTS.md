@@ -1,117 +1,127 @@
-# Agent Instructions
+## Project Overview
 
-This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
+Stock screening platform implementing CANSLIM (William O'Neil) and Minervini methodologies, with theme discovery, AI chatbot, and market analysis. Full-stack application with FastAPI backend, React frontend, PostgreSQL, Redis caching, and Celery for background tasks.
 
-## Quick Reference
+## Development Commands
 
+### Backend
 ```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --status in_progress  # Claim work
-bd close <id>         # Complete work
-bd sync               # Sync with git
+cd backend
+source venv/bin/activate
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-## Landing the Plane (Session Completion)
-
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
-
-**MANDATORY WORKFLOW:**
-
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
-   ```bash
-   git pull --rebase
-   bd sync
-   git push
-   git status  # MUST show "up to date with origin"
-   ```
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
-
-**CRITICAL RULES:**
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
-- NEVER say "ready to push when you are" - YOU must push
-- If push fails, resolve and retry until it succeeds
-
-
-<!-- bv-agent-instructions-v1 -->
-
----
-
-## Beads Workflow Integration
-
-This project uses [beads_viewer](https://github.com/Dicklesworthstone/beads_viewer) for issue tracking. Issues are stored in `.beads/` and tracked in git.
-
-### Essential Commands
-
+### Frontend
 ```bash
-# View issues (launches TUI - avoid in automated sessions)
-bv
-
-# CLI commands for agents (use these instead)
-bd ready              # Show issues ready to work (no blockers)
-bd list --status=open # All open issues
-bd show <id>          # Full issue details with dependencies
-bd create --title="..." --type=task --priority=2
-bd update <id> --status=in_progress
-bd close <id> --reason="Completed"
-bd close <id1> <id2>  # Close multiple issues at once
-bd sync               # Commit and push changes
+cd frontend
+npm run dev      # Vite dev server on :5173
+npm run build    # Production build
+npm run lint     # ESLint
 ```
 
-### Workflow Pattern
-
-1. **Start**: Run `bd ready` to find actionable work
-2. **Claim**: Use `bd update <id> --status=in_progress`
-3. **Work**: Implement the task
-4. **Complete**: Use `bd close <id>`
-5. **Sync**: Always run `bd sync` at session end
-
-### Key Concepts
-
-- **Dependencies**: Issues can block other issues. `bd ready` shows only unblocked work.
-- **Priority**: P0=critical, P1=high, P2=medium, P3=low, P4=backlog (use numbers, not words)
-- **Types**: task, bug, feature, epic, question, docs
-- **Blocking**: `bd dep add <issue> <depends-on>` to add dependencies
-
-### Session Protocol
-
-**Before ending any session, run this checklist:**
-
+### Celery Workers (required for scans)
 ```bash
-git status              # Check what changed
-git add <files>         # Stage code changes
-bd sync                 # Commit beads changes
-git commit -m "..."     # Commit code
-bd sync                 # Commit any new beads changes
-git push                # Push to remote
+cd backend
+./start_celery.sh    # Starts all required queues for enabled markets
+
+# Or manually:
+export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
+export TOKENIZERS_PARALLELISM=false
+export PYTORCH_ENABLE_MPS_FALLBACK=1
+export CELERY_POOL="${CELERY_POOL:-solo}"
+
+SUPPORTED_MARKETS="$(./venv/bin/python - <<'PY'
+from app.tasks.market_queues import SUPPORTED_MARKETS
+print(",".join(SUPPORTED_MARKETS))
+PY
+)"
+export ENABLED_MARKETS="${ENABLED_MARKETS:-$SUPPORTED_MARKETS}"
+
+DATA_FETCH_QUEUES="$(./venv/bin/python - <<'PY'
+from app.tasks.market_queues import all_data_fetch_queues
+print(",".join(all_data_fetch_queues()))
+PY
+)"
+
+./venv/bin/celery -A app.celery_app worker --pool="$CELERY_POOL" -Q celery -n general@%h &
+./venv/bin/celery -A app.celery_app worker --pool="$CELERY_POOL" --concurrency=1 -Q "$DATA_FETCH_QUEUES" -n datafetch-global@%h &
+./venv/bin/celery -A app.celery_app worker --pool="$CELERY_POOL" -Q user_scans_shared -n userscans-shared@%h &
+
+IFS=',' read -ra MARKET_ARRAY <<< "$ENABLED_MARKETS"
+for RAW_MARKET in "${MARKET_ARRAY[@]}"; do
+  MARKET_LOWER="$(echo "$RAW_MARKET" | tr '[:upper:]' '[:lower:]' | xargs)"
+  ./venv/bin/celery -A app.celery_app worker --pool="$CELERY_POOL" -Q "market_jobs_${MARKET_LOWER}" -n "marketjobs-${MARKET_LOWER}@%h" &
+  ./venv/bin/celery -A app.celery_app worker --pool="$CELERY_POOL" -Q "user_scans_${MARKET_LOWER}" -n "userscans-${MARKET_LOWER}@%h" &
+done
+
+./venv/bin/celery -A app.celery_app beat --loglevel=info  # Scheduler
 ```
 
-### Quality Gates
+### Docker Deployment
 
-Before closing issues or ending sessions, run the relevant quality gates:
+Layered Docker Compose architecture with three scenarios:
 
 ```bash
-# Backend tests
-cd backend && source venv/bin/activate && pytest
+# Local development
+cp .env.docker.example .env   # Add API keys for chatbot
+docker-compose up
 
-# Frontend tests (requires Node 18+ via NVM)
-export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-cd frontend && npm run test:run   # All tests once
-cd frontend && npm run lint       # ESLint
+# Homelab (behind reverse proxy like Traefik/nginx proxy manager)
+cp .env.docker.example .env.docker
+# Edit: CORS_ORIGINS=https://stocks.home.lan
+docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+# VPS with auto-HTTPS (Hostinger, DigitalOcean, etc.)
+cp .env.docker.example .env.docker
+# Edit: DOMAIN=stocks.yourdomain.com, CORS_ORIGINS=https://stocks.yourdomain.com
+docker-compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.https.yml up -d
 ```
 
-### Best Practices
+**Docker files:**
+- `docker-compose.yml` - Base config (local dev)
+- `docker-compose.prod.yml` - Production overlay (resource limits, health checks, logging)
+- `docker-compose.https.yml` - HTTPS overlay (Caddy with Let's Encrypt)
+- `.env.docker.example` - Docker environment template
+- `Caddyfile` - Caddy TLS configuration
 
-- Check `bd ready` at session start to find available work
-- Update status as you work (in_progress → closed)
-- Create new issues with `bd create` when you discover tasks
-- Use descriptive titles and set appropriate priority/type
-- Always `bd sync` before ending session
+**Note:** Backend runs as non-root user (uid 1000). After upgrade: `sudo chown -R 1000:1000 ./data`
 
-<!-- end-bv-agent-instructions -->
+### Running Tests
+
+#### Backend (pytest)
+```bash
+cd backend
+source venv/bin/activate
+
+# Run all tests
+pytest
+
+# Run unit tests only
+pytest tests/unit/
+
+# Run integration tests (requires running server at localhost:8000)
+pytest tests/integration/ -m integration
+
+# Run with verbose output
+pytest -v
+
+# Run specific test file
+pytest tests/unit/test_canslim_scanner.py
+```
+
+#### Frontend (Vitest + React Testing Library)
+```bash
+cd frontend
+
+# Run all tests once (CI mode)
+npm run test:run
+
+# Run tests in watch mode (development)
+npm run test
+
+# Run a specific test file
+npx vitest run src/components/Scan/ResultsTable.test.jsx
+
+# Lint test files
+npm run lint
+```

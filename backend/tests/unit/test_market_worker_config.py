@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -88,19 +89,26 @@ def _fake_docker_bin(tmp_path: Path) -> Path:
     bin_dir.mkdir(exist_ok=True)
     docker = bin_dir / "docker"
     docker.write_text(
-        "\n".join(
-            [
-                "#!/usr/bin/env bash",
-                "printf 'DOCKER_ARGS'",
-                "for arg in \"$@\"; do printf '|%s' \"$arg\"; done",
-                "printf '\\n'",
-                "printf 'DOCKER_ENABLED_MARKETS=%s\\n' \"$ENABLED_MARKETS\"",
-                "printf 'DOCKER_COMPOSE_PROFILES=%s\\n' \"$COMPOSE_PROFILES\"",
-            ]
-        ),
+        "#!/usr/bin/env bash\n"
+        "printf 'DOCKER_ARGS'\n"
+        "for arg in \"$@\"; do printf '|%s' \"$arg\"; done\n"
+        "printf '\\n'\n"
+        "printf 'DOCKER_ENABLED_MARKETS=%s\\n' \"$ENABLED_MARKETS\"\n"
+        "printf 'DOCKER_COMPOSE_PROFILES=%s\\n' \"$COMPOSE_PROFILES\"\n",
         encoding="utf-8",
     )
     docker.chmod(0o755)
+    if not (bin_dir / "python3.11").exists():
+        _write_fake_python(
+            bin_dir,
+            "python3.11",
+            "\n".join(
+                [
+                    "#!/usr/bin/env bash",
+                    f"exec {shlex.quote(sys.executable)} \"$@\"",
+                ]
+            ),
+        )
     return bin_dir
 
 
@@ -111,11 +119,23 @@ def _write_fake_python(bin_dir: Path, name: str, body: str) -> Path:
     return python
 
 
+def _path_with_shell_bins(path: str | None) -> str:
+    parts = [part for part in (path or os.defpath).split(os.pathsep) if part]
+    for required in ("/usr/bin", "/bin"):
+        if required not in parts:
+            parts.append(required)
+    return os.pathsep.join(parts)
+
+
 def _wrapper_env(tmp_path: Path) -> dict[str, str]:
     env = os.environ.copy()
-    env["PATH"] = f"{_fake_docker_bin(tmp_path)}{os.pathsep}{env['PATH']}"
+    env["PATH"] = (
+        f"{_fake_docker_bin(tmp_path)}{os.pathsep}"
+        f"{_path_with_shell_bins(env.get('PATH'))}"
+    )
     env.pop("ENABLED_MARKETS", None)
     env.pop("COMPOSE_PROFILES", None)
+    env.pop("STOCKSCREEN_PYTHON", None)
     return env
 
 
@@ -163,11 +183,12 @@ def test_enabled_market_compose_wrapper_down_enables_all_market_profiles(tmp_pat
         ],
         cwd=ROOT,
         env={**_wrapper_env(tmp_path), "ENABLED_MARKETS": "US"},
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
 
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert f"COMPOSE_PROFILES={expected_market_profiles}" in result.stdout
     assert f"DOCKER_ARGS|compose|--env-file|{env_file}|down|--remove-orphans" in result.stdout
 
@@ -178,14 +199,10 @@ def test_enabled_market_compose_wrapper_prefers_python311_over_old_python3(tmp_p
     _write_fake_python(
         bin_dir,
         "python3",
-        "\n".join(
-            [
-                "#!/usr/bin/env bash",
-                "if [[ \"$1\" == \"-\" ]]; then exit 1; fi",
-                "printf 'old python3 should not run backend helpers\\n' >&2",
-                "exit 42",
-            ]
-        ),
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$1\" == \"-\" ]]; then exit 1; fi\n"
+        "printf 'old python3 should not run backend helpers\\n' >&2\n"
+        "exit 42\n",
     )
     _write_fake_python(
         bin_dir,
@@ -194,7 +211,7 @@ def test_enabled_market_compose_wrapper_prefers_python311_over_old_python3(tmp_p
             [
                 "#!/usr/bin/env bash",
                 f"printf '%s\\n' \"$*\" >> {marker}",
-                f"exec {sys.executable} \"$@\"",
+                f"exec {shlex.quote(sys.executable)} \"$@\"",
             ]
         ),
     )
@@ -206,11 +223,12 @@ def test_enabled_market_compose_wrapper_prefers_python311_over_old_python3(tmp_p
         ],
         cwd=ROOT,
         env={**_wrapper_env(tmp_path), "ENABLED_MARKETS": "US,HK"},
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
 
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "ENABLED_MARKETS=US,HK" in result.stdout
     assert "COMPOSE_PROFILES=market-us,market-hk" in result.stdout
     assert "DOCKER_ARGS|compose|" in result.stdout

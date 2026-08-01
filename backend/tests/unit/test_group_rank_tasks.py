@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -12,11 +13,13 @@ from app.services.daily_group_rank_runner import (
 )
 from app.services.group_rank_models import (
     GroupRankCalculationResult,
-    GroupRankPrefetchStats,
     GroupRanking,
+    GroupRankPrefetchStats,
 )
-from app.services.ibd_group_rank_service import IncompleteGroupRankingCacheError
-from app.services.ibd_group_rank_service import MissingIBDIndustryMappingsError
+from app.services.ibd_group_rank_service import (
+    IncompleteGroupRankingCacheError,
+    MissingIBDIndustryMappingsError,
+)
 
 
 def _prefetch_stats(
@@ -153,6 +156,49 @@ def test_daily_group_rankings_refuse_to_publish_when_cache_only_inputs_missing(m
     assert result["cache_only"] is True
     assert result["prefetch_stats"]["cache_miss_symbols"] == 1
     assert "missing cached price data" in result["error"].lower()
+
+
+def test_bootstrap_group_rankings_use_balanced_publication_date(monkeypatch):
+    import app.tasks.group_rank_tasks as module
+
+    fake_db = MagicMock()
+    monkeypatch.setattr(module, "SessionLocal", lambda: fake_db)
+    _patch_serialized_lock(monkeypatch)
+    _patch_calendar_service(monkeypatch, datetime(2026, 4, 10, 17, 40, 0))
+    monkeypatch.setattr(
+        "app.services.runtime_preferences_service.is_market_enabled_now",
+        lambda _market: True,
+    )
+    fake_service = MagicMock()
+    monkeypatch.setattr(module, "get_group_rank_service", lambda: fake_service)
+    monkeypatch.setattr(
+        module,
+        "resolve_bootstrap_publication_date_with_session",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            selected_date=date(2026, 4, 9),
+            reason_code="balanced_run_selected",
+        ),
+    )
+
+    captured = []
+
+    def fake_runner(db, request, dependencies):
+        captured.append(request)
+        return _runner_outcome(request.calculation_date)
+
+    monkeypatch.setattr(module, "run_daily_group_rankings", fake_runner)
+
+    result = module.calculate_daily_group_rankings.run(
+        market="HK",
+        activity_lifecycle="bootstrap",
+        execution_policy="refresh_guarded",
+        strict=True,
+    )
+
+    assert result["date"] == "2026-04-09"
+    assert captured[0].calculation_date == date(2026, 4, 9)
+    assert captured[0].market == "HK"
+    assert captured[0].activity_lifecycle == "bootstrap"
 
 
 def test_group_gapfill_uses_requested_calculation_date_for_daily_calc(monkeypatch):
@@ -313,8 +359,8 @@ def test_daily_group_rankings_reraises_soft_time_limit(monkeypatch):
 
 
 def test_daily_group_rankings_publishes_market_activity(monkeypatch):
-    import app.tasks.group_rank_tasks as module
     import app.services.ui_snapshot_service as snapshot_module
+    import app.tasks.group_rank_tasks as module
 
     fake_db = MagicMock()
     monkeypatch.setattr(module, "SessionLocal", lambda: fake_db)
@@ -356,8 +402,8 @@ def test_daily_group_rankings_run_for_non_us_market(monkeypatch):
     no longer return group_rankings_are_us_only. The market kwarg flows into
     IBDGroupRankService.calculate_group_rankings.
     """
-    import app.tasks.group_rank_tasks as module
     import app.services.ui_snapshot_service as snapshot_module
+    import app.tasks.group_rank_tasks as module
 
     fake_db = MagicMock()
     monkeypatch.setattr(module, "SessionLocal", lambda: fake_db)
@@ -450,8 +496,8 @@ def test_daily_group_rankings_fail_explicitly_when_ibd_mappings_missing(monkeypa
 
 
 def test_historical_group_rankings_do_not_repair_current_us_metadata(monkeypatch):
-    import app.tasks.group_rank_tasks as module
     import app.services.ui_snapshot_service as snapshot_module
+    import app.tasks.group_rank_tasks as module
 
     fake_db = MagicMock()
     monkeypatch.setattr(module, "SessionLocal", lambda: fake_db)
@@ -484,8 +530,8 @@ def test_non_us_market_never_invokes_us_metadata_repair(monkeypatch):
     even on same-day or bootstrap runs where the generic gate would otherwise
     trigger it.
     """
-    import app.tasks.group_rank_tasks as module
     import app.services.ui_snapshot_service as snapshot_module
+    import app.tasks.group_rank_tasks as module
 
     fake_db = MagicMock()
     monkeypatch.setattr(module, "SessionLocal", lambda: fake_db)
@@ -532,8 +578,8 @@ def test_non_us_market_never_invokes_us_metadata_repair(monkeypatch):
 
 
 def test_daily_group_rankings_fail_when_current_metadata_repair_fails(monkeypatch):
-    import app.tasks.group_rank_tasks as module
     import app.services.ui_snapshot_service as snapshot_module
+    import app.tasks.group_rank_tasks as module
 
     fake_db = MagicMock()
     monkeypatch.setattr(module, "SessionLocal", lambda: fake_db)
@@ -676,8 +722,9 @@ def test_orchestrator_releases_gapfill_memory_before_today(monkeypatch):
 
 def test_orchestrator_gapfills_but_skips_today_on_non_trading_day(monkeypatch):
     """On a non-trading day, orchestrator still gap-fills but skips the daily call."""
-    import app.tasks.group_rank_tasks as module
     from datetime import date as date_cls
+
+    import app.tasks.group_rank_tasks as module
 
     fake_db = MagicMock()
     monkeypatch.setattr(module, "SessionLocal", lambda: fake_db)

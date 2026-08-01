@@ -431,7 +431,7 @@ class PriceRefreshWorkflow:
             db=db,
             jobs=refresh_plan.live_refresh_jobs,
             total=total,
-            batch_size=None,
+            batch_size=max(1, int(settings.price_refresh_live_batch_size)),
             market=market,
             effective_market=effective_market,
             activity_lifecycle=activity_lifecycle,

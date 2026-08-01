@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -18,6 +18,9 @@ from app.services.market_activity_service import (
     mark_market_activity_started,
 )
 from app.services.market_rs_inputs import MarketRsInputUnavailable
+from app.services.market_rs_rollout_contracts import (
+    MarketRsBootstrapThroughDateResolution,
+)
 from app.services.market_rs_rollout_executor import MarketRsActivationRequest
 from app.tasks.market_queues import normalize_market
 from app.tasks.transient_database import (
@@ -27,6 +30,7 @@ from app.tasks.transient_database import (
 from app.wiring.bootstrap import (
     get_market_calendar_service,
     get_market_rs_activation_executor,
+    get_market_rs_rollout_service,
     get_market_rs_snapshot_service,
 )
 
@@ -35,6 +39,43 @@ _TRANSIENT_CONNECTION_ERRORS = (ConnectionError, TimeoutError)
 BOOTSTRAP_BALANCED_MARKET_RS_TASK_NAME = (
     "app.tasks.market_rs_tasks.bootstrap_balanced_market_rs"
 )
+BOOTSTRAP_ACTIVATION_READY_REASON_CODES = frozenset(
+    {"requested_date_ready", "benchmark_ready_lag"}
+)
+
+
+class MarketRsBootstrapThroughDateUnavailable(RuntimeError):
+    def __init__(
+        self,
+        resolution: MarketRsBootstrapThroughDateResolution,
+    ) -> None:
+        self.resolution = resolution
+        self.diagnostics = {
+            "market": resolution.market,
+            "requested_through_date": resolution.requested_through_date.isoformat(),
+            "selected_through_date": resolution.selected_through_date.isoformat(),
+            "benchmark_through_date": (
+                resolution.benchmark_through_date.isoformat()
+                if resolution.benchmark_through_date is not None
+                else None
+            ),
+            "benchmark_lag_days": resolution.benchmark_lag_days,
+            "reason_code": resolution.reason_code,
+        }
+        super().__init__(
+            "Bootstrap Market RS through-date is not benchmark-ready: "
+            f"reason_code={resolution.reason_code}, "
+            f"requested_through_date={resolution.requested_through_date.isoformat()}, "
+            f"benchmark_through_date={self.diagnostics['benchmark_through_date']}"
+        )
+
+
+def _ensure_bootstrap_activation_ready(
+    resolution: MarketRsBootstrapThroughDateResolution,
+) -> None:
+    if resolution.reason_code in BOOTSTRAP_ACTIVATION_READY_REASON_CODES:
+        return
+    raise MarketRsBootstrapThroughDateUnavailable(resolution)
 
 
 def _failed_result(
@@ -74,11 +115,22 @@ def bootstrap_balanced_market_rs(
 ) -> dict[str, object]:
     market_code = normalize_market(market)
     lifecycle = activity_lifecycle or "bootstrap"
-    through_date = get_market_calendar_service().last_completed_trading_day(market_code)
+    requested_through_date = get_market_calendar_service().last_completed_trading_day(
+        market_code
+    )
     db = SessionLocal()
     task_name = getattr(self, "name", BOOTSTRAP_BALANCED_MARKET_RS_TASK_NAME)
     task_id = getattr(getattr(self, "request", None), "id", None)
     try:
+        through_date_resolution = (
+            get_market_rs_rollout_service().resolve_bootstrap_through_date(
+                db,
+                market=market_code,
+                requested_through_date=requested_through_date,
+            )
+        )
+        _ensure_bootstrap_activation_ready(through_date_resolution)
+        through_date = through_date_resolution.selected_through_date
         mark_market_activity_started(
             db,
             market=market_code,
@@ -166,7 +218,7 @@ def calculate_market_rs_snapshot(
         as_of_date = (
             calendar.last_completed_trading_day(market_code)
             if calculation_date is None
-            else datetime.strptime(calculation_date, "%Y-%m-%d").date()
+            else date.fromisoformat(calculation_date)
         )
     except (TypeError, ValueError) as exc:
         return _failed_result(

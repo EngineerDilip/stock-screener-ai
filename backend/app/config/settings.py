@@ -5,9 +5,9 @@ Loads environment variables and provides application settings.
 import logging
 import os
 from pathlib import Path
+
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
-from typing import List
 
 
 def _get_project_root(source_path: str | Path | None = None) -> Path:
@@ -487,6 +487,7 @@ class Settings(BaseSettings):
     group_rank_gapfill_max_days: int = 365  # Maximum days to look back for gaps
     group_rank_gapfill_chunk_size: int = 30  # Days per chunk for memory safety
     group_rank_backfill_max_days: int = 365  # API limit for backfill endpoint
+    market_rs_bootstrap_benchmark_max_lag_days: int = 3  # Allow fresh bootstrap to use a nearby benchmark date
 
     # Breadth Gap-Fill Configuration
     breadth_gapfill_enabled: bool = True  # Enable automatic gap-fill during scheduled task
@@ -505,6 +506,7 @@ class Settings(BaseSettings):
     # Price Cache Batch Fetching Configuration
     price_cache_yfinance_batch_size: int = 50  # Symbols per yfinance batch in get_many()
     price_cache_yfinance_rate_limit: float = 5.0  # Seconds to wait between batches
+    price_refresh_live_batch_size: int = 250  # Symbols persisted per live refresh batch
 
     # Snapshot fundamentals / universe lifecycle cutover
     provider_snapshot_ingestion_enabled: bool = False
@@ -635,14 +637,14 @@ class Settings(BaseSettings):
     @field_validator('celery_timezone')
     @classmethod
     def validate_celery_timezone(cls, v: str) -> str:
-        from zoneinfo import ZoneInfo
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
         try:
             ZoneInfo(v)
-        except (KeyError, Exception):
+        except (ValueError, ZoneInfoNotFoundError) as exc:
             raise ValueError(
                 f"Invalid celery_timezone: {v!r}. "
                 f"Use IANA timezone like 'America/New_York'"
-            )
+            ) from exc
         return v
 
     @field_validator('universe_source_timeout_seconds')
@@ -754,11 +756,12 @@ class Settings(BaseSettings):
         "github_weekly_reference_max_age_days",
         "github_daily_price_max_age_days",
         "github_daily_price_redis_warm_symbols",
+        "market_rs_bootstrap_benchmark_max_lag_days",
     )
     @classmethod
-    def validate_non_negative_github_sync_settings(cls, v: int) -> int:
+    def validate_non_negative_numeric_settings(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(f"GitHub sync numeric settings must be >= 0, got {v}")
+            raise ValueError(f"numeric settings must be >= 0, got {v}")
         return v
 
     @field_validator('india_bse_price_verification_period')
@@ -805,7 +808,7 @@ class Settings(BaseSettings):
         return self
 
     @property
-    def groq_api_keys_list(self) -> List[str]:
+    def groq_api_keys_list(self) -> list[str]:
         """Parse comma-separated Groq API keys to list."""
         # First try the multi-key field
         if self.groq_api_keys:
@@ -816,7 +819,7 @@ class Settings(BaseSettings):
         return []
 
     @property
-    def enabled_markets_list(self) -> List[str]:
+    def enabled_markets_list(self) -> list[str]:
         """Project the canonical comma-separated enabled markets to a list."""
         return [market for market in self.enabled_markets.split(",") if market]
 
@@ -842,7 +845,7 @@ class Settings(BaseSettings):
         return mapping[m]
 
     @property
-    def zai_api_keys_list(self) -> List[str]:
+    def zai_api_keys_list(self) -> list[str]:
         """Parse comma-separated Z.AI API keys to list."""
         if self.zai_api_keys:
             return [k.strip() for k in self.zai_api_keys.split(",") if k.strip()]
@@ -851,7 +854,7 @@ class Settings(BaseSettings):
         return []
 
     @property
-    def cors_origins_list(self) -> List[str]:
+    def cors_origins_list(self) -> list[str]:
         """Convert CORS origins string to list."""
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 

@@ -1,9 +1,9 @@
 import importlib
 
-import app.services.ibd_industry_service as ibd_industry_service
 from app.config.settings import Settings
 from app.models.industry import IBDIndustryGroup
 from app.scripts import export_static_site
+from app.services import ibd_industry_service
 from app.tasks import industry_tasks
 
 settings_module = importlib.import_module("app.config.settings")
@@ -74,6 +74,17 @@ def test_market_rs_current_price_coverage_settings_must_be_ratios() -> None:
             )
         else:
             raise AssertionError(f"Expected invalid settings to fail: {kwargs}")
+
+
+def test_market_rs_bootstrap_benchmark_lag_must_be_non_negative() -> None:
+    try:
+        Settings(market_rs_bootstrap_benchmark_max_lag_days=-1)
+    except ValueError as exc:
+        assert "numeric settings must be >= 0" in str(exc)
+    else:
+        raise AssertionError(
+            "Expected invalid market_rs_bootstrap_benchmark_max_lag_days to fail"
+        )
 
 
 def test_x_ingest_provider_is_normalized_and_validated() -> None:
