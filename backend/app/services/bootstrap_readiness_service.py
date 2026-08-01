@@ -76,6 +76,25 @@ class BootstrapReadinessService:
             query.limit(1).first() is not None for query in persisted_queries
         )
 
+    def is_seed_only_installation(self, db: Session) -> bool:
+        """Return true when only raw bootstrap seed/input rows exist.
+
+        Startup reconciliation can import durable universe/price/fundamental
+        inputs before the first user-triggered runtime bootstrap records its
+        dispatch manifest. Those rows should not downgrade that first dispatch
+        into the migration path. Derived runtime outputs still mean the DB has
+        already crossed the bootstrap boundary.
+        """
+        derived_queries = (
+            db.query(Scan.id),
+            db.query(FeatureRun.id),
+            db.query(IBDGroupRank.id),
+            db.query(MarketRsRun.id),
+        )
+        return not any(
+            query.limit(1).first() is not None for query in derived_queries
+        )
+
     def has_core_market_data(self, db: Session, market: str) -> bool:
         return (
             self._has_active_universe_rows(db, market)

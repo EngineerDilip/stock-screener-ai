@@ -298,6 +298,62 @@ def test_pristine_installation_rejects_any_durable_data(
     assert BootstrapReadinessService().is_pristine_installation(readiness_db) is False
 
 
+def test_seed_only_installation_allows_raw_bootstrap_inputs(readiness_db) -> None:
+    seed_core_market_data(readiness_db)
+
+    service = BootstrapReadinessService()
+    assert service.is_pristine_installation(readiness_db) is False
+    assert service.is_seed_only_installation(readiness_db) is True
+
+
+@pytest.mark.parametrize(
+    "persisted_row",
+    [
+        Scan(scan_id="seed-only-scan", criteria={}, status="completed"),
+        FeatureRun(
+            as_of_date=date(2026, 5, 1),
+            run_type="daily_snapshot",
+            status="completed",
+        ),
+        IBDGroupRank(
+            market="US",
+            industry_group="Software",
+            date=date(2026, 5, 1),
+            rank=1,
+            avg_rs_rating=90,
+            rs_formula_version=LEGACY_RS_FORMULA_VERSION,
+        ),
+        MarketRsRun(
+            market="US",
+            as_of_date=date(2026, 5, 1),
+            formula_version=LEGACY_RS_FORMULA_VERSION,
+            status="completed",
+            benchmark_symbol="SPY",
+            benchmark_as_of_date=date(2026, 5, 1),
+            universe_hash="hash",
+            expected_symbol_count=0,
+            eligible_symbol_count=0,
+            excluded_symbol_count=0,
+            diagnostics_json={},
+        ),
+    ],
+    ids=[
+        "scan",
+        "feature-run",
+        "group-rank",
+        "market-rs-run",
+    ],
+)
+def test_seed_only_installation_rejects_derived_runtime_outputs(
+    readiness_db,
+    persisted_row,
+) -> None:
+    readiness_db.add(persisted_row)
+    readiness_db.commit()
+
+    assert BootstrapReadinessService().is_seed_only_installation(readiness_db) is False
+
+
 def test_market_readiness_rejects_formula_pointer_mismatch(readiness_db) -> None:
     seed_core_market_data(readiness_db)
     seed_scan(readiness_db)

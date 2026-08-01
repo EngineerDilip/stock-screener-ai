@@ -255,10 +255,13 @@ def _balanced_activation_state_at_dispatch(
                 fresh_install=manifest.fresh_install,
                 pending_markets=pending,
             )
-        pristine = BootstrapReadinessService().is_pristine_installation(db)
+        readiness = BootstrapReadinessService()
+        pristine = readiness.is_pristine_installation(db)
+        seed_only = False if pristine else readiness.is_seed_only_installation(db)
+        fresh_install = pristine or seed_only
         return BalancedActivationDispatchState(
-            fresh_install=pristine,
-            pending_markets=enabled if pristine else (),
+            fresh_install=fresh_install,
+            pending_markets=enabled if fresh_install else (),
         )
     finally:
         db.close()
