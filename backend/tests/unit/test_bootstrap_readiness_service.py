@@ -30,7 +30,6 @@ from app.models.stock_universe import StockUniverse
 from app.services.bootstrap_readiness_service import (
     PRE_BOOTSTRAP_SEED_IMPORT_CATEGORY,
     PRE_BOOTSTRAP_SEED_IMPORT_KEY,
-    PRE_BOOTSTRAP_SEED_IMPORT_MAX_AGE,
     PRE_BOOTSTRAP_SEED_IMPORT_SCHEMA_VERSION,
     BootstrapReadinessService,
 )
@@ -404,20 +403,6 @@ def test_pre_bootstrap_seed_import_marker_allows_raw_bootstrap_inputs(
                 {
                     "schema_version": PRE_BOOTSTRAP_SEED_IMPORT_SCHEMA_VERSION,
                     "sources": ["group_history_reconciliation"],
-                    "updated_at": (
-                        datetime.now(timezone.utc)
-                        - PRE_BOOTSTRAP_SEED_IMPORT_MAX_AGE
-                        - timedelta(seconds=1)
-                    ).isoformat(),
-                }
-            ),
-            PRE_BOOTSTRAP_SEED_IMPORT_CATEGORY,
-        ),
-        (
-            json.dumps(
-                {
-                    "schema_version": PRE_BOOTSTRAP_SEED_IMPORT_SCHEMA_VERSION,
-                    "sources": ["group_history_reconciliation"],
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }
             ),
@@ -429,7 +414,6 @@ def test_pre_bootstrap_seed_import_marker_allows_raw_bootstrap_inputs(
         "wrong-schema",
         "empty-sources",
         "invalid-updated-at",
-        "expired",
         "wrong-category",
     ],
 )
@@ -452,6 +436,33 @@ def test_pre_bootstrap_seed_import_rejects_invalid_marker_metadata(
 
     assert service.has_pre_bootstrap_seed_import_marker(readiness_db) is False
     assert service.is_pre_bootstrap_seed_import_installation(readiness_db) is False
+
+
+def test_pre_bootstrap_seed_import_keeps_valid_old_startup_marker(
+    readiness_db,
+) -> None:
+    readiness_db.add(
+        AppSetting(
+            key=PRE_BOOTSTRAP_SEED_IMPORT_KEY,
+            value=json.dumps(
+                {
+                    "schema_version": PRE_BOOTSTRAP_SEED_IMPORT_SCHEMA_VERSION,
+                    "sources": ["group_history_reconciliation"],
+                    "updated_at": datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat(),
+                }
+            ),
+            category=PRE_BOOTSTRAP_SEED_IMPORT_CATEGORY,
+        )
+    )
+    readiness_db.commit()
+    seed_core_market_data(readiness_db)
+
+    assert (
+        BootstrapReadinessService().is_pre_bootstrap_seed_import_installation(
+            readiness_db
+        )
+        is True
+    )
 
 
 @pytest.mark.parametrize(

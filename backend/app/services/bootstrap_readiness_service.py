@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Mapping
 
 from sqlalchemy.orm import Session
@@ -27,7 +27,6 @@ from ..models.stock_universe import StockUniverse
 PRE_BOOTSTRAP_SEED_IMPORT_KEY = "runtime.bootstrap.pre_bootstrap_seed_import"
 PRE_BOOTSTRAP_SEED_IMPORT_CATEGORY = "runtime_activity"
 PRE_BOOTSTRAP_SEED_IMPORT_SCHEMA_VERSION = 1
-PRE_BOOTSTRAP_SEED_IMPORT_MAX_AGE = timedelta(days=1)
 
 
 @dataclass(frozen=True)
@@ -260,15 +259,10 @@ class BootstrapReadinessService:
         if not isinstance(updated_at_raw, str):
             return False
         try:
-            updated_at = datetime.fromisoformat(updated_at_raw)
+            datetime.fromisoformat(updated_at_raw)
         except ValueError:
             return False
-        if updated_at.tzinfo is None:
-            updated_at = updated_at.replace(tzinfo=timezone.utc)
-        return (
-            datetime.now(timezone.utc) - updated_at
-            <= PRE_BOOTSTRAP_SEED_IMPORT_MAX_AGE
-        )
+        return True
 
     def has_core_market_data(self, db: Session, market: str) -> bool:
         return (
