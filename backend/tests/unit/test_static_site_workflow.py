@@ -2,17 +2,16 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import stat
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 from app.scripts.download_static_market_fallbacks import (
     collect_current_markets,
     downloaded_market_is_compatible,
 )
-
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -190,7 +189,7 @@ def test_static_site_fallback_downloader_only_fetches_missing_current_markets(tm
     fake_gh.write_text(
         textwrap.dedent(
             f"""\
-            #!/usr/bin/env python3
+            #!{sys.executable}
             import json
             import pathlib
             import sys
@@ -283,7 +282,7 @@ def test_static_site_fallback_downloader_skips_incompatible_schema_and_keeps_sea
     fake_gh.write_text(
         textwrap.dedent(
             f"""\
-            #!/usr/bin/env python3
+            #!{sys.executable}
             import json
             import pathlib
             import sys
