@@ -9,7 +9,6 @@ from redis.exceptions import BusyLoadingError
 from app.celery_app import _offset_schedule, celery_app
 from app.celery_redis_backend import RetryableRedisBackend
 
-
 # ---------------------------------------------------------------------------
 # _offset_schedule helper
 # ---------------------------------------------------------------------------
@@ -139,7 +138,6 @@ class TestRedisBackendRetryConfig:
             get_calls += 1
             if get_calls == 1:
                 raise BusyLoadingError("Redis is loading the dataset in memory")
-            return None
 
         monkeypatch.setattr(backend, "get", fake_get)
         monkeypatch.setattr(backend, "set", lambda key, value: set_calls.append((key, value)))
@@ -197,6 +195,10 @@ class TestSettingsValidators:
     def test_invalid_minute_negative(self):
         with pytest.raises(ValidationError, match="cache_warm_minute must be 0-59"):
             self._make_settings(cache_warm_minute=-1)
+
+    def test_invalid_celery_timezone_rejects_malformed_key(self):
+        with pytest.raises(ValidationError, match="Invalid celery_timezone"):
+            self._make_settings(celery_timezone="../UTC")
 
     def test_invalid_india_per_market_hour_too_high(self):
         with pytest.raises(ValidationError, match="per-market cache_warm_hour must be 0-23"):

@@ -640,7 +640,7 @@ class Settings(BaseSettings):
         from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
         try:
             ZoneInfo(v)
-        except ZoneInfoNotFoundError as exc:
+        except (ValueError, ZoneInfoNotFoundError) as exc:
             raise ValueError(
                 f"Invalid celery_timezone: {v!r}. "
                 f"Use IANA timezone like 'America/New_York'"

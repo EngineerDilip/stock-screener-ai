@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-import stat
+import shlex
 import subprocess
 import sys
 import textwrap
@@ -14,6 +14,29 @@ from app.scripts.download_static_market_fallbacks import (
 )
 
 ROOT = Path(__file__).resolve().parents[3]
+
+
+def _write_fake_gh(fake_gh: Path, payload: str) -> None:
+    payload_path = fake_gh.with_suffix(".py")
+    payload_path.write_text(textwrap.dedent(payload), encoding="utf-8")
+    fake_gh.write_text(
+        "#!/bin/sh\n"
+        f"exec {shlex.quote(sys.executable)} {shlex.quote(str(payload_path))} \"$@\"\n",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
+
+
+def _fallback_downloader_env(fake_bin: Path) -> dict[str, str]:
+    env = {
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', os.defpath)}",
+        "REPOSITORY": "xang1234/stock-screener",
+        "CURRENT_RUN_ID": "999",
+        "BRANCH_NAME": "main",
+    }
+    if pythonpath := os.environ.get("PYTHONPATH"):
+        env["PYTHONPATH"] = pythonpath
+    return env
 
 
 def _build_market_job() -> str:
@@ -37,6 +60,39 @@ def _fallback_download_step() -> str:
         "\n      - name: Validate market artifacts",
         1,
     )[0]
+
+
+def test_fake_gh_launcher_handles_python_path_with_spaces(tmp_path, monkeypatch) -> None:
+    real_python = sys.executable
+    interpreter = tmp_path / "interpreter dir" / "python"
+    interpreter.parent.mkdir()
+    interpreter.write_text(
+        "#!/bin/sh\n"
+        f"exec {shlex.quote(real_python)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    interpreter.chmod(0o755)
+    fake_gh = tmp_path / "bin" / "gh"
+    fake_gh.parent.mkdir()
+    monkeypatch.setattr(sys, "executable", str(interpreter))
+
+    _write_fake_gh(
+        fake_gh,
+        """\
+        import sys
+
+        print("|".join(sys.argv[1:]))
+        """,
+    )
+
+    result = subprocess.run(
+        [str(fake_gh), "api", "hello world"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.strip() == "api|hello world"
 
 
 def test_static_site_market_build_failures_are_not_marked_continue_on_error() -> None:
@@ -186,59 +242,45 @@ def test_static_site_fallback_downloader_only_fetches_missing_current_markets(tm
     fake_bin.mkdir()
     fake_gh = fake_bin / "gh"
     downloads_log = tmp_path / "downloads.jsonl"
-    fake_gh.write_text(
-        textwrap.dedent(
-            f"""\
-            #!{sys.executable}
-            import json
-            import pathlib
-            import sys
+    _write_fake_gh(
+        fake_gh,
+        f"""\
+        import json
+        import pathlib
+        import sys
 
-            downloads_log = pathlib.Path({str(downloads_log)!r})
-            args = sys.argv[1:]
-            if args[:3] == ["api", "--paginate", "--slurp"] and "actions/workflows/static-site.yml/runs" in args[3]:
-                print(json.dumps([{{"workflow_runs": [
-                    {{"id": 999, "conclusion": "failure"}},
-                    {{"id": 222, "conclusion": "failure"}}
-                ]}}]))
-            elif args[:3] == ["api", "--paginate", "--slurp"] and "actions/runs/222/artifacts" in args[3]:
-                print(json.dumps([{{"artifacts": [
-                    {{"name": "static-market-diagnostics-CN", "expired": False}},
-                    {{"name": "static-market-HK", "expired": False}},
-                    {{"name": "static-market-status-CN", "expired": False}},
-                    {{"name": "static-market-US", "expired": False}},
-                    {{"name": "static-market-TW", "expired": False}}
-                ]}}]))
-            elif args[:2] == ["run", "download"]:
-                artifact_name = args[args.index("--name") + 1]
-                if artifact_name == "static-market-HK":
-                    target_dir = pathlib.Path(args[args.index("--dir") + 1])
-                    target_dir.mkdir(parents=True, exist_ok=True)
-                    (target_dir / "partial.txt").write_text("partial")
-                    print("download denied for HK", file=sys.stderr)
-                    sys.exit(7)
+        downloads_log = pathlib.Path({str(downloads_log)!r})
+        args = sys.argv[1:]
+        if args[:3] == ["api", "--paginate", "--slurp"] and "actions/workflows/static-site.yml/runs" in args[3]:
+            print(json.dumps([{{"workflow_runs": [
+                {{"id": 999, "conclusion": "failure"}},
+                {{"id": 222, "conclusion": "failure"}}
+            ]}}]))
+        elif args[:3] == ["api", "--paginate", "--slurp"] and "actions/runs/222/artifacts" in args[3]:
+            print(json.dumps([{{"artifacts": [
+                {{"name": "static-market-diagnostics-CN", "expired": False}},
+                {{"name": "static-market-HK", "expired": False}},
+                {{"name": "static-market-status-CN", "expired": False}},
+                {{"name": "static-market-US", "expired": False}},
+                {{"name": "static-market-TW", "expired": False}}
+            ]}}]))
+        elif args[:2] == ["run", "download"]:
+            artifact_name = args[args.index("--name") + 1]
+            if artifact_name == "static-market-HK":
                 target_dir = pathlib.Path(args[args.index("--dir") + 1])
                 target_dir.mkdir(parents=True, exist_ok=True)
-                (target_dir / "manifest.market.json").write_text(json.dumps({{"market": artifact_name.rsplit("-", 1)[1], "schema_version": "static-site-v3"}}))
-                with downloads_log.open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps({{"artifact": artifact_name}}) + "\\n")
-            else:
-                print(f"unexpected gh args: {{args}}", file=sys.stderr)
-                sys.exit(2)
-            """
-        ),
-        encoding="utf-8",
-    )
-    fake_gh.chmod(fake_gh.stat().st_mode | stat.S_IXUSR)
-
-    env = os.environ.copy()
-    env.update(
-        {
-            "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
-            "REPOSITORY": "xang1234/stock-screener",
-            "CURRENT_RUN_ID": "999",
-            "BRANCH_NAME": "main",
-        }
+                (target_dir / "partial.txt").write_text("partial")
+                print("download denied for HK", file=sys.stderr)
+                sys.exit(7)
+            target_dir = pathlib.Path(args[args.index("--dir") + 1])
+            target_dir.mkdir(parents=True, exist_ok=True)
+            (target_dir / "manifest.market.json").write_text(json.dumps({{"market": artifact_name.rsplit("-", 1)[1], "schema_version": "static-site-v3"}}))
+            with downloads_log.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({{"artifact": artifact_name}}) + "\\n")
+        else:
+            print(f"unexpected gh args: {{args}}", file=sys.stderr)
+            sys.exit(2)
+        """,
     )
 
     result = subprocess.run(
@@ -254,10 +296,11 @@ def test_static_site_fallback_downloader_only_fetches_missing_current_markets(tm
         check=True,
         capture_output=True,
         text=True,
-        env=env,
+        env=_fallback_downloader_env(fake_bin),
         cwd=ROOT / "backend",
     )
 
+    assert downloads_log.exists(), f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     downloads = [
         json.loads(line)
         for line in downloads_log.read_text(encoding="utf-8").splitlines()
@@ -279,58 +322,44 @@ def test_static_site_fallback_downloader_skips_incompatible_schema_and_keeps_sea
     fake_bin.mkdir()
     fake_gh = fake_bin / "gh"
     downloads_log = tmp_path / "downloads.jsonl"
-    fake_gh.write_text(
-        textwrap.dedent(
-            f"""\
-            #!{sys.executable}
-            import json
-            import pathlib
-            import sys
+    _write_fake_gh(
+        fake_gh,
+        f"""\
+        import json
+        import pathlib
+        import sys
 
-            downloads_log = pathlib.Path({str(downloads_log)!r})
-            args = sys.argv[1:]
-            if args[:3] == ["api", "--paginate", "--slurp"] and "actions/workflows/static-site.yml/runs" in args[3]:
-                print(json.dumps([{{"workflow_runs": [
-                    {{"id": 999}},
-                    {{"id": 333}},
-                    {{"id": 222}}
-                ]}}]))
-            elif args[:3] == ["api", "--paginate", "--slurp"] and "actions/runs/333/artifacts" in args[3]:
-                print(json.dumps([{{"artifacts": [
-                    {{"name": "static-market-AU", "expired": False}}
-                ]}}]))
-            elif args[:3] == ["api", "--paginate", "--slurp"] and "actions/runs/222/artifacts" in args[3]:
-                print(json.dumps([{{"artifacts": [
-                    {{"name": "static-market-AU", "expired": False}}
-                ]}}]))
-            elif args[:2] == ["run", "download"]:
-                run_id = args[2]
-                artifact_name = args[args.index("--name") + 1]
-                target_dir = pathlib.Path(args[args.index("--dir") + 1])
-                target_dir.mkdir(parents=True, exist_ok=True)
-                schema_version = "static-site-v2" if run_id == "333" else "static-site-v3"
-                (target_dir / "manifest.market.json").write_text(
-                    json.dumps({{"market": "AU", "schema_version": schema_version}})
-                )
-                with downloads_log.open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps({{"run": run_id, "artifact": artifact_name}}) + "\\n")
-            else:
-                print(f"unexpected gh args: {{args}}", file=sys.stderr)
-                sys.exit(2)
-            """
-        ),
-        encoding="utf-8",
-    )
-    fake_gh.chmod(fake_gh.stat().st_mode | stat.S_IXUSR)
-
-    env = os.environ.copy()
-    env.update(
-        {
-            "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
-            "REPOSITORY": "xang1234/stock-screener",
-            "CURRENT_RUN_ID": "999",
-            "BRANCH_NAME": "main",
-        }
+        downloads_log = pathlib.Path({str(downloads_log)!r})
+        args = sys.argv[1:]
+        if args[:3] == ["api", "--paginate", "--slurp"] and "actions/workflows/static-site.yml/runs" in args[3]:
+            print(json.dumps([{{"workflow_runs": [
+                {{"id": 999}},
+                {{"id": 333}},
+                {{"id": 222}}
+            ]}}]))
+        elif args[:3] == ["api", "--paginate", "--slurp"] and "actions/runs/333/artifacts" in args[3]:
+            print(json.dumps([{{"artifacts": [
+                {{"name": "static-market-AU", "expired": False}}
+            ]}}]))
+        elif args[:3] == ["api", "--paginate", "--slurp"] and "actions/runs/222/artifacts" in args[3]:
+            print(json.dumps([{{"artifacts": [
+                {{"name": "static-market-AU", "expired": False}}
+            ]}}]))
+        elif args[:2] == ["run", "download"]:
+            run_id = args[2]
+            artifact_name = args[args.index("--name") + 1]
+            target_dir = pathlib.Path(args[args.index("--dir") + 1])
+            target_dir.mkdir(parents=True, exist_ok=True)
+            schema_version = "static-site-v2" if run_id == "333" else "static-site-v3"
+            (target_dir / "manifest.market.json").write_text(
+                json.dumps({{"market": "AU", "schema_version": schema_version}})
+            )
+            with downloads_log.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({{"run": run_id, "artifact": artifact_name}}) + "\\n")
+        else:
+            print(f"unexpected gh args: {{args}}", file=sys.stderr)
+            sys.exit(2)
+        """,
     )
 
     result = subprocess.run(
@@ -346,10 +375,11 @@ def test_static_site_fallback_downloader_skips_incompatible_schema_and_keeps_sea
         check=True,
         capture_output=True,
         text=True,
-        env=env,
+        env=_fallback_downloader_env(fake_bin),
         cwd=ROOT / "backend",
     )
 
+    assert downloads_log.exists(), f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     downloads = [
         json.loads(line)
         for line in downloads_log.read_text(encoding="utf-8").splitlines()
