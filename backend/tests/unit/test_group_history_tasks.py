@@ -83,6 +83,53 @@ def test_startup_group_history_reconciliation_marks_pristine_seed_import(
     assert "group_history_reconciliation" in setting.value
 
 
+def test_startup_group_history_reconciliation_clears_owned_marker_on_dispatch_failure(
+    db_session,
+    monkeypatch,
+) -> None:
+    from app.domain.group_history import GroupHistoryTarget
+    from app.tasks import group_history_tasks as module
+
+    target = GroupHistoryTarget(
+        market="US",
+        formula_version=LEGACY_RS_FORMULA_VERSION,
+        through_date=date(2026, 7, 31),
+    )
+    monkeypatch.setattr(module, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr(
+        module,
+        "_resolve_current_group_history_target",
+        lambda _db, *, market: target,
+    )
+    monkeypatch.setattr(
+        module,
+        "_evaluate_group_history_readiness",
+        lambda _db, *, target: SimpleNamespace(
+            ready=False,
+            as_dict=lambda: {"ready": False},
+        ),
+    )
+
+    def _dispatch_failure(**_kwargs):
+        raise RuntimeError("broker unavailable")
+
+    monkeypatch.setattr(
+        module,
+        "_dispatch_group_history_reconciliation",
+        _dispatch_failure,
+    )
+
+    result = module.discover_group_history_reconciliation()
+
+    assert result == {"US": "dispatch_failed"}
+    setting = (
+        db_session.query(AppSetting)
+        .filter(AppSetting.key == PRE_BOOTSTRAP_SEED_IMPORT_KEY)
+        .one_or_none()
+    )
+    assert setting is None
+
+
 def test_ensure_group_history_invalidates_cache_and_publishes_us_snapshot(
     monkeypatch,
 ):

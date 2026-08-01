@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Mapping
 
 from sqlalchemy.orm import Session
@@ -27,6 +27,7 @@ from ..models.stock_universe import StockUniverse
 PRE_BOOTSTRAP_SEED_IMPORT_KEY = "runtime.bootstrap.pre_bootstrap_seed_import"
 PRE_BOOTSTRAP_SEED_IMPORT_CATEGORY = "runtime_activity"
 PRE_BOOTSTRAP_SEED_IMPORT_SCHEMA_VERSION = 1
+PRE_BOOTSTRAP_SEED_IMPORT_MAX_AGE = timedelta(days=1)
 
 
 @dataclass(frozen=True)
@@ -99,6 +100,9 @@ class BootstrapReadinessService:
 
     def mark_pre_bootstrap_seed_import(self, db: Session, *, source: str) -> bool:
         """Mark that a pristine startup task may import raw seed rows."""
+        source = str(source).strip()
+        if not source:
+            return False
         if not self.is_pristine_installation(db):
             return False
 
@@ -110,15 +114,13 @@ class BootstrapReadinessService:
         )
         sources: set[str] = set()
         if setting is not None:
-            try:
-                payload = json.loads(setting.value)
-                if isinstance(payload, dict) and isinstance(
-                    payload.get("sources"),
-                    list,
-                ):
-                    sources.update(str(item) for item in payload["sources"] if item)
-            except json.JSONDecodeError:
-                sources.clear()
+            payload = self._decode_pre_bootstrap_seed_payload(setting)
+            if payload is not None:
+                sources.update(
+                    self._normalize_pre_bootstrap_seed_sources(
+                        payload.get("sources"),
+                    )
+                )
         sources.add(str(source))
         encoded = json.dumps(
             {
@@ -147,19 +149,125 @@ class BootstrapReadinessService:
             )
         return True
 
-    def has_pre_bootstrap_seed_import_marker(self, db: Session) -> bool:
-        setting = (
-            db.query(AppSetting.id)
-            .filter(AppSetting.key == PRE_BOOTSTRAP_SEED_IMPORT_KEY)
-            .one_or_none()
+    def clear_pre_bootstrap_seed_import_marker(
+        self,
+        db: Session,
+        *,
+        source: str | None = None,
+    ) -> bool:
+        setting = self._load_pre_bootstrap_seed_import_setting(db)
+        if setting is None:
+            return False
+        if source is None:
+            db.delete(setting)
+            return True
+
+        source = str(source).strip()
+        if not source:
+            return False
+        payload = self._decode_pre_bootstrap_seed_payload(setting)
+        sources = (
+            set(self._normalize_pre_bootstrap_seed_sources(payload.get("sources")))
+            if payload is not None
+            else set()
         )
-        return setting is not None
+        if source not in sources:
+            return False
+        sources.remove(source)
+        if not sources:
+            db.delete(setting)
+            return True
+
+        setting.value = json.dumps(
+            {
+                "schema_version": PRE_BOOTSTRAP_SEED_IMPORT_SCHEMA_VERSION,
+                "sources": sorted(sources),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            sort_keys=True,
+        )
+        setting.category = PRE_BOOTSTRAP_SEED_IMPORT_CATEGORY
+        setting.description = (
+            "Pristine startup task may have imported raw bootstrap seed rows."
+        )
+        return True
+
+    def has_pre_bootstrap_seed_import_marker(self, db: Session) -> bool:
+        setting = self._load_pre_bootstrap_seed_import_setting(db)
+        return self._has_valid_pre_bootstrap_seed_metadata(setting)
 
     def is_pre_bootstrap_seed_import_installation(self, db: Session) -> bool:
         """Return true only for raw rows imported by marked startup work."""
         return (
             self.has_pre_bootstrap_seed_import_marker(db)
             and not self.has_bootstrap_output_rows(db)
+        )
+
+    def _load_pre_bootstrap_seed_import_setting(
+        self,
+        db: Session,
+    ) -> AppSetting | None:
+        return (
+            db.query(AppSetting)
+            .filter(AppSetting.key == PRE_BOOTSTRAP_SEED_IMPORT_KEY)
+            .one_or_none()
+        )
+
+    @staticmethod
+    def _decode_pre_bootstrap_seed_payload(
+        setting: AppSetting,
+    ) -> dict | None:
+        try:
+            payload = json.loads(setting.value)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _normalize_pre_bootstrap_seed_sources(raw_sources: object) -> tuple[str, ...]:
+        if not isinstance(raw_sources, list):
+            return ()
+        return tuple(
+            sorted(
+                {
+                    source.strip()
+                    for source in raw_sources
+                    if isinstance(source, str) and source.strip()
+                }
+            )
+        )
+
+    def _has_valid_pre_bootstrap_seed_metadata(
+        self,
+        setting: AppSetting | None,
+    ) -> bool:
+        if (
+            setting is None
+            or setting.category != PRE_BOOTSTRAP_SEED_IMPORT_CATEGORY
+        ):
+            return False
+        payload = self._decode_pre_bootstrap_seed_payload(setting)
+        if payload is None:
+            return False
+        if (
+            payload.get("schema_version")
+            != PRE_BOOTSTRAP_SEED_IMPORT_SCHEMA_VERSION
+        ):
+            return False
+        if not self._normalize_pre_bootstrap_seed_sources(payload.get("sources")):
+            return False
+        updated_at_raw = payload.get("updated_at")
+        if not isinstance(updated_at_raw, str):
+            return False
+        try:
+            updated_at = datetime.fromisoformat(updated_at_raw)
+        except ValueError:
+            return False
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        return (
+            datetime.now(timezone.utc) - updated_at
+            <= PRE_BOOTSTRAP_SEED_IMPORT_MAX_AGE
         )
 
     def has_core_market_data(self, db: Session, market: str) -> bool:

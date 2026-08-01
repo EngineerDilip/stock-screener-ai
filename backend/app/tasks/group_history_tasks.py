@@ -47,6 +47,8 @@ from app.tasks.market_queues import (
 from app.tasks.workload_coordination import serialized_market_workload
 from app.wiring.bootstrap import get_group_rank_service, get_market_calendar_service
 
+_PRE_BOOTSTRAP_SEED_IMPORT_SOURCE = "group_history_reconciliation"
+
 
 def _build_group_history_components():
     from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
@@ -261,12 +263,24 @@ def _dispatch_group_history_finalization(
     )
 
 
-def _mark_pre_bootstrap_seed_import(db) -> None:
-    marked = BootstrapReadinessService().mark_pre_bootstrap_seed_import(
+def _mark_pre_bootstrap_seed_import(db) -> bool:
+    service = BootstrapReadinessService()
+    had_valid_marker = service.has_pre_bootstrap_seed_import_marker(db)
+    marked = service.mark_pre_bootstrap_seed_import(
         db,
-        source="group_history_reconciliation",
+        source=_PRE_BOOTSTRAP_SEED_IMPORT_SOURCE,
     )
     if marked:
+        db.commit()
+    return marked and not had_valid_marker
+
+
+def _clear_pre_bootstrap_seed_import(db) -> None:
+    cleared = BootstrapReadinessService().clear_pre_bootstrap_seed_import_marker(
+        db,
+        source=_PRE_BOOTSTRAP_SEED_IMPORT_SOURCE,
+    )
+    if cleared:
         db.commit()
 
 
@@ -396,9 +410,12 @@ def discover_group_history_reconciliation() -> dict[str, str]:
                 if readiness.ready
                 else _dispatch_group_history_reconciliation
             )
+            owns_pre_bootstrap_seed_marker = False
             try:
                 if not readiness.ready:
-                    _mark_pre_bootstrap_seed_import(db)
+                    owns_pre_bootstrap_seed_marker = (
+                        _mark_pre_bootstrap_seed_import(db)
+                    )
                 dispatch(
                     market=target.market,
                     formula_version=target.formula_version,
@@ -410,6 +427,13 @@ def discover_group_history_reconciliation() -> dict[str, str]:
                 raise
             except Exception as exc:
                 db.rollback()
+                if owns_pre_bootstrap_seed_marker:
+                    try:
+                        _clear_pre_bootstrap_seed_import(db)
+                    except SoftTimeLimitExceeded:
+                        raise
+                    except Exception:
+                        db.rollback()
                 repository.transition(
                     db,
                     reservation=reservation,

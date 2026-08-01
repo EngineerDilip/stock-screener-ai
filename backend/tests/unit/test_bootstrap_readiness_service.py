@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -16,6 +17,7 @@ from app.domain.relative_strength import (
 )
 from app.infra.db.models.feature_store import FeatureRun
 from app.infra.db.models.relative_strength import MarketRsFormulaPointer, MarketRsRun
+from app.models.app_settings import AppSetting
 from app.models.industry import IBDGroupRank
 from app.models.market_breadth import MarketBreadth
 from app.models.market_exposure import MarketExposure
@@ -25,7 +27,13 @@ import app.models.stock_universe  # noqa: F401
 from app.models.scan_result import SCAN_TRIGGER_SOURCE_AUTO, SCAN_TRIGGER_SOURCE_MANUAL, Scan
 from app.models.stock import StockFundamental, StockPrice
 from app.models.stock_universe import StockUniverse
-from app.services.bootstrap_readiness_service import BootstrapReadinessService
+from app.services.bootstrap_readiness_service import (
+    PRE_BOOTSTRAP_SEED_IMPORT_CATEGORY,
+    PRE_BOOTSTRAP_SEED_IMPORT_KEY,
+    PRE_BOOTSTRAP_SEED_IMPORT_MAX_AGE,
+    PRE_BOOTSTRAP_SEED_IMPORT_SCHEMA_VERSION,
+    BootstrapReadinessService,
+)
 
 
 class FakeBootstrapReadinessService(BootstrapReadinessService):
@@ -355,6 +363,95 @@ def test_pre_bootstrap_seed_import_marker_allows_raw_bootstrap_inputs(
 
     assert service.is_pristine_installation(readiness_db) is False
     assert service.is_pre_bootstrap_seed_import_installation(readiness_db) is True
+
+
+@pytest.mark.parametrize(
+    ("value", "category"),
+    [
+        ("not-json", PRE_BOOTSTRAP_SEED_IMPORT_CATEGORY),
+        (
+            json.dumps(
+                {
+                    "schema_version": PRE_BOOTSTRAP_SEED_IMPORT_SCHEMA_VERSION + 1,
+                    "sources": ["group_history_reconciliation"],
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ),
+            PRE_BOOTSTRAP_SEED_IMPORT_CATEGORY,
+        ),
+        (
+            json.dumps(
+                {
+                    "schema_version": PRE_BOOTSTRAP_SEED_IMPORT_SCHEMA_VERSION,
+                    "sources": [],
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ),
+            PRE_BOOTSTRAP_SEED_IMPORT_CATEGORY,
+        ),
+        (
+            json.dumps(
+                {
+                    "schema_version": PRE_BOOTSTRAP_SEED_IMPORT_SCHEMA_VERSION,
+                    "sources": ["group_history_reconciliation"],
+                    "updated_at": "not-a-date",
+                }
+            ),
+            PRE_BOOTSTRAP_SEED_IMPORT_CATEGORY,
+        ),
+        (
+            json.dumps(
+                {
+                    "schema_version": PRE_BOOTSTRAP_SEED_IMPORT_SCHEMA_VERSION,
+                    "sources": ["group_history_reconciliation"],
+                    "updated_at": (
+                        datetime.now(timezone.utc)
+                        - PRE_BOOTSTRAP_SEED_IMPORT_MAX_AGE
+                        - timedelta(seconds=1)
+                    ).isoformat(),
+                }
+            ),
+            PRE_BOOTSTRAP_SEED_IMPORT_CATEGORY,
+        ),
+        (
+            json.dumps(
+                {
+                    "schema_version": PRE_BOOTSTRAP_SEED_IMPORT_SCHEMA_VERSION,
+                    "sources": ["group_history_reconciliation"],
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ),
+            "other",
+        ),
+    ],
+    ids=[
+        "malformed-json",
+        "wrong-schema",
+        "empty-sources",
+        "invalid-updated-at",
+        "expired",
+        "wrong-category",
+    ],
+)
+def test_pre_bootstrap_seed_import_rejects_invalid_marker_metadata(
+    readiness_db,
+    value,
+    category,
+) -> None:
+    readiness_db.add(
+        AppSetting(
+            key=PRE_BOOTSTRAP_SEED_IMPORT_KEY,
+            value=value,
+            category=category,
+        )
+    )
+    readiness_db.commit()
+    seed_core_market_data(readiness_db)
+
+    service = BootstrapReadinessService()
+
+    assert service.has_pre_bootstrap_seed_import_marker(readiness_db) is False
+    assert service.is_pre_bootstrap_seed_import_installation(readiness_db) is False
 
 
 @pytest.mark.parametrize(
