@@ -5,9 +5,9 @@ Loads environment variables and provides application settings.
 import logging
 import os
 from pathlib import Path
+
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
-from typing import List
 
 
 def _get_project_root(source_path: str | Path | None = None) -> Path:
@@ -637,14 +637,14 @@ class Settings(BaseSettings):
     @field_validator('celery_timezone')
     @classmethod
     def validate_celery_timezone(cls, v: str) -> str:
-        from zoneinfo import ZoneInfo
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
         try:
             ZoneInfo(v)
-        except (KeyError, Exception):
+        except ZoneInfoNotFoundError as exc:
             raise ValueError(
                 f"Invalid celery_timezone: {v!r}. "
                 f"Use IANA timezone like 'America/New_York'"
-            )
+            ) from exc
         return v
 
     @field_validator('universe_source_timeout_seconds')
@@ -756,11 +756,12 @@ class Settings(BaseSettings):
         "github_weekly_reference_max_age_days",
         "github_daily_price_max_age_days",
         "github_daily_price_redis_warm_symbols",
+        "market_rs_bootstrap_benchmark_max_lag_days",
     )
     @classmethod
-    def validate_non_negative_github_sync_settings(cls, v: int) -> int:
+    def validate_non_negative_numeric_settings(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(f"GitHub sync numeric settings must be >= 0, got {v}")
+            raise ValueError(f"numeric settings must be >= 0, got {v}")
         return v
 
     @field_validator('india_bse_price_verification_period')
@@ -807,7 +808,7 @@ class Settings(BaseSettings):
         return self
 
     @property
-    def groq_api_keys_list(self) -> List[str]:
+    def groq_api_keys_list(self) -> list[str]:
         """Parse comma-separated Groq API keys to list."""
         # First try the multi-key field
         if self.groq_api_keys:
@@ -818,7 +819,7 @@ class Settings(BaseSettings):
         return []
 
     @property
-    def enabled_markets_list(self) -> List[str]:
+    def enabled_markets_list(self) -> list[str]:
         """Project the canonical comma-separated enabled markets to a list."""
         return [market for market in self.enabled_markets.split(",") if market]
 
@@ -844,7 +845,7 @@ class Settings(BaseSettings):
         return mapping[m]
 
     @property
-    def zai_api_keys_list(self) -> List[str]:
+    def zai_api_keys_list(self) -> list[str]:
         """Parse comma-separated Z.AI API keys to list."""
         if self.zai_api_keys:
             return [k.strip() for k in self.zai_api_keys.split(",") if k.strip()]
@@ -853,7 +854,7 @@ class Settings(BaseSettings):
         return []
 
     @property
-    def cors_origins_list(self) -> List[str]:
+    def cors_origins_list(self) -> list[str]:
         """Convert CORS origins string to list."""
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 

@@ -7,6 +7,10 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from celery.exceptions import SoftTimeLimitExceeded
+from sqlalchemy.exc import OperationalError
+
+from app.config import settings
 from app.domain.relative_strength import (
     BALANCED_RS_FORMULA_VERSION,
     BALANCED_RS_PRICE_BASIS,
@@ -23,8 +27,6 @@ from app.services.market_rs_rollout_service import (
 from app.services.market_rs_static_artifact_validator import (
     MarketRsStaticArtifactValidator,
 )
-from celery.exceptions import SoftTimeLimitExceeded
-from sqlalchemy.exc import OperationalError
 
 
 def _service(
@@ -193,6 +195,69 @@ def test_rollout_service_resolves_bootstrap_through_date_to_nearby_benchmark_dat
     )
 
 
+def test_rollout_service_bounds_bootstrap_benchmark_ready_date_search(
+    db_session,
+    monkeypatch,
+) -> None:
+    requested_date = date(2026, 8, 1)
+    recent_date = date(2026, 7, 31)
+    stale_date = date(2026, 7, 20)
+    stale_anchors = {
+        0: stale_date,
+        21: date(2026, 6, 19),
+        63: date(2026, 4, 20),
+        126: date(2026, 1, 20),
+        189: date(2025, 10, 20),
+        252: date(2025, 7, 21),
+    }
+    calendar = MagicMock()
+    calendar.session_anchors.return_value = {
+        0: recent_date,
+        21: date(2026, 6, 30),
+        63: date(2026, 4, 29),
+        126: date(2026, 1, 29),
+        189: date(2025, 10, 29),
+        252: date(2025, 7, 30),
+    }
+    monkeypatch.setattr(settings, "market_rs_bootstrap_benchmark_max_lag_days", 3)
+    service = _service(calendar=calendar)
+    db_session.add_all(
+        [
+            StockPrice(
+                symbol="^HSI",
+                date=recent_date,
+                close=24600.0,
+                adj_close=24600.0,
+            ),
+            *(
+                StockPrice(
+                    symbol="^HSI",
+                    date=anchor_date,
+                    close=24000.0,
+                    adj_close=24000.0,
+                )
+                for anchor_date in set(stale_anchors.values())
+            ),
+        ]
+    )
+    db_session.commit()
+
+    resolution = service.resolve_bootstrap_through_date(
+        db_session,
+        market="HK",
+        requested_through_date=requested_date,
+    )
+
+    assert resolution.selected_through_date == requested_date
+    assert resolution.benchmark_through_date is None
+    assert resolution.reason_code == "benchmark_date_unavailable"
+    calendar.session_anchors.assert_called_once_with(
+        "HK",
+        recent_date,
+        offsets=tuple(HORIZON_SESSIONS.values()),
+    )
+
+
 def test_backfill_resumes_completed_stock_run_and_reports_all_failures(monkeypatch):
     dates = (date(2026, 4, 8), date(2026, 4, 9), date(2026, 4, 10))
     completed_run = SimpleNamespace(id=10, eligible_symbol_count=2)
@@ -310,6 +375,62 @@ def test_backfill_reuses_completed_strict_run_without_fallback_rebuild(monkeypat
     assert report.latest_run_id == 42
     snapshot.calculate.assert_not_called()
     groups.calculate_and_store.assert_called_once()
+
+
+def test_backfill_rebuilds_completed_incompatible_price_basis(monkeypatch):
+    calculation_date = date(2026, 4, 10)
+    incompatible_run = SimpleNamespace(
+        id=42,
+        eligible_symbol_count=2,
+        diagnostics_json={"price_basis": "legacy_close_only"},
+    )
+    rebuilt_run = SimpleNamespace(
+        id=43,
+        eligible_symbol_count=3,
+        diagnostics_json={"price_basis": BALANCED_RS_PRICE_BASIS},
+    )
+    repository = MagicMock()
+    repository.get_completed_exact.return_value = incompatible_run
+    snapshot = MagicMock()
+    snapshot.calculate.return_value = rebuilt_run
+    groups = MagicMock()
+    groups.calculate_and_store.return_value = [{"market_rs_run_id": 43}]
+    service = _service(repository=repository, snapshot=snapshot, groups=groups)
+    monkeypatch.setattr(
+        service.backfill_service,
+        "earliest_backfillable_date",
+        lambda *a, **k: calculation_date,
+    )
+    monkeypatch.setattr(
+        service.backfill_service,
+        "candidate_dates",
+        lambda *a, **k: (calculation_date,),
+    )
+    db = MagicMock()
+
+    report = service.backfill(
+        db,
+        market="US",
+        through_date=calculation_date,
+    )
+
+    assert report.completed_count == 1
+    assert report.latest_run_id == 43
+    assert report.results[0].market_rs_run_id == 43
+    assert report.results[0].eligible_symbol_count == 3
+    snapshot.calculate.assert_called_once_with(
+        db,
+        market="US",
+        as_of_date=calculation_date,
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+        rebuild_incompatible=True,
+    )
+    groups.calculate_and_store.assert_called_once_with(
+        db,
+        market="US",
+        as_of_date=calculation_date,
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+    )
 
 
 @pytest.mark.parametrize(

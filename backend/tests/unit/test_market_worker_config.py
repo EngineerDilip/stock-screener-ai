@@ -98,6 +98,17 @@ def _fake_docker_bin(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     docker.chmod(0o755)
+    if not (bin_dir / "python3.11").exists():
+        _write_fake_python(
+            bin_dir,
+            "python3.11",
+            "\n".join(
+                [
+                    "#!/usr/bin/env bash",
+                    f"exec {shlex.quote(sys.executable)} \"$@\"",
+                ]
+            ),
+        )
     return bin_dir
 
 
@@ -172,11 +183,12 @@ def test_enabled_market_compose_wrapper_down_enables_all_market_profiles(tmp_pat
         ],
         cwd=ROOT,
         env={**_wrapper_env(tmp_path), "ENABLED_MARKETS": "US"},
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
 
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert f"COMPOSE_PROFILES={expected_market_profiles}" in result.stdout
     assert f"DOCKER_ARGS|compose|--env-file|{env_file}|down|--remove-orphans" in result.stdout
 

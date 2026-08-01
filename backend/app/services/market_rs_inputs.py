@@ -2,30 +2,29 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import date
-import hashlib
-import math
 
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.domain.relative_strength import HORIZON_SESSIONS
+from app.domain.relative_strength.price_validity import is_valid_adjusted_price
 from app.models.stock import StockPrice
 from app.services.benchmark_registry_service import (
     BenchmarkRegistryService,
     benchmark_registry,
 )
 from app.services.market_calendar_service import MarketCalendarService
-from app.services.point_in_time_universe_service import (
-    PointInTimeUniverseService,
-    PointInTimeUniverseUnavailable,
-)
 from app.services.market_rs_result_contract import (
     MARKET_RS_REASON_BENCHMARK_ADJUSTED_ANCHOR_MISSING,
     MARKET_RS_REASON_CURRENT_ADJUSTED_PRICE_COVERAGE_BELOW_THRESHOLD,
 )
-
+from app.services.point_in_time_universe_service import (
+    PointInTimeUniverseService,
+    PointInTimeUniverseUnavailable,
+)
 
 EMPTY_UNIVERSE_HASH = hashlib.sha256(b"").hexdigest()
 
@@ -75,10 +74,6 @@ class MarketRsInputLoader:
         )
         self._market_calendar = market_calendar or MarketCalendarService()
         self._benchmark_registry = benchmark_registry
-
-    @staticmethod
-    def _valid_price(value: float | None) -> bool:
-        return value is not None and math.isfinite(float(value)) and float(value) > 0
 
     @staticmethod
     def _minimum_current_price_coverage(market: str) -> float:
@@ -155,7 +150,7 @@ class MarketRsInputLoader:
         )
         prices: dict[tuple[str, date], float] = {}
         for row in rows:
-            if self._valid_price(row.adj_close):
+            if is_valid_adjusted_price(row.adj_close):
                 prices[(row.symbol, row.date)] = float(row.adj_close)
 
         benchmark_symbol = next(
