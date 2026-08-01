@@ -37,7 +37,7 @@ from app.domain.feature_store.models import (
     RunStatus,
     RunType,
 )
-from app.domain.feature_store.quality import DQInputs, DQThresholds
+from app.domain.feature_store.quality import DQThresholds
 from app.domain.scanning.signature import (
     build_scan_signature_payload,
     hash_scan_signature,
@@ -577,7 +577,6 @@ class BuildDailyFeatureSnapshotUseCase:
         uow.commit()
 
         # ── 3. Scan symbols in chunks ───────────────────────────
-        all_rows: list[FeatureRowWrite] = []
         merged_requirements = None
         bulk_prefetch_enabled = self._data_provider is not None
 
@@ -808,7 +807,6 @@ class BuildDailyFeatureSnapshotUseCase:
             # 3c — Persist chunk (checkpoint)
             if chunk_rows:
                 uow.feature_store.upsert_snapshot_rows(run_id, chunk_rows)
-                all_rows.extend(chunk_rows)
             uow.commit()
 
             # 3d — Progress reporting
@@ -831,6 +829,9 @@ class BuildDailyFeatureSnapshotUseCase:
                     eta_seconds=round(eta) if eta is not None else None,
                 )
             )
+            chunk_rows.clear()
+            outcomes_by_symbol.clear()
+            pre_fetched_data.clear()
 
         # ── 4. Mark completed ───────────────────────────────────
         duration = time.monotonic() - start_time
@@ -855,29 +856,8 @@ class BuildDailyFeatureSnapshotUseCase:
 
         # ── 5. Delegate DQ + publish to PublishFeatureRunUseCase ──
         actual_count = uow.feature_store.count_by_run_id(run_id)
-        nulls = sum(1 for r in all_rows if r.composite_score is None)
-        scores = tuple(
-            r.composite_score for r in all_rows if r.composite_score is not None
-        )
-        ratings = tuple(
-            r.overall_rating for r in all_rows if r.overall_rating is not None
-        )
-        result_syms = tuple(r.symbol for r in all_rows)
-
-        dq_inputs = DQInputs(
-            expected_row_count=total,
-            actual_row_count=actual_count,
-            null_score_count=nulls,
-            total_row_count=len(all_rows),
-            scores=scores,
-            ratings=ratings,
-            universe_symbols=tuple(symbols),
-            result_symbols=result_syms,
-        )
-
         publish_cmd = PublishRunCommand(
             run_id=run_id,
-            dq_inputs=dq_inputs,
             pointer_key=cmd.publish_pointer_key,
             dq_thresholds=cmd.dq_thresholds,
         )
