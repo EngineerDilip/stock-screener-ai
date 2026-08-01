@@ -11,6 +11,7 @@ import pytest
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
 from app.models.stock import StockPrice
 from app.models.stock_universe import StockUniverse, UNIVERSE_STATUS_ACTIVE
+from app.services.market_rs_inputs import MarketRsInputUnavailable
 
 
 RUNTIME_MARKET_RS_ANCHORS = {
@@ -60,11 +61,7 @@ def _runtime_market_rs_price(symbol: str, offset: int, adjusted: float) -> Stock
     )
 
 
-def test_runtime_market_rs_uses_current_active_fallback_for_fresh_import_history(
-    db_session,
-) -> None:
-    from app.wiring.canonical_rs_runtime import CanonicalRsRuntime
-
+def _seed_fresh_import_market_rs_inputs(db_session) -> None:
     first_seen_after_history = datetime(2026, 7, 24, tzinfo=timezone.utc)
     db_session.add_all(
         [
@@ -97,13 +94,47 @@ def test_runtime_market_rs_uses_current_active_fallback_for_fresh_import_history
         ]
     )
     db_session.commit()
+
+
+def test_runtime_market_rs_default_input_loader_remains_strict_for_fresh_import_history(
+    db_session,
+) -> None:
+    from app.wiring.canonical_rs_runtime import CanonicalRsRuntime
+
+    _seed_fresh_import_market_rs_inputs(db_session)
     runtime = CanonicalRsRuntime(
         session_factory=lambda: db_session,
         market_calendar=_MarketRsCalendarStub(),
         legacy_group_service_provider=lambda: object(),
     )
 
-    inputs = runtime.input_loader().load(
+    with pytest.raises(MarketRsInputUnavailable) as exc_info:
+        runtime.input_loader().load(
+            db_session,
+            market="US",
+            as_of_date=RUNTIME_MARKET_RS_ANCHORS[0],
+        )
+
+    assert (
+        exc_info.value.reason_code
+        == "current_adjusted_price_coverage_below_threshold"
+    )
+    assert exc_info.value.expected_symbol_count == 0
+
+
+def test_rollout_market_rs_uses_current_active_fallback_for_fresh_import_history(
+    db_session,
+) -> None:
+    from app.wiring.canonical_rs_runtime import CanonicalRsRuntime
+
+    _seed_fresh_import_market_rs_inputs(db_session)
+    runtime = CanonicalRsRuntime(
+        session_factory=lambda: db_session,
+        market_calendar=_MarketRsCalendarStub(),
+        legacy_group_service_provider=lambda: object(),
+    )
+
+    inputs = runtime.rollout_service().backfill_service.input_loader.load(
         db_session,
         market="US",
         as_of_date=RUNTIME_MARKET_RS_ANCHORS[0],

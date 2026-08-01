@@ -3,19 +3,15 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from sqlalchemy import func
 from sqlalchemy.exc import DBAPIError
 
 from app.celery_app import celery_app
-from app.config import settings
 from app.database import SessionLocal
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
-from app.models.stock import StockPrice
-from app.services.benchmark_registry_service import benchmark_registry
 from app.services.market_activity_service import (
     mark_market_activity_completed,
     mark_market_activity_failed,
@@ -31,6 +27,7 @@ from app.tasks.transient_database import (
 from app.wiring.bootstrap import (
     get_market_calendar_service,
     get_market_rs_activation_executor,
+    get_market_rs_rollout_service,
     get_market_rs_snapshot_service,
 )
 
@@ -65,51 +62,6 @@ def _retry_connection_failure(task, exc: Exception) -> None:
     raise task.retry(exc=exc, countdown=countdown, max_retries=2)
 
 
-def _resolve_bootstrap_through_date(
-    db,
-    *,
-    market: str,
-    requested_through_date: date,
-) -> date:
-    candidates = tuple(benchmark_registry.get_candidate_symbols(market))
-    if not candidates:
-        return requested_through_date
-    benchmark_through_date = (
-        db.query(func.max(StockPrice.date))
-        .filter(
-            StockPrice.symbol.in_(candidates),
-            StockPrice.date <= requested_through_date,
-        )
-        .scalar()
-    )
-    if not isinstance(benchmark_through_date, date):
-        return requested_through_date
-    if benchmark_through_date >= requested_through_date:
-        return requested_through_date
-    max_lag_days = max(
-        0,
-        int(settings.market_rs_bootstrap_benchmark_max_lag_days),
-    )
-    lag_days = (requested_through_date - benchmark_through_date).days
-    if lag_days > max_lag_days:
-        logger.warning(
-            "Balanced Market RS bootstrap benchmark data for %s is stale "
-            "through %s; keeping requested activation date %s",
-            market,
-            benchmark_through_date,
-            requested_through_date,
-        )
-        return requested_through_date
-    logger.info(
-        "Balanced Market RS bootstrap for %s using benchmark-ready date %s "
-        "instead of requested date %s",
-        market,
-        benchmark_through_date,
-        requested_through_date,
-    )
-    return benchmark_through_date
-
-
 @celery_app.task(
     bind=True,
     name=BOOTSTRAP_BALANCED_MARKET_RS_TASK_NAME,
@@ -130,11 +82,14 @@ def bootstrap_balanced_market_rs(
     task_name = getattr(self, "name", BOOTSTRAP_BALANCED_MARKET_RS_TASK_NAME)
     task_id = getattr(getattr(self, "request", None), "id", None)
     try:
-        through_date = _resolve_bootstrap_through_date(
-            db,
-            market=market_code,
-            requested_through_date=requested_through_date,
+        through_date_resolution = (
+            get_market_rs_rollout_service().resolve_bootstrap_through_date(
+                db,
+                market=market_code,
+                requested_through_date=requested_through_date,
+            )
         )
+        through_date = through_date_resolution.selected_through_date
         mark_market_activity_started(
             db,
             market=market_code,

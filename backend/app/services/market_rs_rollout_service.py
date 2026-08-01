@@ -6,10 +6,14 @@ from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.infra.db.repositories.feature_run_repo import SqlFeatureRunRepository
 from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
+from app.models.stock import StockPrice
+from app.services.benchmark_registry_service import benchmark_registry
 from app.services.canonical_group_ranking_service import CanonicalGroupRankingService
 from app.services.market_calendar_service import MarketCalendarService
 from app.services.market_rs_activation_coverage import MarketRsActivationCoverage
@@ -23,7 +27,9 @@ from app.services.market_rs_rollout_contracts import (
     ActivationValidationReport,
     BackfillDateResult,
     BackfillReport,
+    MarketRsBootstrapThroughDateResolution,
     MarketRsActivationRejected,
+    normalize_rollout_market,
 )
 from app.services.market_rs_snapshot_service import MarketRsSnapshotService
 
@@ -128,6 +134,67 @@ class MarketRsRolloutService:
             through_date=through_date,
         )
 
+    def resolve_bootstrap_through_date(
+        self,
+        db: Session,
+        *,
+        market: str,
+        requested_through_date: date,
+    ) -> MarketRsBootstrapThroughDateResolution:
+        normalized = normalize_rollout_market(market)
+        candidates = tuple(benchmark_registry.get_candidate_symbols(normalized))
+        benchmark_through_date = (
+            db.query(func.max(StockPrice.date))
+            .filter(
+                StockPrice.symbol.in_(candidates),
+                StockPrice.date <= requested_through_date,
+            )
+            .scalar()
+            if candidates
+            else None
+        )
+        if not isinstance(benchmark_through_date, date):
+            return MarketRsBootstrapThroughDateResolution(
+                market=normalized,
+                requested_through_date=requested_through_date,
+                selected_through_date=requested_through_date,
+                benchmark_through_date=None,
+                benchmark_lag_days=None,
+                reason_code="benchmark_date_unavailable",
+            )
+        if benchmark_through_date >= requested_through_date:
+            return MarketRsBootstrapThroughDateResolution(
+                market=normalized,
+                requested_through_date=requested_through_date,
+                selected_through_date=requested_through_date,
+                benchmark_through_date=benchmark_through_date,
+                benchmark_lag_days=0,
+                reason_code="requested_date_ready",
+            )
+
+        lag_days = (requested_through_date - benchmark_through_date).days
+        max_lag_days = max(
+            0,
+            int(settings.market_rs_bootstrap_benchmark_max_lag_days),
+        )
+        if lag_days > max_lag_days:
+            return MarketRsBootstrapThroughDateResolution(
+                market=normalized,
+                requested_through_date=requested_through_date,
+                selected_through_date=requested_through_date,
+                benchmark_through_date=benchmark_through_date,
+                benchmark_lag_days=lag_days,
+                reason_code="benchmark_lag_exceeds_policy",
+            )
+        return MarketRsBootstrapThroughDateResolution(
+            market=normalized,
+            requested_through_date=requested_through_date,
+            selected_through_date=benchmark_through_date,
+            benchmark_through_date=benchmark_through_date,
+            benchmark_lag_days=lag_days,
+            reason_code="benchmark_ready_lag",
+        )
+
     def validate_activation(
         self,
         db: Session,
@@ -184,6 +251,7 @@ __all__ = [
     "ActivationValidationReport",
     "BackfillDateResult",
     "BackfillReport",
+    "MarketRsBootstrapThroughDateResolution",
     "MarketRsActivationRejected",
     "MarketRsRolloutService",
 ]

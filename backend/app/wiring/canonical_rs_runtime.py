@@ -7,6 +7,7 @@ from typing import Callable
 
 from app.domain.scanning.ports import MarketRsReader
 from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
+from app.services.bounded_history_universe import CurrentActiveFallbackUniverseResolver
 from app.services.canonical_group_ranking_service import CanonicalGroupRankingService
 from app.services.group_rank_snapshot_coordinator import GroupRankSnapshotCoordinator
 from app.services.group_rank_snapshot_reader import GroupRankSnapshotReader
@@ -15,7 +16,6 @@ from app.services.market_rs_inputs import MarketRsInputLoader
 from app.services.market_rs_rollout_executor import MarketRsActivationExecutor
 from app.services.market_rs_rollout_service import MarketRsRolloutService
 from app.services.market_rs_snapshot_service import MarketRsSnapshotService
-from app.services.market_rs_universe import MarketRsUniverseResolver
 from app.services.point_in_time_universe_service import PointInTimeUniverseService
 from app.wiring.market_rs_services import MarketRsServices, build_market_rs_services
 
@@ -35,7 +35,6 @@ class CanonicalRsRuntime:
         self._legacy_group_service_provider = legacy_group_service_provider
         self._lock = RLock()
         self._point_in_time_universe: PointInTimeUniverseService | None = None
-        self._market_rs_universe: MarketRsUniverseResolver | None = None
         self._services: MarketRsServices | None = None
         self._canonical_group_service: CanonicalGroupRankingService | None = None
         self._rollout_service: MarketRsRolloutService | None = None
@@ -52,22 +51,13 @@ class CanonicalRsRuntime:
                     )
         return self._point_in_time_universe
 
-    def market_rs_universe_resolver(self) -> MarketRsUniverseResolver:
-        if self._market_rs_universe is None:
-            with self._lock:
-                if self._market_rs_universe is None:
-                    self._market_rs_universe = MarketRsUniverseResolver(
-                        point_in_time_universe=self.point_in_time_universe_service()
-                    )
-        return self._market_rs_universe
-
     def market_rs_services(self) -> MarketRsServices:
         if self._services is None:
             with self._lock:
                 if self._services is None:
                     self._services = build_market_rs_services(
                         session_factory=self._session_factory,
-                        point_in_time_universe=self.market_rs_universe_resolver(),
+                        point_in_time_universe=self.point_in_time_universe_service(),
                         market_calendar=self._market_calendar,
                     )
         return self._services
@@ -97,11 +87,21 @@ class CanonicalRsRuntime:
         if self._rollout_service is None:
             with self._lock:
                 if self._rollout_service is None:
+                    rollout_input_loader = MarketRsInputLoader(
+                        point_in_time_universe=CurrentActiveFallbackUniverseResolver(
+                            point_in_time_universe=self.point_in_time_universe_service()
+                        ),
+                        market_calendar=self._market_calendar,
+                    )
+                    repository = self.repository()
                     self._rollout_service = MarketRsRolloutService(
                         calendar_service=self._market_calendar,
-                        input_loader=self.input_loader(),
-                        market_rs_snapshot_service=self.snapshot_service(),
-                        market_rs_repository=self.repository(),
+                        input_loader=rollout_input_loader,
+                        market_rs_snapshot_service=MarketRsSnapshotService(
+                            input_loader=rollout_input_loader,
+                            repository=repository,
+                        ),
+                        market_rs_repository=repository,
                         canonical_group_service=self.canonical_group_service(),
                     )
         return self._rollout_service

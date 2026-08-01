@@ -10,7 +10,6 @@ import pytest
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
-from app.models.stock import StockPrice
 from app.services.market_rs_inputs import MarketRsInputUnavailable
 from app.services.market_rs_rollout_contracts import (
     ActivationValidationReport,
@@ -170,45 +169,18 @@ def _patch_bootstrap_rollout_dependencies(monkeypatch):
     started = MagicMock()
     completed = MagicMock()
     failed = MagicMock()
+    rollout = MagicMock()
+    rollout.resolve_bootstrap_through_date.return_value = SimpleNamespace(
+        selected_through_date=calendar.last_completed_trading_day.return_value,
+    )
     monkeypatch.setattr(module, "SessionLocal", lambda: db)
     monkeypatch.setattr(module, "get_market_calendar_service", lambda: calendar)
+    monkeypatch.setattr(module, "get_market_rs_rollout_service", lambda: rollout)
     monkeypatch.setattr(module, "get_market_rs_activation_executor", lambda: executor)
     monkeypatch.setattr(module, "mark_market_activity_started", started)
     monkeypatch.setattr(module, "mark_market_activity_completed", completed)
     monkeypatch.setattr(module, "mark_market_activity_failed", failed)
     return module, db, calendar, executor, started, completed, failed
-
-
-def test_bootstrap_balanced_market_rs_backs_off_to_nearby_benchmark_date(
-    db_session,
-) -> None:
-    from app.tasks import market_rs_tasks as module
-
-    db_session.add_all(
-        [
-            StockPrice(
-                symbol="^HSI",
-                date=date(2026, 7, 30),
-                close=24500.0,
-                adj_close=24500.0,
-            ),
-            StockPrice(
-                symbol="2800.HK",
-                date=date(2026, 7, 29),
-                close=24.0,
-                adj_close=24.0,
-            ),
-        ]
-    )
-    db_session.commit()
-
-    through_date = module._resolve_bootstrap_through_date(
-        db_session,
-        market="HK",
-        requested_through_date=date(2026, 7, 31),
-    )
-
-    assert through_date == date(2026, 7, 30)
 
 
 def test_bootstrap_balanced_market_rs_requires_successful_activation(monkeypatch):
@@ -268,6 +240,80 @@ def test_bootstrap_balanced_market_rs_requires_successful_activation(monkeypatch
     completed.assert_called_once()
     failed.assert_not_called()
     db.close.assert_called_once_with()
+
+
+def test_bootstrap_balanced_market_rs_uses_rollout_resolved_through_date(
+    monkeypatch,
+):
+    (
+        module,
+        db,
+        calendar,
+        executor,
+        _started,
+        _completed,
+        _failed,
+    ) = _patch_bootstrap_rollout_dependencies(monkeypatch)
+    requested_through_date = date(2026, 7, 31)
+    selected_through_date = date(2026, 7, 30)
+    calendar.last_completed_trading_day.return_value = requested_through_date
+    rollout = MagicMock()
+    rollout.resolve_bootstrap_through_date.return_value = SimpleNamespace(
+        selected_through_date=selected_through_date,
+    )
+    monkeypatch.setattr(
+        module,
+        "get_market_rs_rollout_service",
+        lambda: rollout,
+        raising=False,
+    )
+    executor.execute.return_value = MarketRsActivationOutcome(
+        backfill=BackfillReport(
+            market="HK",
+            formula_version=BALANCED_RS_FORMULA_VERSION,
+            requested_start_date=selected_through_date,
+            through_date=selected_through_date,
+            first_valid_date=selected_through_date,
+            candidate_count=1,
+            completed_count=1,
+            failed_count=0,
+            latest_run_id=99,
+            group_row_count=1,
+            results=(),
+        ),
+        market="HK",
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+        feature_run_id=99,
+        validation=ActivationValidationReport(
+            market="HK",
+            formula_version=BALANCED_RS_FORMULA_VERSION,
+            through_date=selected_through_date,
+            first_valid_date=selected_through_date,
+            candidate_count=1,
+            latest_market_rs_run_id=99,
+            latest_universe_hash="universe",
+            feature_run_id=99,
+            feature_universe_hash="universe",
+            static_bundle_sha256="bundle",
+            errors=(),
+        ),
+        static_staging_dir="stage",
+    )
+
+    module.bootstrap_balanced_market_rs.run(
+        market="HK",
+        activity_lifecycle="bootstrap",
+    )
+
+    rollout.resolve_bootstrap_through_date.assert_called_once_with(
+        db,
+        market="HK",
+        requested_through_date=requested_through_date,
+    )
+    assert (
+        executor.execute.call_args.kwargs["request"].through_date
+        == selected_through_date
+    )
 
 
 @pytest.mark.parametrize(

@@ -11,6 +11,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy.exc import OperationalError
 
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
+from app.models.stock import StockPrice
 from app.services.market_rs_activation_coverage import MarketRsActivationCoverage
 from app.services.market_rs_inputs import MarketRsInputUnavailable
 from app.services.market_rs_rollout_service import (
@@ -126,6 +127,42 @@ def test_earliest_backfillable_date_does_not_hide_unexpected_loader_errors():
             market="US",
             through_date=session,
         )
+
+
+def test_rollout_service_resolves_bootstrap_through_date_to_nearby_benchmark_data(
+    db_session,
+) -> None:
+    service = _service()
+    db_session.add_all(
+        [
+            StockPrice(
+                symbol="^HSI",
+                date=date(2026, 7, 30),
+                close=24500.0,
+                adj_close=24500.0,
+            ),
+            StockPrice(
+                symbol="2800.HK",
+                date=date(2026, 7, 29),
+                close=24.0,
+                adj_close=24.0,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    resolution = service.resolve_bootstrap_through_date(
+        db_session,
+        market="HK",
+        requested_through_date=date(2026, 7, 31),
+    )
+
+    assert resolution.market == "HK"
+    assert resolution.requested_through_date == date(2026, 7, 31)
+    assert resolution.selected_through_date == date(2026, 7, 30)
+    assert resolution.benchmark_through_date == date(2026, 7, 30)
+    assert resolution.benchmark_lag_days == 1
+    assert resolution.reason_code == "benchmark_ready_lag"
 
 
 def test_backfill_resumes_completed_stock_run_and_reports_all_failures(monkeypatch):
