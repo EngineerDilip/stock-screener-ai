@@ -257,8 +257,12 @@ def _balanced_activation_state_at_dispatch(
             )
         readiness = BootstrapReadinessService()
         pristine = readiness.is_pristine_installation(db)
-        seed_only = False if pristine else readiness.is_seed_only_installation(db)
-        fresh_install = pristine or seed_only
+        startup_seed_import = (
+            False
+            if pristine
+            else readiness.is_pre_bootstrap_seed_import_installation(db)
+        )
+        fresh_install = pristine or startup_seed_import
         return BalancedActivationDispatchState(
             fresh_install=fresh_install,
             pending_markets=enabled if fresh_install else (),

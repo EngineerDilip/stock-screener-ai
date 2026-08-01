@@ -11,6 +11,7 @@ from app.celery_app import celery_app
 from app.database import SessionLocal
 from app.domain.group_history import GroupHistoryTarget
 from app.domain.markets import get_market_catalog
+from app.services.bootstrap_readiness_service import BootstrapReadinessService
 from app.services.bootstrap_publication_date import (
     resolve_bootstrap_publication_date,
 )
@@ -260,6 +261,15 @@ def _dispatch_group_history_finalization(
     )
 
 
+def _mark_pre_bootstrap_seed_import(db) -> None:
+    marked = BootstrapReadinessService().mark_pre_bootstrap_seed_import(
+        db,
+        source="group_history_reconciliation",
+    )
+    if marked:
+        db.commit()
+
+
 def _group_history_repair_signature(
     *,
     market: str,
@@ -387,6 +397,8 @@ def discover_group_history_reconciliation() -> dict[str, str]:
                 else _dispatch_group_history_reconciliation
             )
             try:
+                if not readiness.ready:
+                    _mark_pre_bootstrap_seed_import(db)
                 dispatch(
                     market=target.market,
                     formula_version=target.formula_version,

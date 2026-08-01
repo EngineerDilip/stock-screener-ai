@@ -11,6 +11,10 @@ from app.domain.relative_strength import (
     BALANCED_RS_PRICE_BASIS,
     LEGACY_RS_FORMULA_VERSION,
 )
+from app.models.app_settings import AppSetting
+from app.services.bootstrap_readiness_service import (
+    PRE_BOOTSTRAP_SEED_IMPORT_KEY,
+)
 from app.services.group_history_bootstrap_service import GroupHistoryBootstrapStatus
 
 
@@ -25,6 +29,58 @@ def _result(*, ready: bool):
         after=SimpleNamespace(ready=ready),
         as_dict=lambda: {"status": status.value, "after": {"ready": ready}},
     )
+
+
+def test_startup_group_history_reconciliation_marks_pristine_seed_import(
+    db_session,
+    monkeypatch,
+) -> None:
+    from app.domain.group_history import GroupHistoryTarget
+    from app.tasks import group_history_tasks as module
+
+    target = GroupHistoryTarget(
+        market="US",
+        formula_version=LEGACY_RS_FORMULA_VERSION,
+        through_date=date(2026, 7, 31),
+    )
+    dispatched = []
+    monkeypatch.setattr(module, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr(
+        module,
+        "_resolve_current_group_history_target",
+        lambda _db, *, market: target,
+    )
+    monkeypatch.setattr(
+        module,
+        "_evaluate_group_history_readiness",
+        lambda _db, *, target: SimpleNamespace(
+            ready=False,
+            as_dict=lambda: {"ready": False},
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "_dispatch_group_history_reconciliation",
+        lambda **kwargs: dispatched.append(kwargs) or "repair-task",
+    )
+
+    result = module.discover_group_history_reconciliation()
+
+    assert result == {"US": "queued"}
+    assert dispatched == [
+        {
+            "market": "US",
+            "formula_version": LEGACY_RS_FORMULA_VERSION,
+            "through_date": date(2026, 7, 31),
+            "reservation_id": dispatched[0]["reservation_id"],
+        }
+    ]
+    setting = (
+        db_session.query(AppSetting)
+        .filter(AppSetting.key == PRE_BOOTSTRAP_SEED_IMPORT_KEY)
+        .one()
+    )
+    assert "group_history_reconciliation" in setting.value
 
 
 def test_ensure_group_history_invalidates_cache_and_publishes_us_snapshot(

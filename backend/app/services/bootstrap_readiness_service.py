@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Mapping
 
 from sqlalchemy.orm import Session
@@ -15,10 +16,17 @@ from ..infra.db.repositories.market_rs_repo import (
     MarketRsFormulaNotConfigured,
     MarketRsRunRepository,
 )
+from ..models.app_settings import AppSetting
 from ..models.industry import IBDGroupRank
+from ..models.market_breadth import MarketBreadth
+from ..models.market_exposure import MarketExposure
 from ..models.scan_result import SCAN_TRIGGER_SOURCE_AUTO, Scan
 from ..models.stock import StockFundamental, StockPrice
 from ..models.stock_universe import StockUniverse
+
+PRE_BOOTSTRAP_SEED_IMPORT_KEY = "runtime.bootstrap.pre_bootstrap_seed_import"
+PRE_BOOTSTRAP_SEED_IMPORT_CATEGORY = "runtime_activity"
+PRE_BOOTSTRAP_SEED_IMPORT_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -67,6 +75,8 @@ class BootstrapReadinessService:
             db.query(StockUniverse.id),
             db.query(StockPrice.id),
             db.query(StockFundamental.id),
+            db.query(MarketBreadth.id),
+            db.query(MarketExposure.id),
             db.query(Scan.id),
             db.query(FeatureRun.id),
             db.query(IBDGroupRank.id),
@@ -76,23 +86,80 @@ class BootstrapReadinessService:
             query.limit(1).first() is not None for query in persisted_queries
         )
 
-    def is_seed_only_installation(self, db: Session) -> bool:
-        """Return true when only raw bootstrap seed/input rows exist.
-
-        Startup reconciliation can import durable universe/price/fundamental
-        inputs before the first user-triggered runtime bootstrap records its
-        dispatch manifest. Those rows should not downgrade that first dispatch
-        into the migration path. Derived runtime outputs still mean the DB has
-        already crossed the bootstrap boundary.
-        """
-        derived_queries = (
+    def has_bootstrap_output_rows(self, db: Session) -> bool:
+        output_queries = (
+            db.query(MarketBreadth.id),
+            db.query(MarketExposure.id),
             db.query(Scan.id),
             db.query(FeatureRun.id),
             db.query(IBDGroupRank.id),
             db.query(MarketRsRun.id),
         )
-        return not any(
-            query.limit(1).first() is not None for query in derived_queries
+        return any(query.limit(1).first() is not None for query in output_queries)
+
+    def mark_pre_bootstrap_seed_import(self, db: Session, *, source: str) -> bool:
+        """Mark that a pristine startup task may import raw seed rows."""
+        if not self.is_pristine_installation(db):
+            return False
+
+        now = datetime.now(timezone.utc).isoformat()
+        setting = (
+            db.query(AppSetting)
+            .filter(AppSetting.key == PRE_BOOTSTRAP_SEED_IMPORT_KEY)
+            .one_or_none()
+        )
+        sources: set[str] = set()
+        if setting is not None:
+            try:
+                payload = json.loads(setting.value)
+                if isinstance(payload, dict) and isinstance(
+                    payload.get("sources"),
+                    list,
+                ):
+                    sources.update(str(item) for item in payload["sources"] if item)
+            except json.JSONDecodeError:
+                sources.clear()
+        sources.add(str(source))
+        encoded = json.dumps(
+            {
+                "schema_version": PRE_BOOTSTRAP_SEED_IMPORT_SCHEMA_VERSION,
+                "sources": sorted(sources),
+                "updated_at": now,
+            },
+            sort_keys=True,
+        )
+        if setting is None:
+            db.add(
+                AppSetting(
+                    key=PRE_BOOTSTRAP_SEED_IMPORT_KEY,
+                    value=encoded,
+                    category=PRE_BOOTSTRAP_SEED_IMPORT_CATEGORY,
+                    description=(
+                        "Pristine startup task may have imported raw bootstrap seed rows."
+                    ),
+                )
+            )
+        else:
+            setting.value = encoded
+            setting.category = PRE_BOOTSTRAP_SEED_IMPORT_CATEGORY
+            setting.description = (
+                "Pristine startup task may have imported raw bootstrap seed rows."
+            )
+        return True
+
+    def has_pre_bootstrap_seed_import_marker(self, db: Session) -> bool:
+        setting = (
+            db.query(AppSetting.id)
+            .filter(AppSetting.key == PRE_BOOTSTRAP_SEED_IMPORT_KEY)
+            .one_or_none()
+        )
+        return setting is not None
+
+    def is_pre_bootstrap_seed_import_installation(self, db: Session) -> bool:
+        """Return true only for raw rows imported by marked startup work."""
+        return (
+            self.has_pre_bootstrap_seed_import_marker(db)
+            and not self.has_bootstrap_output_rows(db)
         )
 
     def has_core_market_data(self, db: Session, market: str) -> bool:
