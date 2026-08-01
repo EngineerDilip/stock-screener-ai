@@ -487,6 +487,7 @@ class Settings(BaseSettings):
     group_rank_gapfill_max_days: int = 365  # Maximum days to look back for gaps
     group_rank_gapfill_chunk_size: int = 30  # Days per chunk for memory safety
     group_rank_backfill_max_days: int = 365  # API limit for backfill endpoint
+    market_rs_bootstrap_benchmark_max_lag_days: int = 3  # Allow fresh bootstrap to use a nearby benchmark date
 
     # Breadth Gap-Fill Configuration
     breadth_gapfill_enabled: bool = True  # Enable automatic gap-fill during scheduled task
@@ -505,6 +506,7 @@ class Settings(BaseSettings):
     # Price Cache Batch Fetching Configuration
     price_cache_yfinance_batch_size: int = 50  # Symbols per yfinance batch in get_many()
     price_cache_yfinance_rate_limit: float = 5.0  # Seconds to wait between batches
+    price_refresh_live_batch_size: int = 250  # Symbols persisted per live refresh batch
 
     # Snapshot fundamentals / universe lifecycle cutover
     provider_snapshot_ingestion_enabled: bool = False

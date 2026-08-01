@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
+from app.models.stock import StockPrice
+from app.models.stock_universe import StockUniverse, UNIVERSE_STATUS_ACTIVE
+
+
+RUNTIME_MARKET_RS_ANCHORS = {
+    0: date(2026, 4, 10),
+    21: date(2026, 3, 10),
+    63: date(2026, 1, 9),
+    126: date(2025, 10, 10),
+    189: date(2025, 7, 11),
+    252: date(2025, 4, 10),
+}
 
 
 class _RecordingStore:
@@ -21,6 +34,83 @@ class _RecordingStore:
     def update(self, manifest):
         self.manifests.append(manifest)
         return manifest
+
+
+class _MarketRsCalendarStub:
+    @staticmethod
+    def normalize_market(market):
+        return str(market).upper()
+
+    @staticmethod
+    def market_now(_market):
+        return datetime(2026, 8, 1, tzinfo=timezone.utc)
+
+    @staticmethod
+    def session_anchors(_market, _as_of_date, *, offsets):
+        assert set(offsets) == {21, 63, 126, 189, 252}
+        return dict(RUNTIME_MARKET_RS_ANCHORS)
+
+
+def _runtime_market_rs_price(symbol: str, offset: int, adjusted: float) -> StockPrice:
+    return StockPrice(
+        symbol=symbol,
+        date=RUNTIME_MARKET_RS_ANCHORS[offset],
+        adj_close=adjusted,
+        close=adjusted,
+    )
+
+
+def test_runtime_market_rs_uses_current_active_fallback_for_fresh_import_history(
+    db_session,
+) -> None:
+    from app.wiring.canonical_rs_runtime import CanonicalRsRuntime
+
+    first_seen_after_history = datetime(2026, 7, 24, tzinfo=timezone.utc)
+    db_session.add_all(
+        [
+            StockUniverse(
+                symbol="AAA",
+                market="US",
+                is_active=True,
+                status=UNIVERSE_STATUS_ACTIVE,
+                first_seen_at=first_seen_after_history,
+            ),
+            StockUniverse(
+                symbol="BBB",
+                market="US",
+                is_active=True,
+                status=UNIVERSE_STATUS_ACTIVE,
+                first_seen_at=first_seen_after_history,
+            ),
+            *[
+                _runtime_market_rs_price("AAA", offset, 110.0 + offset)
+                for offset in RUNTIME_MARKET_RS_ANCHORS
+            ],
+            *[
+                _runtime_market_rs_price("BBB", offset, 105.0 + offset)
+                for offset in RUNTIME_MARKET_RS_ANCHORS
+            ],
+            *[
+                _runtime_market_rs_price("SPY", offset, 100.0 + offset)
+                for offset in RUNTIME_MARKET_RS_ANCHORS
+            ],
+        ]
+    )
+    db_session.commit()
+    runtime = CanonicalRsRuntime(
+        session_factory=lambda: db_session,
+        market_calendar=_MarketRsCalendarStub(),
+        legacy_group_service_provider=lambda: object(),
+    )
+
+    inputs = runtime.input_loader().load(
+        db_session,
+        market="US",
+        as_of_date=RUNTIME_MARKET_RS_ANCHORS[0],
+    )
+
+    assert inputs.expected_symbols == ("AAA", "BBB")
+    assert inputs.current_price_coverage == pytest.approx(1.0)
 
 
 def test_fresh_dispatch_identity_survives_partial_bootstrap(monkeypatch) -> None:

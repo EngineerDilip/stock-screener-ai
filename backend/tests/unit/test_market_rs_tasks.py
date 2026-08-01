@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
+from app.models.stock import StockPrice
 from app.services.market_rs_inputs import MarketRsInputUnavailable
 from app.services.market_rs_rollout_contracts import (
     ActivationValidationReport,
@@ -176,6 +177,38 @@ def _patch_bootstrap_rollout_dependencies(monkeypatch):
     monkeypatch.setattr(module, "mark_market_activity_completed", completed)
     monkeypatch.setattr(module, "mark_market_activity_failed", failed)
     return module, db, calendar, executor, started, completed, failed
+
+
+def test_bootstrap_balanced_market_rs_backs_off_to_nearby_benchmark_date(
+    db_session,
+) -> None:
+    from app.tasks import market_rs_tasks as module
+
+    db_session.add_all(
+        [
+            StockPrice(
+                symbol="^HSI",
+                date=date(2026, 7, 30),
+                close=24500.0,
+                adj_close=24500.0,
+            ),
+            StockPrice(
+                symbol="2800.HK",
+                date=date(2026, 7, 29),
+                close=24.0,
+                adj_close=24.0,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    through_date = module._resolve_bootstrap_through_date(
+        db_session,
+        market="HK",
+        requested_through_date=date(2026, 7, 31),
+    )
+
+    assert through_date == date(2026, 7, 30)
 
 
 def test_bootstrap_balanced_market_rs_requires_successful_activation(monkeypatch):
