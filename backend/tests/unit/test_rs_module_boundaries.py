@@ -11,6 +11,7 @@ LIMITS = {
     "app/wiring/bootstrap.py": 1050,
 }
 EXTRACTED_MODULES = (
+    "app/services/bootstrap_publication_date.py",
     "app/services/group_rank_input_loader.py",
     "app/services/group_rank_historical_calculator.py",
     "app/services/group_ranking_calculator.py",

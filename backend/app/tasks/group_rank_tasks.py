@@ -1,19 +1,17 @@
 """Scheduled IBD group-ranking tasks serialized by market workload."""
+import logging
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
-import logging
-from datetime import datetime, date
-import time
+from datetime import date, datetime
 
 from celery.exceptions import Retry, SoftTimeLimitExceeded
 
 from ..celery_app import celery_app
 from ..config import settings
 from ..database import SessionLocal
-from ..services.market_activity_service import (
-    mark_market_activity_completed,
-    mark_market_activity_failed,
-    mark_market_activity_started,
+from ..services.bootstrap_publication_date import (
+    resolve_bootstrap_publication_date_with_session,
 )
 from ..services.daily_group_rank_runner import (
     DailyGroupRankDependencies,
@@ -29,10 +27,17 @@ from ..services.ibd_group_rank_service import (
     IncompleteGroupRankingCacheError,
     MissingIBDIndustryMappingsError,
 )
+from ..services.market_activity_service import (
+    mark_market_activity_completed,
+    mark_market_activity_failed,
+    mark_market_activity_started,
+)
 from ..services.market_taxonomy_service import TaxonomyLoadError
 from ..wiring.bootstrap import get_group_rank_service, get_market_calendar_service
 from .date_resolution import resolve_task_target_date
-from .group_rank_memory import release_group_rank_gapfill_memory as _release_group_rank_gapfill_memory
+from .group_rank_memory import (
+    release_group_rank_gapfill_memory as _release_group_rank_gapfill_memory,
+)
 from .workload_coordination import serialized_market_workload
 
 logger = logging.getLogger(__name__)
@@ -105,6 +110,28 @@ def _repair_current_us_group_metadata(calculation_date: date):
     )
 
     return repair(ranking_date=calculation_date)
+
+
+def _resolve_bootstrap_group_rank_date(
+    *,
+    market: str,
+    requested_date: date,
+) -> date:
+    resolution = resolve_bootstrap_publication_date_with_session(
+        SessionLocal,
+        market=market,
+        requested_date=requested_date,
+    )
+    if resolution.selected_date != requested_date:
+        logger.info(
+            "Using active Market RS bootstrap publication date for group "
+            "rankings (market=%s requested=%s selected=%s reason=%s)",
+            market,
+            requested_date,
+            resolution.selected_date,
+            resolution.reason_code,
+        )
+    return resolution.selected_date
 
 
 def _daily_group_rank_dependencies(
@@ -212,8 +239,8 @@ def calculate_daily_group_rankings(
     Returns:
         Dict with calculation results
     """
-    from .market_queues import market_tag, log_extra, normalize_market
     from ..services.runtime_preferences_service import is_market_enabled_now
+    from .market_queues import log_extra, market_tag, normalize_market
     _log_extra = log_extra(market)
     effective_market = normalize_market(market) if market is not None else "US"
     activity_lifecycle = activity_lifecycle or "daily_refresh"
@@ -247,9 +274,13 @@ def calculate_daily_group_rankings(
                 'timestamp': datetime.now().isoformat(),
             }
     elif activity_lifecycle == "bootstrap":
-        calc_date = calendar_service.last_completed_trading_day(effective_market)
+        requested_date = calendar_service.last_completed_trading_day(effective_market)
+        calc_date = _resolve_bootstrap_group_rank_date(
+            market=effective_market,
+            requested_date=requested_date,
+        )
         logger.info(
-            "Calculating bootstrap group rankings for last completed session "
+            "Calculating bootstrap group rankings for publication session "
             "(%s): %s",
             effective_market,
             calc_date,
@@ -427,9 +458,9 @@ def calculate_daily_group_rankings_with_gapfill(
         market: Market code (default "US")
         activity_lifecycle: Lifecycle tag for market activity tracking
     """
-    from .market_queues import market_tag, log_extra, normalize_market
     from ..services.ibd_industry_service import IBDIndustryService
     from ..services.runtime_preferences_service import is_market_enabled_now
+    from .market_queues import log_extra, market_tag, normalize_market
     _log_extra = log_extra(market)
     effective_market = normalize_market(market) if market is not None else "US"
     activity_lifecycle = activity_lifecycle or "daily_refresh"

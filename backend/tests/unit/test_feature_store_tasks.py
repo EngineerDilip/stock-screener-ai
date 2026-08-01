@@ -13,12 +13,25 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
-from app.database import Base
 from app.config import settings
+from app.database import Base
+from app.domain.relative_strength import (
+    BALANCED_RS_FORMULA_VERSION,
+    LEGACY_RS_FORMULA_VERSION,
+)
+from app.domain.scanning.defaults import (
+    get_bootstrap_scan_profile,
+    get_default_scan_profile,
+)
+from app.infra.db.models.feature_store import (
+    FeatureRun,
+    FeatureRunPointer,
+    StockFeatureDaily,
+)
 from app.interfaces.tasks.feature_store_tasks import (
     BOOTSTRAP_SCAN_COVERAGE_MAX_RETRIES,
-    FEATURE_SNAPSHOT_TRANSIENT_MAX_RETRIES,
     FEATURE_SNAPSHOT_TOTAL_MAX_RETRIES,
+    FEATURE_SNAPSHOT_TRANSIENT_MAX_RETRIES,
     _bootstrap_coverage_total,
     _create_auto_scan_for_published_run,
     _enrich_feature_run_with_ibd_metadata,
@@ -28,18 +41,9 @@ from app.interfaces.tasks.feature_store_tasks import (
     _upsert_feature_run_pointer,
     build_daily_snapshot,
 )
-from app.domain.scanning.defaults import (
-    get_bootstrap_scan_profile,
-    get_default_scan_profile,
-)
-from app.domain.relative_strength import (
-    BALANCED_RS_FORMULA_VERSION,
-    LEGACY_RS_FORMULA_VERSION,
-)
-from app.schemas.universe import UniverseType
-from app.infra.db.models.feature_store import FeatureRun, FeatureRunPointer, StockFeatureDaily
-from app.models.scan_result import Scan
 from app.models.industry import IBDGroupRank, IBDIndustryGroup
+from app.models.scan_result import Scan
+from app.schemas.universe import UniverseType
 from app.services.market_taxonomy_service import MarketTaxonomyEntry
 
 
@@ -322,6 +326,56 @@ def test_build_daily_snapshot_bootstrap_uses_lightweight_scan_profile():
     assert "setup_engine" not in fake_use_case.received_cmd.screener_names
     assert fake_use_case.received_cmd.criteria == bootstrap_defaults["criteria"]
     assert fake_use_case.received_cmd.composite_method == bootstrap_defaults["composite_method"]
+
+
+def test_build_daily_snapshot_bootstrap_uses_balanced_publication_date():
+    fake_use_case = _FakeUseCase()
+
+    with patch(
+        "app.interfaces.tasks.feature_store_tasks._is_market_trading_day",
+        return_value=True,
+    ), patch(
+        "app.services.market_calendar_service.MarketCalendarService.last_completed_trading_day",
+        return_value=date(2026, 4, 10),
+    ), patch(
+        "app.services.bootstrap_publication_date.resolve_bootstrap_publication_date_with_session",
+        return_value=SimpleNamespace(
+            selected_date=date(2026, 4, 9),
+            reason_code="balanced_run_selected",
+        ),
+    ), patch(
+        "app.wiring.bootstrap.get_build_daily_snapshot_use_case",
+        return_value=fake_use_case,
+    ), patch(
+        "app.database.SessionLocal"
+    ), patch(
+        "app.infra.db.uow.SqlUnitOfWork",
+        side_effect=lambda *_args, **_kwargs: _NonSkippingUoW(),
+    ), patch(
+        "app.infra.tasks.progress_sink.CeleryProgressSink",
+        return_value=object(),
+    ), patch(
+        "app.domain.scanning.ports.NeverCancelledToken",
+        return_value=object(),
+    ), patch(
+        "app.services.runtime_preferences_service.is_market_enabled_now",
+        return_value=True,
+    ), patch(
+        "app.interfaces.tasks.feature_store_tasks._create_auto_scan_for_published_run",
+        return_value="auto-scan-001",
+    ):
+        result = _TASK_BODY(
+            _FakeTask(),
+            market="HK",
+            activity_lifecycle="bootstrap",
+            bootstrap_cache_only_if_covered=True,
+            bootstrap_coverage_report={"eligible": True},
+        )
+
+    assert result["status"] == "published"
+    assert result["as_of_date"] == "2026-04-09"
+    assert fake_use_case.received_cmd.as_of_date == date(2026, 4, 9)
+    assert fake_use_case.received_cmd.market == "HK"
 
 
 def test_build_daily_snapshot_bootstrap_lifecycle_without_cache_gate_uses_full_profile():
