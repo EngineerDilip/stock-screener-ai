@@ -15,7 +15,6 @@ from app.services.point_in_time_universe_service import (
     hash_point_in_time_universe_symbols,
 )
 
-
 BOUNDED_HISTORY_POINT_IN_TIME_POLICY = "point_in_time"
 BOUNDED_HISTORY_CURRENT_ACTIVE_FALLBACK_POLICY = "current_active_fallback_v1"
 
@@ -33,7 +32,7 @@ class CurrentActiveUniverse:
         normalized_market = str(market or "").strip().upper()
         symbols = tuple(
             symbol
-            for symbol, in db.query(StockUniverse.symbol)
+            for (symbol,) in db.query(StockUniverse.symbol)
             .filter(
                 StockUniverse.market == normalized_market,
                 StockUniverse.active_filter(),
@@ -57,12 +56,20 @@ class CurrentActiveFallbackUniverseResolver:
         *,
         point_in_time_universe=None,
         current_active_universe=None,
+        track_policies: bool = True,
     ) -> None:
         self._point_in_time_universe = (
             point_in_time_universe or PointInTimeUniverseService()
         )
-        self._current_active_universe = current_active_universe or CurrentActiveUniverse()
+        self._current_active_universe = (
+            current_active_universe or CurrentActiveUniverse()
+        )
+        self._track_policies = bool(track_policies)
         self._policy_by_identity: dict[tuple[str, date], str] = {}
+
+    def _record_policy(self, market: str, as_of_date: date, policy: str) -> None:
+        if self._track_policies:
+            self._policy_by_identity[(market, as_of_date)] = policy
 
     def resolve(
         self,
@@ -81,8 +88,8 @@ class CurrentActiveFallbackUniverseResolver:
         except PointInTimeUniverseUnavailable:
             universe = None
         if universe is not None and universe.symbols:
-            self._policy_by_identity[(normalized_market, as_of_date)] = (
-                BOUNDED_HISTORY_POINT_IN_TIME_POLICY
+            self._record_policy(
+                normalized_market, as_of_date, BOUNDED_HISTORY_POINT_IN_TIME_POLICY
             )
             return universe
 
@@ -91,8 +98,10 @@ class CurrentActiveFallbackUniverseResolver:
             market=normalized_market,
             as_of_date=as_of_date,
         )
-        self._policy_by_identity[(normalized_market, as_of_date)] = (
-            BOUNDED_HISTORY_CURRENT_ACTIVE_FALLBACK_POLICY
+        self._record_policy(
+            normalized_market,
+            as_of_date,
+            BOUNDED_HISTORY_CURRENT_ACTIVE_FALLBACK_POLICY,
         )
         return fallback
 

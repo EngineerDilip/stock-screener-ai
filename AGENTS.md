@@ -22,11 +22,38 @@ npm run lint     # ESLint
 ### Celery Workers (required for scans)
 ```bash
 cd backend
-./start_celery.sh    # Starts both queues
+./start_celery.sh    # Starts all required queues for enabled markets
 
 # Or manually:
-./venv/bin/celery -A app.celery_app worker --pool=solo -Q celery -n general@%h
-./venv/bin/celery -A app.celery_app worker --pool=solo -Q data_fetch -n datafetch@%h
+export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
+export TOKENIZERS_PARALLELISM=false
+export PYTORCH_ENABLE_MPS_FALLBACK=1
+export CELERY_POOL="${CELERY_POOL:-solo}"
+
+SUPPORTED_MARKETS="$(./venv/bin/python - <<'PY'
+from app.tasks.market_queues import SUPPORTED_MARKETS
+print(",".join(SUPPORTED_MARKETS))
+PY
+)"
+export ENABLED_MARKETS="${ENABLED_MARKETS:-$SUPPORTED_MARKETS}"
+
+DATA_FETCH_QUEUES="$(./venv/bin/python - <<'PY'
+from app.tasks.market_queues import all_data_fetch_queues
+print(",".join(all_data_fetch_queues()))
+PY
+)"
+
+./venv/bin/celery -A app.celery_app worker --pool="$CELERY_POOL" -Q celery -n general@%h &
+./venv/bin/celery -A app.celery_app worker --pool="$CELERY_POOL" --concurrency=1 -Q "$DATA_FETCH_QUEUES" -n datafetch-global@%h &
+./venv/bin/celery -A app.celery_app worker --pool="$CELERY_POOL" -Q user_scans_shared -n userscans-shared@%h &
+
+IFS=',' read -ra MARKET_ARRAY <<< "$ENABLED_MARKETS"
+for RAW_MARKET in "${MARKET_ARRAY[@]}"; do
+  MARKET_LOWER="$(echo "$RAW_MARKET" | tr '[:upper:]' '[:lower:]' | xargs)"
+  ./venv/bin/celery -A app.celery_app worker --pool="$CELERY_POOL" -Q "market_jobs_${MARKET_LOWER}" -n "marketjobs-${MARKET_LOWER}@%h" &
+  ./venv/bin/celery -A app.celery_app worker --pool="$CELERY_POOL" -Q "user_scans_${MARKET_LOWER}" -n "userscans-${MARKET_LOWER}@%h" &
+done
+
 ./venv/bin/celery -A app.celery_app beat --loglevel=info  # Scheduler
 ```
 

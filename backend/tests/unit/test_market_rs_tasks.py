@@ -7,8 +7,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy.exc import IntegrityError, OperationalError
-
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
 from app.services.market_rs_inputs import MarketRsInputUnavailable
 from app.services.market_rs_rollout_contracts import (
@@ -19,6 +17,7 @@ from app.services.market_rs_rollout_executor import (
     MarketRsActivationExecutionError,
     MarketRsActivationOutcome,
 )
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 
 def _patch_task_dependencies(monkeypatch):
@@ -265,7 +264,6 @@ def test_bootstrap_balanced_market_rs_uses_rollout_resolved_through_date(
         module,
         "get_market_rs_rollout_service",
         lambda: rollout,
-        raising=False,
     )
     executor.execute.return_value = MarketRsActivationOutcome(
         backfill=BackfillReport(

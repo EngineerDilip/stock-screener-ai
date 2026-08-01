@@ -73,8 +73,7 @@ def test_group_history_universe_falls_back_when_lifecycle_is_unavailable() -> No
 
     assert result.symbols == ("CURRENT",)
     assert (
-        resolver.policy_for("US", day)
-        == GROUP_HISTORY_CURRENT_ACTIVE_FALLBACK_POLICY
+        resolver.policy_for("US", day) == GROUP_HISTORY_CURRENT_ACTIVE_FALLBACK_POLICY
     )
 
 
@@ -93,6 +92,21 @@ def test_group_history_universe_falls_back_when_historical_result_is_empty() -> 
     result = resolver.resolve(object(), market="US", as_of_date=day)
 
     assert result.symbols == ("CURRENT",)
-    assert resolver.policy_counts() == {
-        GROUP_HISTORY_CURRENT_ACTIVE_FALLBACK_POLICY: 1
-    }
+    assert resolver.policy_counts() == {GROUP_HISTORY_CURRENT_ACTIVE_FALLBACK_POLICY: 1}
+
+
+def test_current_active_fallback_resolver_can_disable_policy_tracking() -> None:
+    from app.services.group_history_universe import GroupHistoryUniverseResolver
+
+    day = date(2026, 3, 2)
+    resolver = GroupHistoryUniverseResolver(
+        point_in_time_universe=_Source(_universe(day)),
+        current_active_universe=_Source(_universe(day, "CURRENT")),
+        track_policies=False,
+    )
+
+    result = resolver.resolve(object(), market="US", as_of_date=day)
+
+    assert result.symbols == ("CURRENT",)
+    assert resolver.policy_for("US", day) is None
+    assert resolver.policy_counts() == {}

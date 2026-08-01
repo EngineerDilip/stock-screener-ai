@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from threading import RLock
-from typing import Callable
 
 from app.domain.scanning.ports import MarketRsReader
 from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
@@ -89,7 +89,8 @@ class CanonicalRsRuntime:
                 if self._rollout_service is None:
                     rollout_input_loader = MarketRsInputLoader(
                         point_in_time_universe=CurrentActiveFallbackUniverseResolver(
-                            point_in_time_universe=self.point_in_time_universe_service()
+                            point_in_time_universe=self.point_in_time_universe_service(),
+                            track_policies=False,
                         ),
                         market_calendar=self._market_calendar,
                     )

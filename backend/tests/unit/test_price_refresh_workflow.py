@@ -19,23 +19,25 @@ def test_full_refresh_header_detection_requires_mapping():
         )
     )
 
-    malformed = SimpleNamespace(
-        request=SimpleNamespace(headers=object())
-    )
-    manual = SimpleNamespace(
-        request=SimpleNamespace(headers={"origin": "manual"})
-    )
+    malformed = SimpleNamespace(request=SimpleNamespace(headers=object()))
+    manual = SimpleNamespace(request=SimpleNamespace(headers={"origin": "manual"}))
 
-    assert workflow._should_reject_full_refresh(
-        PriceRefreshMode.FULL,
-        malformed,
-        None,
-    ) is True
-    assert workflow._should_reject_full_refresh(
-        PriceRefreshMode.FULL,
-        manual,
-        None,
-    ) is False
+    assert (
+        workflow._should_reject_full_refresh(
+            PriceRefreshMode.FULL,
+            malformed,
+            None,
+        )
+        is True
+    )
+    assert (
+        workflow._should_reject_full_refresh(
+            PriceRefreshMode.FULL,
+            manual,
+            None,
+        )
+        is False
+    )
 
 
 def test_price_refresh_outcome_serializes_typed_github_metadata():
@@ -149,7 +151,9 @@ def test_github_only_terminal_completion_does_not_warm_benchmarks():
         update_state=MagicMock(),
     )
 
-    result = workflow.run(task=task, mode="bootstrap", market="JP", activity_lifecycle="bootstrap")
+    result = workflow.run(
+        task=task, mode="bootstrap", market="JP", activity_lifecycle="bootstrap"
+    )
 
     assert result["status"] == "completed"
     assert result["source"] == "github"
@@ -168,7 +172,8 @@ def test_github_only_terminal_completion_does_not_warm_benchmarks():
     db.close.assert_called_once()
 
 
-def test_live_refresh_passes_bounded_batch_size_to_runner() -> None:
+def _execute_live_refresh_with_configured_batch_size(batch_size: int) -> MagicMock:
+    from app.config import settings
     from app.services.price_refresh_activity import PriceRefreshActivityReporter
     from app.services.price_refresh_execution import PriceRefreshExecutionSummary
     from app.services.price_refresh_live_runner import PriceRefreshRetryScheduler
@@ -184,6 +189,7 @@ def test_live_refresh_passes_bounded_batch_size_to_runner() -> None:
         PriceRefreshWorkflowDependencies,
     )
 
+    settings.price_refresh_live_batch_size = batch_size
     db = MagicMock()
     price_cache = MagicMock()
     activity_reporter = MagicMock(spec=PriceRefreshActivityReporter)
@@ -254,4 +260,24 @@ def test_live_refresh_passes_bounded_batch_size_to_runner() -> None:
         refresh_plan=plan,
     )
 
-    assert live_runner.run.call_args.kwargs["batch_size"] == 250
+    return live_runner
+
+
+def test_live_refresh_passes_configured_batch_size_to_runner(monkeypatch) -> None:
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "price_refresh_live_batch_size", 137)
+
+    live_runner = _execute_live_refresh_with_configured_batch_size(137)
+
+    assert live_runner.run.call_args.kwargs["batch_size"] == 137
+
+
+def test_live_refresh_clamps_nonpositive_batch_size_to_one(monkeypatch) -> None:
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "price_refresh_live_batch_size", 0)
+
+    live_runner = _execute_live_refresh_with_configured_batch_size(0)
+
+    assert live_runner.run.call_args.kwargs["batch_size"] == 1
