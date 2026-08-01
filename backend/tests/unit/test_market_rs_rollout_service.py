@@ -195,6 +195,52 @@ def test_rollout_service_resolves_bootstrap_through_date_to_nearby_benchmark_dat
     )
 
 
+def test_rollout_service_counts_bootstrap_benchmark_lag_in_market_sessions(
+    db_session,
+    monkeypatch,
+) -> None:
+    requested_date = date(2026, 9, 8)
+    selected_date = date(2026, 9, 4)
+    anchors = {
+        0: selected_date,
+        21: date(2026, 8, 6),
+        63: date(2026, 6, 9),
+        126: date(2026, 3, 9),
+        189: date(2025, 12, 5),
+        252: date(2025, 9, 4),
+    }
+    calendar = MagicMock()
+    calendar.trading_days.return_value = [selected_date, requested_date]
+    calendar.session_anchors.return_value = anchors
+    monkeypatch.setattr(settings, "market_rs_bootstrap_benchmark_max_lag_days", 1)
+    service = _service(calendar=calendar)
+    db_session.add_all(
+        [
+            *(
+                StockPrice(
+                    symbol="^HSI",
+                    date=anchor_date,
+                    close=24500.0,
+                    adj_close=24500.0,
+                )
+                for anchor_date in set(anchors.values())
+            ),
+        ]
+    )
+    db_session.commit()
+
+    resolution = service.resolve_bootstrap_through_date(
+        db_session,
+        market="HK",
+        requested_through_date=requested_date,
+    )
+
+    assert resolution.selected_through_date == selected_date
+    assert resolution.benchmark_through_date == selected_date
+    assert resolution.benchmark_lag_days == 1
+    assert resolution.reason_code == "benchmark_ready_lag"
+
+
 def test_rollout_service_bounds_bootstrap_benchmark_ready_date_search(
     db_session,
     monkeypatch,

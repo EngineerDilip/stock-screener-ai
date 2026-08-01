@@ -148,7 +148,7 @@ def test_group_history_target_uses_balanced_publication_date(monkeypatch):
         db,
         market="US",
         formula_version=BALANCED_RS_FORMULA_VERSION,
-        start_date=date(2026, 6, 27),
+        start_date=date(2026, 6, 25),
         through_date=date(2026, 6, 30),
     )
     repository.get_latest_completed.assert_not_called()

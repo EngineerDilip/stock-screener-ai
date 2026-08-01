@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 
 from sqlalchemy.orm import Session
 
@@ -17,6 +17,8 @@ from app.infra.db.repositories.market_rs_repo import (
     MarketRsFormulaNotConfigured,
     MarketRsRunRepository,
 )
+from app.services.market_calendar_service import MarketCalendarService
+from app.services.market_session_lag import market_session_lag, session_window_start
 
 
 @dataclass(frozen=True)
@@ -64,6 +66,7 @@ def resolve_bootstrap_publication_date(
     requested_date: date,
     formula_version: str | None = None,
     repository: MarketRsRunRepository | None = None,
+    calendar_service: MarketCalendarService | None = None,
     max_lag_days: int | None = None,
 ) -> BootstrapPublicationDateResolution:
     """Align implicit bootstrap stages to the active balanced RS publication.
@@ -99,7 +102,14 @@ def resolve_bootstrap_publication_date(
             reason_code="active_formula_not_balanced",
         )
 
-    window_start = requested_date - timedelta(days=_max_lag_days(max_lag_days))
+    max_lag_sessions = _max_lag_days(max_lag_days)
+    calendar = calendar_service or MarketCalendarService()
+    window_start = session_window_start(
+        calendar,
+        market=normalized_market,
+        through_date=requested_date,
+        max_lag_sessions=max_lag_sessions,
+    )
     completed_runs = repo.list_completed_runs(
         db,
         market=normalized_market,
@@ -123,7 +133,12 @@ def resolve_bootstrap_publication_date(
             selected_date=requested_date,
             formula_version=active_formula,
             market_rs_run_id=getattr(latest_run, "id", None),
-            lag_days=(requested_date - latest_run.as_of_date).days,
+            lag_days=market_session_lag(
+                calendar,
+                market=normalized_market,
+                start_date=latest_run.as_of_date,
+                end_date=requested_date,
+            ),
             reason_code="balanced_run_incompatible",
         )
     if run is None:
@@ -145,8 +160,13 @@ def resolve_bootstrap_publication_date(
         run = latest_run
 
     selected_date = run.as_of_date
-    lag_days = (requested_date - selected_date).days
-    if lag_days < 0 or lag_days > _max_lag_days(max_lag_days):
+    lag_days = market_session_lag(
+        calendar,
+        market=normalized_market,
+        start_date=selected_date,
+        end_date=requested_date,
+    )
+    if lag_days < 0 or lag_days > max_lag_sessions:
         return _resolution(
             market=normalized_market,
             requested_date=requested_date,

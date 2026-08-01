@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 
 from sqlalchemy.orm import Session
 
@@ -16,6 +16,7 @@ from app.services.market_rs_rollout_contracts import (
     MarketRsBootstrapThroughDateResolution,
     normalize_rollout_market,
 )
+from app.services.market_session_lag import market_session_lag, session_window_start
 
 BENCHMARK_READY_DATE_SEARCH_SAFETY_DAYS = 7
 
@@ -35,12 +36,16 @@ class MarketRsBootstrapThroughDateResolver:
     ) -> MarketRsBootstrapThroughDateResolution:
         normalized = normalize_rollout_market(market)
         candidates = tuple(benchmark_registry.get_candidate_symbols(normalized))
-        max_lag_days = max(
+        max_lag_sessions = max(
             0,
             int(settings.market_rs_bootstrap_benchmark_max_lag_days),
         )
-        earliest_candidate_date = requested_through_date - timedelta(
-            days=max_lag_days + BENCHMARK_READY_DATE_SEARCH_SAFETY_DAYS
+        earliest_candidate_date = session_window_start(
+            self.calendar_service,
+            market=normalized,
+            through_date=requested_through_date,
+            max_lag_sessions=max_lag_sessions,
+            fallback_safety_days=BENCHMARK_READY_DATE_SEARCH_SAFETY_DAYS,
         )
         benchmark_through_date = (
             self._latest_benchmark_ready_date(
@@ -72,8 +77,13 @@ class MarketRsBootstrapThroughDateResolver:
                 reason_code="requested_date_ready",
             )
 
-        lag_days = (requested_through_date - benchmark_through_date).days
-        if lag_days > max_lag_days:
+        lag_days = market_session_lag(
+            self.calendar_service,
+            market=normalized,
+            start_date=benchmark_through_date,
+            end_date=requested_through_date,
+        )
+        if lag_days > max_lag_sessions:
             return MarketRsBootstrapThroughDateResolution(
                 market=normalized,
                 requested_through_date=requested_through_date,

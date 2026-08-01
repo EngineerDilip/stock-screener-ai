@@ -27,6 +27,7 @@ EXTRACTED_MODULES = (
     "app/services/market_rs_bootstrap_date_resolver.py",
     "app/services/market_rs_rollout_contracts.py",
     "app/services/market_rs_static_artifact_validator.py",
+    "app/services/market_session_lag.py",
     "app/wiring/canonical_rs_runtime.py",
 )
 

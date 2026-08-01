@@ -73,6 +73,42 @@ def test_bootstrap_publication_date_skips_incompatible_newer_balanced_run() -> N
     assert resolution.reason_code == "balanced_run_selected"
 
 
+def test_bootstrap_publication_date_counts_lag_in_market_sessions() -> None:
+    requested_date = date(2026, 9, 8)
+    selected_date = date(2026, 9, 4)
+    run = SimpleNamespace(
+        id=42,
+        as_of_date=selected_date,
+        diagnostics_json={"price_basis": BALANCED_RS_PRICE_BASIS},
+    )
+
+    def list_completed_runs(_db, **kwargs):
+        return (run,) if kwargs["start_date"] <= selected_date else ()
+
+    repository = SimpleNamespace(
+        active_formula=lambda _db, *, market: BALANCED_RS_FORMULA_VERSION,
+        list_completed_runs=list_completed_runs,
+        get_latest_completed=lambda *_args, **_kwargs: run,
+    )
+    calendar = SimpleNamespace(
+        trading_days=lambda _market, _start, _end: [selected_date, requested_date],
+    )
+
+    resolution = resolve_bootstrap_publication_date(
+        object(),
+        market="US",
+        requested_date=requested_date,
+        repository=repository,
+        calendar_service=calendar,
+        max_lag_days=1,
+    )
+
+    assert resolution.selected_date == selected_date
+    assert resolution.market_rs_run_id == 42
+    assert resolution.lag_days == 1
+    assert resolution.reason_code == "balanced_run_selected"
+
+
 def test_bootstrap_publication_date_keeps_legacy_formula_on_requested_date() -> None:
     calls = []
     repository = SimpleNamespace(
@@ -115,7 +151,7 @@ def test_bootstrap_publication_date_rejects_stale_balanced_run() -> None:
 
     assert resolution.selected_date == date(2026, 4, 10)
     assert resolution.market_rs_run_id == 42
-    assert resolution.lag_days == 9
+    assert resolution.lag_days == 4
     assert resolution.reason_code == "balanced_run_lag_exceeds_policy"
 
 
