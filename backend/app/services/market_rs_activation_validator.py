@@ -8,6 +8,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from celery.exceptions import SoftTimeLimitExceeded
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from app.domain.feature_store.models import RunStatus
@@ -263,10 +265,10 @@ class MarketRsActivationValidator:
 
         bundle_hash = None
         rrg_status = None
-        if latest_run is not None and artifact_policy.requires_static_artifacts:
+        if artifact_policy.requires_static_artifacts:
             if staging_path is None:
                 errors.append("Missing static staging directory for artifact validation.")
-            else:
+            elif latest_run is not None:
                 try:
                     static_result = self.static_validator.validate(
                         db,
@@ -283,6 +285,8 @@ class MarketRsActivationValidator:
                     )
                     rrg_status = static_result.rrg_status
                     errors.extend(static_result.errors)
+                except (SoftTimeLimitExceeded, DBAPIError):
+                    raise
                 except Exception as exc:
                     errors.append(f"Staged static artifact validation failed: {exc}")
         elif latest_run is not None:
@@ -292,14 +296,6 @@ class MarketRsActivationValidator:
                 through_date=through_date,
                 errors=errors,
             )
-        elif (
-            artifact_policy.requires_static_artifacts
-            and (
-                staging_path is None
-                or not (staging_path / "manifest.json").is_file()
-            )
-        ):
-            errors.append(f"Missing staged {STATIC_SITE_SCHEMA_VERSION} manifest.")
 
         return ActivationValidationReport(
             market=normalized,
@@ -349,7 +345,28 @@ class MarketRsActivationValidator:
                 f"({exc.reason_code.value}): {exc.reason}"
             )
             return None
+        except (SoftTimeLimitExceeded, DBAPIError):
+            raise
+        except Exception as exc:
+            errors.append(f"Balanced RRG validation failed: {exc}")
+            return None
         return "available"
+
+    def revalidate_runtime(
+        self,
+        db: Session,
+        *,
+        market: str,
+        through_date: date,
+    ) -> tuple[str, ...]:
+        errors: list[str] = []
+        self._validate_run_and_groups(
+            db,
+            market=market,
+            calculation_date=through_date,
+            errors=errors,
+        )
+        return tuple(dict.fromkeys(errors))
 
     def revalidate_static(
         self,

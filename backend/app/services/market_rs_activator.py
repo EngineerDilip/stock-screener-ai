@@ -32,7 +32,6 @@ from app.services.market_rs_static_artifact_validator import (
     MarketRsStaticArtifactValidator,
 )
 
-
 FeatureRunRepositoryFactory = Callable[[Session], SqlFeatureRunRepository]
 
 
@@ -195,6 +194,13 @@ class MarketRsActivator:
                 raise MarketRsActivationRejected(
                     ("Validated Feature universe changed before activation.",)
                 )
+            runtime_errors = self.validator.revalidate_runtime(
+                db,
+                market=normalized,
+                through_date=validation.through_date,
+            )
+            if runtime_errors:
+                raise MarketRsActivationRejected(runtime_errors)
             self.repository.activate_formula(
                 db,
                 market=normalized,

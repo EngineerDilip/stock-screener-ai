@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import date
 import json
+from datetime import date
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -16,8 +16,10 @@ from app.services.static_groups_rrg_export import (
     StaticGroupsRRGUnavailableError,
     StaticGroupsRRGUnavailableReason,
 )
-from app.services.static_site_export_service import STATIC_SITE_SCHEMA_VERSION
-from app.services.static_site_export_service import SCAN_BUNDLE_SCHEMA_VERSION
+from app.services.static_site_export_service import (
+    SCAN_BUNDLE_SCHEMA_VERSION,
+    STATIC_SITE_SCHEMA_VERSION,
+)
 
 
 def _write_json(path, payload) -> None:
@@ -152,7 +154,7 @@ def test_validate_checks_every_scan_shard_and_requires_exact_row_identity(
         tmp_path,
         second_row_metadata={"market_rs_run_id": None},
     )
-    validator = MarketRsStaticArtifactValidator()
+    validator = MarketRsStaticArtifactValidator(stream_stock_rows=False)
     monkeypatch.setattr(validator, "_validate_group_parity", lambda *a, **k: None)
     monkeypatch.setattr(validator, "_validate_rrg", lambda *a, **k: "available")
 
@@ -187,7 +189,7 @@ def test_load_scan_rows_returns_stream_source_instead_of_materialized_tuple(
     }
     errors: list[str] = []
 
-    scan_rows = MarketRsStaticArtifactValidator()._load_scan_rows(  # noqa: SLF001
+    scan_rows = MarketRsStaticArtifactValidator()._load_scan_rows(
         tmp_path,
         market_dir=market_dir,
         scan_payload=scan_payload,
@@ -247,7 +249,7 @@ def test_stock_parity_allows_audited_rows_excluded_from_canonical_ratings():
     )
     errors: list[str] = []
 
-    MarketRsStaticArtifactValidator()._validate_stock_parity(
+    MarketRsStaticArtifactValidator(stream_stock_rows=False)._validate_stock_parity(
         latest_run=latest_run,
         through_date=date(2026, 4, 10),
         documents=documents,
@@ -257,8 +259,16 @@ def test_stock_parity_allows_audited_rows_excluded_from_canonical_ratings():
     assert errors == []
 
 
-def test_stock_parity_uses_injected_market_rs_row_source():
-    latest_run = SimpleNamespace(id=42, eligible_symbol_count=1, rows=[])
+def test_stock_parity_streams_rows_when_enabled_for_session_like_db():
+    class _LatestRun:
+        id = 42
+        eligible_symbol_count = 1
+
+        @property
+        def rows(self):
+            raise AssertionError("streamed validation must not hydrate run rows")
+
+    latest_run = _LatestRun()
     identity = {
         "rs_formula_version": BALANCED_RS_FORMULA_VERSION,
         "market_rs_run_id": 42,
@@ -290,10 +300,70 @@ def test_stock_parity_uses_injected_market_rs_row_source():
         )
         for _ in range(1)
     )
-    validator = MarketRsStaticArtifactValidator(market_rs_repository=repository)
+    validator = MarketRsStaticArtifactValidator(
+        market_rs_repository=repository,
+        stream_stock_rows=True,
+    )
+    errors: list[str] = []
+    db = object()
+
+    validator._validate_stock_parity(
+        db=db,
+        latest_run=latest_run,
+        through_date=date(2026, 4, 10),
+        documents=documents,
+        errors=errors,
+    )
+
+    assert errors == []
+    repository.iter_stock_rows_for_run.assert_called_once_with(db, run_id=42)
+
+
+def test_stock_parity_uses_latest_run_rows_when_streaming_disabled():
+    latest_run = SimpleNamespace(
+        id=42,
+        eligible_symbol_count=1,
+        rows=[
+            SimpleNamespace(
+                symbol="AAA",
+                overall_rs=90,
+                rs_1m=88,
+                rs_3m=89,
+                rs_12m=91,
+            )
+        ],
+    )
+    identity = {
+        "rs_formula_version": BALANCED_RS_FORMULA_VERSION,
+        "market_rs_run_id": 42,
+        "rs_as_of_date": "2026-04-10",
+        "rs_universe_size": 1,
+    }
+    documents = StaticRsArtifactDocuments(
+        manifest={},
+        groups={},
+        scan_rows=(
+            {
+                "symbol": "AAA",
+                "rs_rating": 90,
+                "rs_rating_1m": 88,
+                "rs_rating_3m": 89,
+                "rs_rating_12m": 91,
+                **identity,
+            },
+        ),
+    )
+    repository = MagicMock()
+    repository.iter_stock_rows_for_run.side_effect = AssertionError(
+        "streaming is disabled for this validation"
+    )
+    validator = MarketRsStaticArtifactValidator(
+        market_rs_repository=repository,
+        stream_stock_rows=False,
+    )
     errors: list[str] = []
 
-    validator._validate_stock_parity(  # noqa: SLF001
+    validator._validate_stock_parity(
         db=MagicMock(),
         latest_run=latest_run,
         through_date=date(2026, 4, 10),
@@ -302,7 +372,7 @@ def test_stock_parity_uses_injected_market_rs_row_source():
     )
 
     assert errors == []
-    repository.iter_stock_rows_for_run.assert_called_once()
+    repository.iter_stock_rows_for_run.assert_not_called()
 
 
 def test_rrg_validation_accepts_market_where_rrg_is_not_enabled(
@@ -381,7 +451,7 @@ def test_validate_accepts_unavailable_groups_for_group_less_market(
     monkeypatch,
 ):
     _staged_bundle(tmp_path, market="DE", groups_available=False)
-    validator = MarketRsStaticArtifactValidator()
+    validator = MarketRsStaticArtifactValidator(stream_stock_rows=False)
     validate_group_parity = MagicMock()
     monkeypatch.setattr(validator, "_validate_group_parity", validate_group_parity)
     monkeypatch.setattr(validator, "_validate_rrg", lambda *a, **k: "not_enabled")

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
-import logging
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -15,7 +15,6 @@ from app.services.preset_screens import (
     PRESET_SCREENS,
     get_preset_chart_symbols,
 )
-
 
 logger = logging.getLogger(__name__)
 CHART_BUNDLE_SCHEMA_VERSION = "static-charts-v1"
@@ -144,11 +143,11 @@ class StaticChartBundleExporter:
                 price_data = self._price_cache.get_many_cached_only(batch, period="2y")
                 fundamentals = self._fundamentals_cache.get_many_cached_only(batch)
                 for symbol in batch:
-                    domain_row = row_by_symbol.get(symbol)
+                    resolved_row = row_by_symbol.get(symbol)
                     emit(
                         symbol,
                         rank=None,
-                        stock_data=item_payload(domain_row)
+                        stock_data=item_payload(resolved_row)
                         or serialized_by_symbol.get(symbol),
                         price_df=price_data.get(symbol),
                         fundamentals_value=fundamentals.get(symbol),

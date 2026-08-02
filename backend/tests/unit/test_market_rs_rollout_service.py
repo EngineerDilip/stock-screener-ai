@@ -8,9 +8,10 @@ from unittest.mock import MagicMock
 
 import pytest
 from celery.exceptions import SoftTimeLimitExceeded
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 from app.config import settings
+from app.domain.feature_store.models import RunStatus
 from app.domain.relative_strength import (
     BALANCED_RS_FORMULA_VERSION,
     BALANCED_RS_PRICE_BASIS,
@@ -19,6 +20,9 @@ from app.domain.relative_strength import (
 from app.models.stock import StockPrice
 from app.services.market_rs_activation_coverage import MarketRsActivationCoverage
 from app.services.market_rs_inputs import MarketRsInputUnavailable
+from app.services.market_rs_rollout_contracts import (
+    MarketRsActivationArtifactPolicy,
+)
 from app.services.market_rs_rollout_service import (
     ActivationValidationReport,
     MarketRsActivationRejected,
@@ -585,6 +589,127 @@ def test_activation_validation_checks_every_required_date(
     assert validation.candidate_count == 2
 
 
+def test_live_activation_validation_records_rrg_builder_failure(monkeypatch):
+    through_date = date(2026, 4, 10)
+    run = SimpleNamespace(
+        id=42,
+        universe_hash="universe-a",
+        eligible_symbol_count=2,
+    )
+    feature_repository = MagicMock()
+    feature_repository.get_run.return_value = SimpleNamespace(
+        id=99,
+        status=RunStatus.PUBLISHED,
+        as_of_date=through_date,
+        universe_hash="feature-a",
+        config={
+            "market": "US",
+            "rs_formula_version": BALANCED_RS_FORMULA_VERSION,
+            "market_rs_run_id": 42,
+            "rs_as_of_date": "2026-04-10",
+            "rs_universe_size": 2,
+        },
+    )
+    service = _service(feature_factory=lambda _db: feature_repository)
+    monkeypatch.setattr(
+        service.validator,
+        "_validate_run_and_groups",
+        lambda *args, **kwargs: run,
+    )
+
+    class _BrokenRRGSource:
+        def __init__(self, **_kwargs):
+            pass
+
+        def build(self, **_kwargs):
+            raise SQLAlchemyError("connection failed")
+
+    monkeypatch.setattr(
+        "app.services.market_rs_activation_validator."
+        "StaticGroupsRRGDatabasePayloadSource",
+        _BrokenRRGSource,
+    )
+
+    validation = service.validate_activation(
+        MagicMock(),
+        coverage=MarketRsActivationCoverage(
+            market="US",
+            through_date=through_date,
+            required_dates=(through_date,),
+        ),
+        feature_run_id=99,
+        static_staging_dir=None,
+        artifact_policy=MarketRsActivationArtifactPolicy.LIVE_RUNTIME,
+    )
+
+    assert validation.ok is False
+    assert validation.errors == ("Balanced RRG validation failed: connection failed",)
+    assert validation.rrg_status is None
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(SoftTimeLimitExceeded(), id="soft-timeout"),
+        pytest.param(
+            OperationalError(
+                "select 1",
+                {},
+                Exception("database connection dropped"),
+            ),
+            id="database-interruption",
+        ),
+    ],
+)
+def test_static_activation_validation_propagates_infrastructure_interruption(
+    monkeypatch,
+    tmp_path,
+    error,
+):
+    through_date = date(2026, 4, 10)
+    run = SimpleNamespace(
+        id=42,
+        universe_hash="universe-a",
+        eligible_symbol_count=2,
+    )
+    feature_repository = MagicMock()
+    feature_repository.get_run.return_value = SimpleNamespace(
+        id=99,
+        status=RunStatus.PUBLISHED,
+        as_of_date=through_date,
+        universe_hash="feature-a",
+        config={
+            "market": "US",
+            "rs_formula_version": BALANCED_RS_FORMULA_VERSION,
+            "market_rs_run_id": 42,
+            "rs_as_of_date": "2026-04-10",
+            "rs_universe_size": 2,
+        },
+    )
+    service = _service(feature_factory=lambda _db: feature_repository)
+    monkeypatch.setattr(
+        service.validator,
+        "_validate_run_and_groups",
+        lambda *args, **kwargs: run,
+    )
+    service.validator.static_validator = MagicMock()
+    service.validator.static_validator.validate.side_effect = error
+
+    with pytest.raises(type(error)) as raised:
+        service.validate_activation(
+            MagicMock(),
+            coverage=MarketRsActivationCoverage(
+                market="US",
+                through_date=through_date,
+                required_dates=(through_date,),
+            ),
+            feature_run_id=99,
+            static_staging_dir=tmp_path,
+        )
+
+    assert raised.value is error
+
+
 def test_backfill_completes_without_groups_when_market_lacks_capability(monkeypatch):
     calculation_date = date(2026, 4, 10)
     run = SimpleNamespace(id=42, eligible_symbol_count=2)
@@ -868,6 +993,13 @@ def test_successful_activation_revalidates_then_commits_both_pointers(
     ).sha256
     revalidate = MagicMock(return_value=())
     monkeypatch.setattr(service.validator, "revalidate_static", revalidate)
+    runtime_revalidate = MagicMock(return_value=())
+    monkeypatch.setattr(
+        service.validator,
+        "revalidate_runtime",
+        runtime_revalidate,
+        raising=False,
+    )
     validation = ActivationValidationReport(
         market="US",
         formula_version=BALANCED_RS_FORMULA_VERSION,
@@ -897,3 +1029,75 @@ def test_successful_activation_revalidates_then_commits_both_pointers(
         pointer_key="latest_published_market:US",
     )
     revalidate.assert_called_once()
+    runtime_revalidate.assert_called_once_with(
+        db,
+        market="US",
+        through_date=date(2026, 4, 10),
+    )
+
+
+def test_live_activation_revalidates_runtime_groups_before_commit(monkeypatch):
+    through_date = date(2026, 4, 10)
+    repository = MagicMock()
+    repository.get_completed_exact.return_value = SimpleNamespace(
+        id=42,
+        universe_hash="universe-a",
+        eligible_symbol_count=2,
+    )
+    feature_repository = MagicMock()
+    feature_repository.get_run.return_value = SimpleNamespace(
+        id=99,
+        status=SimpleNamespace(value="published"),
+        universe_hash="feature-a",
+        as_of_date=through_date,
+        config={
+            "market": "US",
+            "rs_formula_version": BALANCED_RS_FORMULA_VERSION,
+            "market_rs_run_id": 42,
+            "rs_as_of_date": "2026-04-10",
+            "rs_universe_size": 2,
+        },
+    )
+    service = _service(
+        repository=repository,
+        feature_factory=lambda _db: feature_repository,
+    )
+    db = MagicMock()
+
+    def reject_missing_group_rows(*_args, errors, **_kwargs):
+        errors.append("Missing eligible Group rows for 2026-04-10: Software.")
+        return repository.get_completed_exact.return_value
+
+    monkeypatch.setattr(
+        service.validator,
+        "_validate_run_and_groups",
+        reject_missing_group_rows,
+    )
+    validation = ActivationValidationReport(
+        market="US",
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+        through_date=through_date,
+        first_valid_date=through_date,
+        candidate_count=1,
+        latest_market_rs_run_id=42,
+        latest_universe_hash="universe-a",
+        feature_run_id=99,
+        feature_universe_hash="feature-a",
+        static_bundle_sha256=None,
+        errors=(),
+        artifact_policy=MarketRsActivationArtifactPolicy.LIVE_RUNTIME,
+    )
+
+    with pytest.raises(MarketRsActivationRejected, match="Missing eligible Group rows"):
+        service.activate(
+            db,
+            market="US",
+            formula_version=BALANCED_RS_FORMULA_VERSION,
+            feature_run_id=99,
+            validation=validation,
+            static_staging_dir=None,
+        )
+
+    repository.activate_formula.assert_not_called()
+    db.commit.assert_not_called()
+    db.rollback.assert_called_once_with()

@@ -16,8 +16,8 @@ from app.domain.relative_strength import (
 from app.services.market_rs_activation_coverage import MarketRsActivationCoverage
 from app.services.market_rs_rollout_contracts import (
     ActivationValidationReport,
-    MarketRsActivationArtifactPolicy,
     BackfillReport,
+    MarketRsActivationArtifactPolicy,
 )
 from app.services.market_rs_rollout_executor import (
     MarketRsActivationExecutionError,
@@ -209,12 +209,40 @@ def test_live_activation_uses_report_policy_without_static_staging_dir() -> None
     assert outcome.static_staging_dir is None
     static_exporter.assert_not_called()
     assert rollout.artifact_policy is MarketRsActivationArtifactPolicy.LIVE_RUNTIME
-    assert "require_static_artifacts" not in rollout.activation_kwargs
+    assert rollout.activation_kwargs["static_staging_dir"] is None
     assert rollout.activation_kwargs["validation"].artifact_policy is (
         MarketRsActivationArtifactPolicy.LIVE_RUNTIME
     )
     assert events == ["backfill", "feature", "validate", "activate", "publish_live"]
     assert db.expunge_all.call_count >= 1
+
+
+def test_executor_rejects_validation_policy_mismatch() -> None:
+    class _PolicyMismatchRollout(_RolloutFake):
+        def validate_activation(self, _db, **_kwargs):
+            self.validation_requested = True
+            return self.validation
+
+    rollout = _PolicyMismatchRollout(validation=_validation())
+    executor = MarketRsActivationExecutor(
+        rollout_service=rollout,
+        feature_snapshot_builder=lambda **_kwargs: 99,
+        static_exporter=MagicMock(),
+        live_group_publisher=MagicMock(),
+    )
+
+    with pytest.raises(MarketRsActivationExecutionError, match="artifact policy"):
+        executor.execute(
+            MagicMock(),
+            request=MarketRsActivationRequest(
+                market="US",
+                through_date=date(2026, 7, 29),
+                artifact_policy=MarketRsActivationArtifactPolicy.LIVE_RUNTIME,
+            ),
+        )
+
+    assert rollout.validation_requested is True
+    assert rollout.activation_requested is False
 
 
 def test_executor_stops_before_publication_when_backfill_failed(tmp_path: Path) -> None:

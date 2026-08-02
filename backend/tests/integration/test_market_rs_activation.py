@@ -164,6 +164,9 @@ def test_activation_switches_market_and_feature_pointers_in_one_commit(
     monkeypatch.setattr(
         service.validator, "revalidate_static", lambda *args, **kwargs: ()
     )
+    monkeypatch.setattr(
+        service.validator, "revalidate_runtime", lambda *args, **kwargs: ()
+    )
 
     service.activate(
         db_session,
@@ -203,6 +206,9 @@ def test_activation_invalidates_group_cache_after_commit(
     monkeypatch.setattr(
         service.validator, "revalidate_static", lambda *args, **kwargs: ()
     )
+    monkeypatch.setattr(
+        service.validator, "revalidate_runtime", lambda *args, **kwargs: ()
+    )
     invalidations: list[tuple[str, bool]] = []
     monkeypatch.setattr(
         activation_module,
@@ -240,6 +246,9 @@ def test_failure_after_market_pointer_flush_rolls_back_both_pointers(
     ).sha256
     monkeypatch.setattr(
         service.validator, "revalidate_static", lambda *args, **kwargs: ()
+    )
+    monkeypatch.setattr(
+        service.validator, "revalidate_runtime", lambda *args, **kwargs: ()
     )
     invalidations: list[str] = []
     monkeypatch.setattr(
@@ -314,6 +323,11 @@ def test_shared_executor_activates_exact_group_and_history_identity(
     monkeypatch.setattr(
         service.validator,
         "revalidate_static",
+        lambda *args, **kwargs: (),
+    )
+    monkeypatch.setattr(
+        service.validator,
+        "revalidate_runtime",
         lambda *args, **kwargs: (),
     )
     invalidations = MagicMock()

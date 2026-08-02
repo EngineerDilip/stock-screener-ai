@@ -1,12 +1,18 @@
-"""Dependency-free runtime diagnostics for long-running worker stages."""
+"""Runtime diagnostics for long-running worker stages."""
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
+import gc
+import logging
 import resource
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+
+from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 
 def _max_rss_mb() -> float:
@@ -53,3 +59,19 @@ def log_runtime_stage(logger, name: str, **extra) -> Iterator[None]:
                 **extra,
             },
         )
+
+
+def release_session_memory(
+    db: Session,
+    *,
+    stage: str,
+    collect: bool = True,
+) -> None:
+    """Detach ORM state between heavy pipeline stages."""
+    try:
+        db.expire_all()
+        db.expunge_all()
+    except Exception:
+        logger.debug("Session cleanup failed after %s", stage, exc_info=True)
+    if collect:
+        gc.collect()

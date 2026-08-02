@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import gc
-import logging
 from datetime import date
 
 from celery.exceptions import SoftTimeLimitExceeded
@@ -29,17 +27,7 @@ from app.services.market_rs_rollout_contracts import (
     normalize_rollout_market,
 )
 from app.services.market_rs_snapshot_service import MarketRsSnapshotService
-
-logger = logging.getLogger(__name__)
-
-
-def _release_backfill_date_memory(db: Session) -> None:
-    try:
-        db.expire_all()
-        db.expunge_all()
-    except Exception:
-        logger.debug("Market RS backfill session cleanup failed", exc_info=True)
-    gc.collect()
+from app.services.runtime_diagnostics import release_session_memory
 
 
 class MarketRsBackfillService:
@@ -246,7 +234,7 @@ class MarketRsBackfillService:
                         },
                     )
                 )
-                _release_backfill_date_memory(db)
+                release_session_memory(db, stage="backfill_date")
                 continue
             stage = "stock_calculation"
             try:
@@ -292,10 +280,10 @@ class MarketRsBackfillService:
                         group_row_count=len(groups),
                     )
                 )
-                _release_backfill_date_memory(db)
+                release_session_memory(db, stage="backfill_date")
             except (SoftTimeLimitExceeded, DBAPIError):
                 db.rollback()
-                _release_backfill_date_memory(db)
+                release_session_memory(db, stage="backfill_date")
                 raise
             except Exception as exc:
                 db.rollback()
@@ -324,7 +312,7 @@ class MarketRsBackfillService:
                         diagnostics=diagnostics,
                     )
                 )
-                _release_backfill_date_memory(db)
+                release_session_memory(db, stage="backfill_date")
 
         completed = tuple(item for item in results if item.status == "completed")
         failed = tuple(item for item in results if item.status == "failed")

@@ -11,6 +11,7 @@ Other test files outside this directory can import these fakes directly::
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -29,7 +30,6 @@ from app.domain.feature_store.models import (
     RunType,
     validate_transition,
 )
-from collections.abc import Sequence
 from app.domain.feature_store.ports import FeatureRunRepository, FeatureStoreRepository
 from app.domain.feature_store.quality import DQInputs
 from app.domain.scanning.models import (
@@ -49,7 +49,6 @@ from app.domain.scanning.ports import (
     UniverseRepository,
 )
 from app.scanners.base_screener import StockData
-
 
 # ---------------------------------------------------------------------------
 # Mutable ORM-like test records
@@ -837,7 +836,10 @@ class FakeFeatureStoreRepository(FeatureStoreRepository):
             raise EntityNotFoundError("FeatureRun", run_id)
         rows = self._rows[run_id]
         items = tuple(
-            _make_scan_result_from_feature_row(r)
+            _make_scan_result_from_feature_row(
+                r,
+                include_setup_payload=include_setup_payload,
+            )
             for r in rows
         )
         p = spec.page
@@ -894,7 +896,10 @@ class FakeFeatureStoreRepository(FeatureStoreRepository):
             raise EntityNotFoundError("FeatureRun", run_id)
         for r in self._rows[run_id]:
             if r.symbol == symbol:
-                return _make_scan_result_from_feature_row(r)
+                return _make_scan_result_from_feature_row(
+                    r,
+                    include_setup_payload=include_setup_payload,
+                )
         return None
 
     def get_peers_by_industry_for_run(
@@ -936,7 +941,10 @@ class FakeFeatureStoreRepository(FeatureStoreRepository):
         if run_id not in self._rows:
             raise EntityNotFoundError("FeatureRun", run_id)
         return tuple(
-            _make_scan_result_from_feature_row(r)
+            _make_scan_result_from_feature_row(
+                r,
+                include_setup_payload=include_setup_payload,
+            )
             for r in self._rows[run_id]
         )
 
@@ -1119,7 +1127,11 @@ class FakeUnitOfWork(UnitOfWork):
 # ---------------------------------------------------------------------------
 
 
-def _make_scan_result_from_feature_row(row: FeatureRow) -> ScanResultItemDomain:
+def _make_scan_result_from_feature_row(
+    row: FeatureRow,
+    *,
+    include_setup_payload: bool = True,
+) -> ScanResultItemDomain:
     """Convert a FeatureRow to a ScanResultItemDomain for fake bridge method.
 
     Propagates all metric/classification fields from details to
@@ -1140,6 +1152,8 @@ def _make_scan_result_from_feature_row(row: FeatureRow) -> ScanResultItemDomain:
         "details",
     }
     for key, val in d.items():
+        if not include_setup_payload and key in {"se_explain", "se_candidates"}:
+            continue
         if key not in _SKIP_KEYS:
             extended[key] = val
     return ScanResultItemDomain(

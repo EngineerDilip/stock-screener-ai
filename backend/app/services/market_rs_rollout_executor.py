@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import gc
 import logging
 from dataclasses import dataclass
 from datetime import date
@@ -23,7 +22,7 @@ from app.services.market_rs_rollout_contracts import (
     MarketRsActivationArtifactPolicy,
     normalize_rollout_market,
 )
-from app.services.runtime_diagnostics import log_runtime_stage
+from app.services.runtime_diagnostics import log_runtime_stage, release_session_memory
 
 logger = logging.getLogger(__name__)
 
@@ -137,15 +136,6 @@ def validate_static_staging_directory(path: Path) -> Path:
     return resolved
 
 
-def _release_session_memory(db: Session, *, stage: str) -> None:
-    try:
-        db.expire_all()
-        db.expunge_all()
-    except Exception:
-        logger.debug("Session cleanup failed after %s", stage, exc_info=True)
-    gc.collect()
-
-
 class MarketRsActivationExecutor:
     def __init__(
         self,
@@ -210,7 +200,7 @@ class MarketRsActivationExecutor:
                 "One or more required backfill dates failed; repair the reported "
                 "dates before activation"
             )
-        _release_session_memory(db, stage="backfill")
+        release_session_memory(db, stage="backfill")
 
         with log_runtime_stage(
             logger,
@@ -223,7 +213,7 @@ class MarketRsActivationExecutor:
                 market=market,
                 through_date=request.through_date,
             )
-        _release_session_memory(db, stage="feature_snapshot")
+        release_session_memory(db, stage="feature_snapshot")
 
         if request.artifact_policy.requires_static_artifacts:
             assert staging_dir is not None
@@ -240,7 +230,7 @@ class MarketRsActivationExecutor:
                     feature_run_id=feature_run_id,
                     static_staging_dir=staging_dir,
                 )
-            _release_session_memory(db, stage="static_export")
+            release_session_memory(db, stage="static_export")
 
         with log_runtime_stage(
             logger,
@@ -261,7 +251,13 @@ class MarketRsActivationExecutor:
             raise MarketRsActivationExecutionError(
                 "Activation validation failed: " + "; ".join(validation.errors)
             )
-        _release_session_memory(db, stage="validation")
+        if validation.artifact_policy is not request.artifact_policy:
+            raise MarketRsActivationExecutionError(
+                "Validation report artifact policy "
+                f"{validation.artifact_policy.value} does not match the requested "
+                f"policy {request.artifact_policy.value}"
+            )
+        release_session_memory(db, stage="validation")
         with log_runtime_stage(
             logger,
             "market_rs.activation.commit",
@@ -278,7 +274,7 @@ class MarketRsActivationExecutor:
                 validation=validation,
                 static_staging_dir=staging_dir,
             )
-        _release_session_memory(db, stage="activation")
+        release_session_memory(db, stage="activation")
         identity = GroupSnapshotIdentity(
             market=market,
             as_of_date=request.through_date,

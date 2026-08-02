@@ -230,8 +230,9 @@ def test_bootstrap_balanced_market_rs_requires_successful_activation(monkeypatch
             feature_universe_hash="universe",
             static_bundle_sha256="bundle",
             errors=(),
+            artifact_policy=MarketRsActivationArtifactPolicy.LIVE_RUNTIME,
         ),
-        static_staging_dir="stage",
+        static_staging_dir=None,
     )
 
     result = module.bootstrap_balanced_market_rs.run(
@@ -307,8 +308,9 @@ def test_bootstrap_balanced_market_rs_uses_rollout_resolved_through_date(
             feature_universe_hash="universe",
             static_bundle_sha256="bundle",
             errors=(),
+            artifact_policy=MarketRsActivationArtifactPolicy.LIVE_RUNTIME,
         ),
-        static_staging_dir="stage",
+        static_staging_dir=None,
     )
 
     module.bootstrap_balanced_market_rs.run(

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date
 import hashlib
 import json
 import math
+from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -72,9 +72,10 @@ class MarketRsStaticArtifactValidator:
         self,
         *,
         market_rs_repository: MarketRsRunRepository | None = None,
+        stream_stock_rows: bool = True,
     ) -> None:
         self.market_rs_repository = market_rs_repository or MarketRsRunRepository()
-        self._explicit_market_rs_repository = market_rs_repository is not None
+        self.stream_stock_rows = stream_stock_rows
 
     @staticmethod
     def _json_file(path: Path) -> dict[str, Any]:
@@ -420,18 +421,24 @@ class MarketRsStaticArtifactValidator:
         documents: StaticRsArtifactDocuments,
         errors: list[str],
     ) -> None:
-        if db is not None and (
-            self._explicit_market_rs_repository or isinstance(db, Session)
-        ):
-            stock_by_symbol = {
-                row.symbol: row
-                for row in self.market_rs_repository.iter_stock_rows_for_run(
-                    db,
-                    run_id=latest_run.id,
+        if self.stream_stock_rows:
+            if db is None:
+                errors.append(
+                    "Cannot stream canonical Market RS rows without a database session."
                 )
-            }
+                stock_by_symbol = {}
+            else:
+                stock_by_symbol = {
+                    row.symbol: row
+                    for row in self.market_rs_repository.iter_stock_rows_for_run(
+                        db,
+                        run_id=latest_run.id,
+                    )
+                }
         else:
-            stock_by_symbol = {row.symbol: row for row in latest_run.rows}
+            stock_by_symbol = {
+                row.symbol: row for row in latest_run.rows
+            }
         stock_fields = {
             "rs_rating": "overall_rs",
             "rs_rating_1m": "rs_1m",
