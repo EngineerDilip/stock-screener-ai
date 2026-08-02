@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, fields, replace
-from typing import Iterable
 
+from .calendar_policy import CalendarProvider
 from .mic import MicFacts
 
 CATALOG_VERSION = "2026-05-17.v1"
@@ -138,7 +139,7 @@ class MarketCatalogEntry:
             "mics": list(self.mics),
             "supported_currencies": list(self.supported_currencies),
             "default_currency": self.default_currency,
-            "mic_facts": [asdict(facts) for facts in self.mic_facts],
+            "mic_facts": [facts.as_runtime_payload() for facts in self.mic_facts],
             # Compatibility fields for existing frontend/runtime consumers.
             "currency": self.currency,
             "timezone": self.timezone,
@@ -238,6 +239,7 @@ def _mic_facts(
     default_currency: str,
     calendar_id: str | None = None,
     provider_calendar_id: str | None = None,
+    calendar_provider: CalendarProvider = CalendarProvider.EXCHANGE_CALENDARS,
 ) -> MicFacts:
     return MicFacts(
         mic=mic,
@@ -245,6 +247,7 @@ def _mic_facts(
         timezone=timezone,
         default_currency=default_currency,
         provider_calendar_id=provider_calendar_id,
+        calendar_provider=calendar_provider,
     )
 
 
@@ -341,11 +344,14 @@ MARKET_CATALOG = MarketCatalog(
                     timezone="Asia/Kolkata",
                     default_currency="INR",
                     provider_calendar_id="NSE",
+                    calendar_provider=CalendarProvider.PANDAS_MARKET_CALENDARS,
                 ),
                 _mic_facts(
                     "XBOM",
                     timezone="Asia/Kolkata",
                     default_currency="INR",
+                    provider_calendar_id="BSE",
+                    calendar_provider=CalendarProvider.PANDAS_MARKET_CALENDARS,
                 ),
             ),
             exchanges=("NSE", "XNSE", "BSE", "XBOM"),
@@ -360,6 +366,8 @@ MARKET_CATALOG = MarketCatalog(
                     "XTKS",
                     timezone="Asia/Tokyo",
                     default_currency="JPY",
+                    provider_calendar_id="JPX",
+                    calendar_provider=CalendarProvider.PANDAS_MARKET_CALENDARS,
                 ),
             ),
             exchanges=("TSE", "JPX", "XTKS"),

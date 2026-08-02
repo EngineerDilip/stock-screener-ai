@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+from app.domain.markets.calendar_policy import calendar_session_probe_expectations
 from app.services.governance.launch_gates import (
     GateContext,
     GateStatus,
@@ -126,6 +127,15 @@ class TestSelfCheckGates:
             "AU",
             "MY",
         ]
+        expected_probes = calendar_session_probe_expectations()
+        assert g3.metrics["weekday_holiday_probes"] == {
+            market: {
+                probe_day.isoformat(): expected
+                for probe_day, expected in probes.items()
+            }
+            for market, probes in expected_probes.items()
+        }
+        assert "pandas-market-calendars" in g3.metrics["calendar_dependency_versions"]
 
     def test_g8_observability_passes_with_recent_drill(self, tmp_path):
         root = _make_docs_root(tmp_path)

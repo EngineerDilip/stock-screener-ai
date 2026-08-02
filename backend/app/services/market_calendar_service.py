@@ -2,17 +2,29 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable, Mapping
 from datetime import date, datetime, timedelta
+from importlib import metadata
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from ..domain.markets.calendar_policy import (
+    DEFAULT_CALENDAR_SESSION_OVERRIDES,
+    CalendarProvider,
+    CalendarSessionOverride,
+)
 from ..domain.markets.catalog import (
     MarketCatalog,
     MarketCatalogError,
     get_market_catalog,
 )
 from ..domain.markets.mic import MicFacts
+from .market_calendar_adapters import (
+    CalendarScheduleUnavailable,
+    MarketCalendarAdapter,
+    RawMarketCalendarAdapter,
+)
 
 try:
     import exchange_calendars as xcals  # type: ignore
@@ -26,20 +38,40 @@ except ModuleNotFoundError:  # pragma: no cover - runtime guard
 
 
 class MarketCalendarService:
-    """Unified market calendar contract backed by exchange_calendars."""
+    """Unified market calendar contract backed by provider-specific calendars."""
 
     WEEKDAY_BOUNDS_FALLBACK_MARKETS = frozenset({"CN", "SG"})
 
     def __init__(
         self,
-        calendar_provider=None,
+        calendar_providers: Mapping[CalendarProvider, Callable[[str], object]]
+        | None = None,
         market_catalog: MarketCatalog | None = None,
+        session_overrides: Iterable[CalendarSessionOverride] | None = None,
     ):
         self._market_catalog = market_catalog or get_market_catalog()
-        self._calendar_provider = calendar_provider
-        self._xcals_provider = xcals.get_calendar if xcals is not None else None
-        self._pmc_provider = pmc.get_calendar if pmc is not None else None
-        self._calendar_cache: dict[str, object] = {}
+        self._calendar_providers: dict[
+            CalendarProvider,
+            Callable[[str], object] | None,
+        ] = {
+            CalendarProvider.EXCHANGE_CALENDARS: (
+                xcals.get_calendar if xcals is not None else None
+            ),
+            CalendarProvider.PANDAS_MARKET_CALENDARS: (
+                pmc.get_calendar if pmc is not None else None
+            ),
+        }
+        self._calendar_providers.update(calendar_providers or {})
+        self._session_overrides = self._normalize_session_overrides(
+            (
+                *DEFAULT_CALENDAR_SESSION_OVERRIDES,
+                *(session_overrides or ()),
+            )
+        )
+        self._calendar_cache: dict[
+            tuple[CalendarProvider, str, str],
+            MarketCalendarAdapter,
+        ] = {}
 
     def normalize_market(self, market: str | None) -> str:
         try:
@@ -82,62 +114,170 @@ class MarketCalendarService:
     ) -> str | None:
         return self._mic_facts(market, mic=mic).provider_calendar_id
 
+    def calendar_provider(
+        self,
+        market: str,
+        *,
+        mic: str | None = None,
+    ) -> CalendarProvider:
+        return self._calendar_provider_for_facts(self._mic_facts(market, mic=mic))
+
+    def calendar_metadata(
+        self,
+        market: str,
+        *,
+        mic: str | None = None,
+    ) -> dict[str, str | None]:
+        facts = self._mic_facts(market, mic=mic)
+        provider = self._calendar_provider_for_facts(facts)
+        return {
+            "market": self.normalize_market(market),
+            "calendar_id": facts.calendar_id,
+            "provider_calendar_id": facts.provider_calendar_id or facts.calendar_id,
+            "calendar_provider": provider.value,
+            "provider_package_version": self._provider_version(provider),
+        }
+
     def default_currency(self, market: str, *, mic: str | None = None) -> str:
         return self._mic_facts(market, mic=mic).default_currency
 
-    def _get_calendar(self, market: str, *, mic: str | None = None):
+    def _get_calendar(
+        self, market: str, *, mic: str | None = None
+    ) -> MarketCalendarAdapter:
         normalized = self.normalize_market(market)
         facts = self._mic_facts(normalized, mic=mic)
         calendar_id = facts.calendar_id
         provider_calendar_id = facts.provider_calendar_id or calendar_id
-        provider = self._calendar_provider
-        uses_pmc_provider = False
+        provider_engine = self._calendar_provider_for_facts(facts)
+        provider = self._calendar_providers.get(provider_engine)
         if provider is None:
-            uses_pmc_provider = normalized == "IN"
-            provider = self._pmc_provider if uses_pmc_provider else self._xcals_provider
-        if provider is None:
-            required_package = (
-                "pandas_market_calendars" if uses_pmc_provider else "exchange_calendars"
+            raise RuntimeError(
+                f"{provider_engine.value} is required for MarketCalendarService"
             )
-            raise RuntimeError(f"{required_package} is required for MarketCalendarService")
-        if calendar_id not in self._calendar_cache:
-            self._calendar_cache[calendar_id] = provider(provider_calendar_id)
-        return self._calendar_cache[calendar_id]
+        cache_key = (provider_engine, calendar_id, provider_calendar_id)
+        if cache_key not in self._calendar_cache:
+            self._calendar_cache[cache_key] = RawMarketCalendarAdapter(
+                provider(provider_calendar_id),
+                cache_namespace=(
+                    f"{provider_engine.value}:{calendar_id}:{provider_calendar_id}"
+                ),
+            )
+        return self._calendar_cache[cache_key]
 
     @staticmethod
-    def _schedule_for_range(calendar: object, *, start_day: date, end_day: date) -> pd.DataFrame:
-        schedule_attr = getattr(calendar, "schedule", None)
-        start_ts = pd.Timestamp(start_day)
-        end_ts = pd.Timestamp(end_day)
-        if callable(schedule_attr):
-            return schedule_attr(start_date=start_ts, end_date=end_ts)
-        if hasattr(schedule_attr, "loc"):
-            return schedule_attr.loc[start_ts:end_ts]
-        raise TypeError("Calendar object does not expose a usable schedule")
+    def _normalize_session_overrides(
+        overrides: Iterable[CalendarSessionOverride],
+    ) -> dict[str, dict[date, bool]]:
+        normalized: dict[str, dict[date, bool]] = {}
+        for override in overrides:
+            if override.is_trading_day:
+                raise ValueError(
+                    "positive trading-day overrides are not supported without "
+                    "effective session bounds"
+                )
+            normalized.setdefault(override.normalized_market(), {})[override.day] = (
+                override.is_trading_day
+            )
+        return normalized
 
-    def _is_session(self, calendar: object, session: pd.Timestamp) -> bool:
-        is_session = getattr(calendar, "is_session", None)
-        if callable(is_session):
-            return bool(is_session(session))
-        return not self._schedule_for_range(
-            calendar,
-            start_day=session.date(),
-            end_day=session.date(),
-        ).empty
+    @staticmethod
+    def _calendar_provider_for_facts(facts: MicFacts) -> CalendarProvider:
+        return facts.calendar_provider
 
-    def _previous_session(self, calendar: object, session: pd.Timestamp) -> pd.Timestamp:
-        previous_session = getattr(calendar, "previous_session", None)
-        if callable(previous_session):
-            return previous_session(session)
+    @staticmethod
+    def _provider_version(provider_engine: CalendarProvider) -> str | None:
+        try:
+            return metadata.version(provider_engine.package_name)
+        except metadata.PackageNotFoundError:
+            return None
 
-        schedule = self._schedule_for_range(
-            calendar,
-            start_day=(session - pd.Timedelta(days=31)).date(),
-            end_day=(session - pd.Timedelta(days=1)).date(),
+    def _override_for_day(self, market: str, day: date) -> bool | None:
+        normalized = self.normalize_market(market)
+        return self._session_overrides.get(normalized, {}).get(day)
+
+    def _apply_session_overrides(
+        self,
+        market: str,
+        sessions: Iterable[date],
+        *,
+        start: date,
+        end: date,
+    ) -> list[date]:
+        normalized = self.normalize_market(market)
+        effective_sessions = set(sessions)
+        for override_day, is_trading_day in self._session_overrides.get(
+            normalized,
+            {},
+        ).items():
+            if start <= override_day <= end and not is_trading_day:
+                effective_sessions.discard(override_day)
+        return sorted(effective_sessions)
+
+    def _weekday_trading_days(self, start: date, end: date) -> list[date]:
+        days: list[date] = []
+        candidate = start
+        while candidate <= end:
+            if self._is_weekday(candidate):
+                days.append(candidate)
+            candidate += timedelta(days=1)
+        return days
+
+    def _trading_days_from_weekday_bounds_fallback(
+        self,
+        market: str,
+        start: date,
+        end: date,
+        exc: Exception,
+    ) -> list[date] | None:
+        if market not in self.WEEKDAY_BOUNDS_FALLBACK_MARKETS:
+            return None
+        if not (
+            self._is_calendar_bounds_error(exc)
+            or isinstance(exc, CalendarScheduleUnavailable)
+        ):
+            return None
+        return self._apply_session_overrides(
+            market,
+            self._weekday_trading_days(start, end),
+            start=start,
+            end=end,
         )
-        if schedule.empty:
-            raise ValueError(f"No previous session available before {session.date().isoformat()}")
-        return pd.Timestamp(schedule.index[-1])
+
+    def _extend_with_weekday_bounds_fallback(
+        self,
+        market: str,
+        sessions: Iterable[date],
+        *,
+        start: date,
+        end: date,
+        first_provider_session: date | None,
+        last_provider_session: date | None,
+    ) -> list[date]:
+        session_days = set(sessions)
+        if market in self.WEEKDAY_BOUNDS_FALLBACK_MARKETS:
+            if first_provider_session is not None and start < first_provider_session:
+                prefix_end = min(end, first_provider_session - timedelta(days=1))
+                session_days.update(self._weekday_trading_days(start, prefix_end))
+            if last_provider_session is not None and last_provider_session < end:
+                suffix_start = max(start, last_provider_session + timedelta(days=1))
+                session_days.update(self._weekday_trading_days(suffix_start, end))
+        return sorted(session_days)
+
+    def _previous_effective_session_date(
+        self,
+        market: str,
+        day: date,
+        *,
+        mic: str | None = None,
+    ) -> date:
+        start = day - timedelta(days=370)
+        end = day - timedelta(days=1)
+        sessions = self.trading_days(market, start, end, mic=mic)
+        if sessions:
+            return sessions[-1]
+        raise ValueError(
+            f"No previous effective trading session available before {day.isoformat()}"
+        )
 
     @staticmethod
     def _is_calendar_bounds_error(exc: Exception) -> bool:
@@ -148,6 +288,10 @@ class MarketCalendarService:
             or "out of bounds" in message
             or "last session" in message
             or "first session" in message
+            or "latest date" in message
+            or "earliest date" in message
+            or "last date" in message
+            or "first date" in message
         )
 
     @staticmethod
@@ -161,6 +305,24 @@ class MarketCalendarService:
             candidate -= timedelta(days=1)
         return candidate
 
+    def _last_completed_from_weekday_bounds_fallback(
+        self,
+        market: str,
+        current_day: date,
+        market_now: datetime,
+        exc: Exception,
+    ) -> date | None:
+        if market not in self.WEEKDAY_BOUNDS_FALLBACK_MARKETS:
+            return None
+        if not (
+            self._is_calendar_bounds_error(exc)
+            or isinstance(exc, CalendarScheduleUnavailable)
+        ):
+            return None
+        if self._is_weekday(current_day) and market_now.time().hour >= 16:
+            return current_day
+        return self._previous_weekday(current_day)
+
     def is_trading_day(
         self,
         market: str,
@@ -170,13 +332,16 @@ class MarketCalendarService:
     ) -> bool:
         normalized = self.normalize_market(market)
         candidate_day = day or self.market_now(normalized, mic=mic).date()
+        override = self._override_for_day(normalized, candidate_day)
+        if override is not None:
+            return override
         try:
             calendar = self._get_calendar(normalized, mic=mic)
-            return self._is_session(calendar, pd.Timestamp(candidate_day))
+            return calendar.is_session(pd.Timestamp(candidate_day))
         except Exception as exc:
-            if (
-                normalized in self.WEEKDAY_BOUNDS_FALLBACK_MARKETS
-                and self._is_calendar_bounds_error(exc)
+            if normalized in self.WEEKDAY_BOUNDS_FALLBACK_MARKETS and (
+                self._is_calendar_bounds_error(exc)
+                or isinstance(exc, CalendarScheduleUnavailable)
             ):
                 return self._is_weekday(candidate_day)
             raise
@@ -196,13 +361,45 @@ class MarketCalendarService:
         ``is_trading_day``.
         """
         normalized = self.normalize_market(market)
-        days: list[date] = []
-        day = start
-        while day <= end:
-            if self.is_trading_day(normalized, day, mic=mic):
-                days.append(day)
-            day += timedelta(days=1)
-        return days
+        try:
+            calendar = self._get_calendar(normalized, mic=mic)
+            first_provider_session = calendar.first_session_date()
+            last_provider_session = calendar.last_session_date()
+            provider_lookup_start = start
+            provider_lookup_end = end
+            if normalized in self.WEEKDAY_BOUNDS_FALLBACK_MARKETS:
+                if first_provider_session is not None:
+                    provider_lookup_start = max(start, first_provider_session)
+                if last_provider_session is not None:
+                    provider_lookup_end = min(end, last_provider_session)
+            raw_sessions = calendar.sessions_in_range(
+                provider_lookup_start,
+                provider_lookup_end,
+            )
+            provider_sessions = self._extend_with_weekday_bounds_fallback(
+                normalized,
+                raw_sessions,
+                start=start,
+                end=end,
+                first_provider_session=first_provider_session,
+                last_provider_session=last_provider_session,
+            )
+            return self._apply_session_overrides(
+                normalized,
+                provider_sessions,
+                start=start,
+                end=end,
+            )
+        except Exception as exc:
+            fallback_days = self._trading_days_from_weekday_bounds_fallback(
+                normalized,
+                start,
+                end,
+                exc,
+            )
+            if fallback_days is not None:
+                return fallback_days
+            raise
 
     def session_anchors(
         self,
@@ -240,35 +437,23 @@ class MarketCalendarService:
         *,
         mic: str | None = None,
     ) -> bool:
-        calendar = self._get_calendar(market, mic=mic)
         market_now = self.market_now(market, now=now, mic=mic)
+        if not self.is_trading_day(market, market_now.date(), mic=mic):
+            return False
+        calendar = self._get_calendar(market, mic=mic)
         current_session = pd.Timestamp(market_now.date())
-        if not self._is_session(calendar, current_session):
-            return False
         minute_utc = pd.Timestamp(market_now).tz_convert("UTC").floor("min")
-        is_open_on_minute = getattr(calendar, "is_open_on_minute", None)
-        if callable(is_open_on_minute):
-            return bool(is_open_on_minute(minute_utc, ignore_breaks=False))
+        open_on_minute = calendar.is_open_on_minute(minute_utc)
+        if open_on_minute is not None:
+            return open_on_minute
 
-        schedule = self._schedule_for_range(
-            calendar,
-            start_day=current_session.date(),
-            end_day=current_session.date(),
-        )
-        if schedule.empty:
+        session_ranges = calendar.session_open_ranges(current_session.date())
+        if session_ranges is None:
             return False
-        session_row = schedule.iloc[0]
-        market_open = (
-            session_row["market_open"] if "market_open" in session_row.index else session_row["open"]
+        return any(
+            market_open.floor("min") <= minute_utc < market_close.floor("min")
+            for market_open, market_close in session_ranges
         )
-        market_close = (
-            session_row["market_close"] if "market_close" in session_row.index else session_row["close"]
-        )
-        if market_open.tzinfo is None:
-            market_open = market_open.tz_localize("UTC")
-        if market_close.tzinfo is None:
-            market_close = market_close.tz_localize("UTC")
-        return bool(market_open.floor("min") <= minute_utc < market_close.floor("min"))
 
     def last_completed_trading_day(
         self,
@@ -280,46 +465,41 @@ class MarketCalendarService:
         """Return the latest trading day that should already have end-of-day bars."""
         normalized = self.normalize_market(market)
         market_now = self.market_now(normalized, now=now, mic=mic)
-        current_session = pd.Timestamp(market_now.date())
+        current_day = market_now.date()
 
         try:
+            if not self.is_trading_day(normalized, current_day, mic=mic):
+                return self._previous_effective_session_date(
+                    normalized,
+                    current_day,
+                    mic=mic,
+                )
             calendar = self._get_calendar(normalized, mic=mic)
 
-            if not self._is_session(calendar, current_session):
-                date_to_session = getattr(calendar, "date_to_session", None)
-                if callable(date_to_session):
-                    return date_to_session(current_session, direction="previous").date()
-                return self._previous_session(calendar, current_session).date()
-
-            schedule = self._schedule_for_range(
-                calendar,
-                start_day=current_session.date(),
-                end_day=current_session.date(),
-            )
-            if schedule.empty:
-                date_to_session = getattr(calendar, "date_to_session", None)
-                if callable(date_to_session):
-                    return date_to_session(current_session, direction="previous").date()
-                return self._previous_session(calendar, current_session).date()
-
-            market_close = schedule.iloc[0]["close"] if "close" in schedule.columns else schedule.iloc[0]["market_close"]
-            if market_close.tzinfo is None:
-                market_close = market_close.tz_localize("UTC")
-            close_with_buffer = (
-                market_close.tz_convert(
-                    self.market_timezone(normalized, mic=mic)
-                ).to_pydatetime()
-                + timedelta(minutes=30)
-            )
+            market_close = calendar.session_close(current_day)
+            if market_close is None:
+                return self._previous_effective_session_date(
+                    normalized,
+                    current_day,
+                    mic=mic,
+                )
+            close_with_buffer = market_close.tz_convert(
+                self.market_timezone(normalized, mic=mic)
+            ).to_pydatetime() + timedelta(minutes=30)
             if market_now >= close_with_buffer:
-                return current_session.date()
-            return self._previous_session(calendar, current_session).date()
+                return current_day
+            return self._previous_effective_session_date(
+                normalized,
+                current_day,
+                mic=mic,
+            )
         except Exception as exc:
-            if (
-                normalized in self.WEEKDAY_BOUNDS_FALLBACK_MARKETS
-                and self._is_calendar_bounds_error(exc)
-            ):
-                if self._is_weekday(current_session.date()) and market_now.time().hour >= 16:
-                    return current_session.date()
-                return self._previous_weekday(current_session.date())
+            fallback_day = self._last_completed_from_weekday_bounds_fallback(
+                normalized,
+                current_day,
+                market_now,
+                exc,
+            )
+            if fallback_day is not None:
+                return fallback_day
             raise

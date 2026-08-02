@@ -55,6 +55,7 @@ class MicFactsResponse(BaseModel):
     timezone: str
     default_currency: str
     provider_calendar_id: str | None = None
+    calendar_provider: str | None = None
 
 
 class MarketCatalogEntryResponse(BaseModel):

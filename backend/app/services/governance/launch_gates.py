@@ -25,7 +25,8 @@ import inspect
 import json
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
+from importlib import metadata
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -35,7 +36,7 @@ from .signed_artifact import compute_content_hash
 
 REPORT_SCHEMA_VERSION = 2
 CHARTER_VERSION = "1.0"  # ties to docs/asia/asia_v2_launch_gate_charter.md
-GATE_RUNNER_VERSION = "1.2"
+GATE_RUNNER_VERSION = "1.3"
 
 
 class GateStatus:
@@ -137,6 +138,16 @@ def _normalize_markets(markets: Optional[List[str]] = None) -> tuple[str, ...]:
     if not normalized:
         raise ValueError("enabled_markets must not be empty.")
     return tuple(normalized)
+
+
+def _dependency_versions(package_names: tuple[str, ...]) -> dict[str, str | None]:
+    versions: dict[str, str | None] = {}
+    for package_name in package_names:
+        try:
+            versions[package_name] = metadata.version(package_name)
+        except metadata.PackageNotFoundError:
+            versions[package_name] = None
+    return versions
 
 
 def _latest_rows_by_market(rows: List[object], markets: tuple[str, ...]) -> Dict[str, object]:
@@ -453,8 +464,9 @@ def _check_g3_benchmark(ctx: GateContext) -> GateResult:
     by unit tests; the gate runner re-asserts it at evidence-capture time.
     """
     try:
-        from ...services.benchmark_registry_service import benchmark_registry
-        from ...services.market_calendar_service import MarketCalendarService
+        from .calendar_benchmark_invariants import (
+            collect_calendar_benchmark_invariants,
+        )
     except Exception as exc:
         return GateResult(
             gate_id="G3", name="Benchmark/Calendar Correctness", severity="hard",
@@ -462,90 +474,32 @@ def _check_g3_benchmark(ctx: GateContext) -> GateResult:
             detail=f"Benchmark/calendar dependency import failed: {exc}",
         )
 
-    expected = {
-        "US": "SPY",
-        "HK": "^HSI",
-        "IN": "^NSEI",
-        "JP": "^N225",
-        "KR": "^KS11",
-        "TW": "^TWII",
-        "CN": "000300.SS",
-        "SG": "^STI",
-        "MY": "^KLSE",
-        "CA": "^GSPTSE",
-        "DE": "^GDAXI",
-        "AU": "^AXJO",
-    }
-    expected_calendar_ids = {
-        "US": "XNYS",
-        "HK": "XHKG",
-        "IN": "XNSE",
-        "JP": "XTKS",
-        "KR": "XKRX",
-        "TW": "XTAI",
-        "CN": "XSHG",
-        "SG": "XSES",
-        "MY": "XKLS",
-        "CA": "XTSE",
-        "DE": "XETR",
-        "AU": "XASX",
-    }
     markets = ctx.enabled_markets
-    benchmark_mismatches = {}
-    calendar_id_mismatches = {}
-    weekend_regressions = []
-    sunday_regressions = {}
+    calendar_dependency_versions = _dependency_versions(
+        ("pandas-market-calendars", "exchange-calendars")
+    )
+    try:
+        invariants = collect_calendar_benchmark_invariants(markets)
+    except Exception as exc:
+        return GateResult(
+            gate_id="G3", name="Benchmark/Calendar Correctness", severity="hard",
+            status=GateStatus.MISSING_EVIDENCE,
+            detail=f"Calendar invariant check failed to execute: {exc}",
+            metrics={
+                "enabled_markets": list(markets),
+                "calendar_dependency_versions": calendar_dependency_versions,
+            },
+        )
 
-    service = MarketCalendarService()
-    saturday = date(2026, 4, 11)
-    sunday_utc = datetime(2026, 4, 12, 12, 0, 0, tzinfo=timezone.utc)
-    expected_last_completed = date(2026, 4, 10)
-
-    for market in markets:
-        try:
-            got = benchmark_registry.get_primary_symbol(market)
-        except Exception as exc:
-            benchmark_mismatches[market] = f"lookup failed: {exc}"
-            continue
-        if got != expected[market]:
-            benchmark_mismatches[market] = f"expected {expected[market]}, got {got}"
-        try:
-            calendar_id = service.calendar_id(market)
-            if calendar_id != expected_calendar_ids[market]:
-                calendar_id_mismatches[market] = (
-                    f"expected {expected_calendar_ids[market]}, got {calendar_id}"
-                )
-            if service.is_trading_day(market, saturday):
-                weekend_regressions.append(market)
-            last_completed = service.last_completed_trading_day(market, now=sunday_utc)
-            if last_completed != expected_last_completed:
-                sunday_regressions[market] = str(last_completed)
-        except Exception as exc:
-            return GateResult(
-                gate_id="G3", name="Benchmark/Calendar Correctness", severity="hard",
-                status=GateStatus.MISSING_EVIDENCE,
-                detail=f"Calendar invariant check failed to execute: {exc}",
-                metrics={"enabled_markets": list(markets)},
-            )
-
-    if benchmark_mismatches or calendar_id_mismatches or weekend_regressions or sunday_regressions:
+    if invariants.has_regressions:
         return GateResult(
             gate_id="G3", name="Benchmark/Calendar Correctness", severity="hard",
             status=GateStatus.FAIL,
-            detail=(
-                "Benchmark/calendar regressions detected: "
-                f"benchmark={benchmark_mismatches}, "
-                f"calendar_ids={calendar_id_mismatches}, "
-                f"weekend_sessions={weekend_regressions}, "
-                f"sunday_rollover={sunday_regressions}"
+            detail=invariants.failure_detail(),
+            metrics=invariants.failure_metrics(
+                markets=markets,
+                calendar_dependency_versions=calendar_dependency_versions,
             ),
-            metrics={
-                "enabled_markets": list(markets),
-                "benchmark_mismatches": benchmark_mismatches,
-                "calendar_id_mismatches": calendar_id_mismatches,
-                "weekend_session_regressions": weekend_regressions,
-                "sunday_rollover_regressions": sunday_regressions,
-            },
         )
     return GateResult(
         gate_id="G3", name="Benchmark/Calendar Correctness", severity="hard",
@@ -554,11 +508,10 @@ def _check_g3_benchmark(ctx: GateContext) -> GateResult:
             "Benchmark registry and calendar invariants passed for "
             f"{list(markets)}."
         ),
-        metrics={
-            "checked_markets": list(markets),
-            "saturday_probe": str(saturday),
-            "sunday_rollover_probe": str(sunday_utc.date()),
-        },
+        metrics=invariants.pass_metrics(
+            markets=markets,
+            calendar_dependency_versions=calendar_dependency_versions,
+        ),
     )
 
 
