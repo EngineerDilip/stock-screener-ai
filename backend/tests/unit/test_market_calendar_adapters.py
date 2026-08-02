@@ -43,6 +43,14 @@ class _CallableLastSessionCalendar:
         return None
 
 
+class _CallableFirstSessionCalendar:
+    def __init__(self):
+        self.sessions = [pd.Timestamp("2026-01-07")]
+
+    def first_session(self):
+        return None
+
+
 def test_sessions_in_range_uses_redis_cache(monkeypatch):
     redis = _FakeRedis()
     calendar = _ScheduleCalendar()
@@ -72,3 +80,9 @@ def test_last_session_date_falls_back_when_callable_returns_none():
     adapter = RawMarketCalendarAdapter(_CallableLastSessionCalendar())
 
     assert adapter.last_session_date() == date(2026, 1, 7)
+
+
+def test_first_session_date_falls_back_when_callable_returns_none():
+    adapter = RawMarketCalendarAdapter(_CallableFirstSessionCalendar())
+
+    assert adapter.first_session_date() == date(2026, 1, 7)

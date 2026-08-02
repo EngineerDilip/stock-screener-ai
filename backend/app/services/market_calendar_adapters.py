@@ -38,6 +38,8 @@ class MarketCalendarAdapter(Protocol):
 
     def sessions_in_range(self, start_day: date, end_day: date) -> tuple[date, ...]: ...
 
+    def first_session_date(self) -> date | None: ...
+
     def last_session_date(self) -> date | None: ...
 
     def session_close(self, day: date) -> pd.Timestamp | None: ...
@@ -76,8 +78,25 @@ class RawMarketCalendarAdapter:
         self._write_session_range_cache(cache_key, sessions)
         return sessions
 
+    def first_session_date(self) -> date | None:
+        return self._session_bound_date(
+            ("first_session", "first_session_date"),
+            fallback_index=0,
+        )
+
     def last_session_date(self) -> date | None:
-        for attr_name in ("last_session", "last_session_date"):
+        return self._session_bound_date(
+            ("last_session", "last_session_date"),
+            fallback_index=-1,
+        )
+
+    def _session_bound_date(
+        self,
+        attr_names: tuple[str, ...],
+        *,
+        fallback_index: int,
+    ) -> date | None:
+        for attr_name in attr_names:
             attr_value = getattr(self.raw_calendar, attr_name, None)
             if attr_value is None:
                 continue
@@ -96,12 +115,12 @@ class RawMarketCalendarAdapter:
         try:
             if len(sessions_attr) == 0:
                 return None
-            return pd.Timestamp(sessions_attr[-1]).date()
+            return pd.Timestamp(sessions_attr[fallback_index]).date()
         except (IndexError, KeyError, TypeError):
             sessions = tuple(sessions_attr)
             if not sessions:
                 return None
-            return pd.Timestamp(sessions[-1]).date()
+            return pd.Timestamp(sessions[fallback_index]).date()
 
     def session_close(self, day: date) -> pd.Timestamp | None:
         schedule = self._schedule_for_range(start_day=day, end_day=day)

@@ -150,13 +150,18 @@ class _SessionCalendar:
 
 
 class _BoundedSessionCalendar(_SessionCalendar):
-    def __init__(self, sessions, last_session):
+    def __init__(self, sessions, last_session, first_session=None):
         super().__init__(sessions)
         self.last_session = pd.Timestamp(last_session)
+        self.first_session = pd.Timestamp(first_session or sessions[0])
 
 
 class _RangeBoundedSessionCalendar(_BoundedSessionCalendar):
     def sessions_in_range(self, start_session: pd.Timestamp, end_session: pd.Timestamp):
+        if start_session.date() < self.first_session.date():
+            raise ValueError(
+                "Requested start is earlier than the first session available"
+            )
         if end_session.date() > self.last_session.date():
             raise ValueError("Requested end is later than the last session available")
         return tuple(
@@ -532,6 +537,25 @@ def test_weekday_bounds_fallback_preserves_provider_prefix_when_range_exceeds_bo
         date(2026, 1, 1),
         date(2026, 1, 2),
         date(2026, 1, 5),
+    ]
+
+
+def test_weekday_bounds_fallback_preserves_provider_suffix_when_range_starts_before_bounds():
+    service = _service_with_provider(
+        lambda _: _RangeBoundedSessionCalendar(
+            sessions=[date(2026, 1, 2), date(2026, 1, 6)],
+            first_session=date(2026, 1, 2),
+            last_session=date(2026, 12, 31),
+        ),
+    )
+
+    assert service.trading_days("CN", date(2025, 12, 29), date(2026, 1, 6)) == [
+        date(2025, 12, 29),
+        date(2025, 12, 30),
+        date(2025, 12, 31),
+        date(2026, 1, 1),
+        date(2026, 1, 2),
+        date(2026, 1, 6),
     ]
 
 

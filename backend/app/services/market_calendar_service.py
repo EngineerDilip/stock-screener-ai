@@ -250,23 +250,17 @@ class MarketCalendarService:
         *,
         start: date,
         end: date,
+        first_provider_session: date | None,
         last_provider_session: date | None,
     ) -> list[date]:
         session_days = set(sessions)
-        if (
-            market in self.WEEKDAY_BOUNDS_FALLBACK_MARKETS
-            and last_provider_session is not None
-        ):
-            if session_days:
-                last_returned_session = max(session_days)
-                fallback_start = last_returned_session + timedelta(days=1)
-                if (
-                    last_returned_session >= last_provider_session
-                    and fallback_start <= end
-                ):
-                    session_days.update(self._weekday_trading_days(fallback_start, end))
-            elif last_provider_session < start:
-                session_days.update(self._weekday_trading_days(start, end))
+        if market in self.WEEKDAY_BOUNDS_FALLBACK_MARKETS:
+            if first_provider_session is not None and start < first_provider_session:
+                prefix_end = min(end, first_provider_session - timedelta(days=1))
+                session_days.update(self._weekday_trading_days(start, prefix_end))
+            if last_provider_session is not None and last_provider_session < end:
+                suffix_start = max(start, last_provider_session + timedelta(days=1))
+                session_days.update(self._weekday_trading_days(suffix_start, end))
         return sorted(session_days)
 
     def _previous_effective_session_date(
@@ -369,27 +363,25 @@ class MarketCalendarService:
         normalized = self.normalize_market(market)
         try:
             calendar = self._get_calendar(normalized, mic=mic)
+            first_provider_session = calendar.first_session_date()
             last_provider_session = calendar.last_session_date()
-            if (
-                normalized in self.WEEKDAY_BOUNDS_FALLBACK_MARKETS
-                and last_provider_session is not None
-                and last_provider_session < start
-            ):
-                raw_sessions = ()
-            else:
-                provider_lookup_end = end
-                if (
-                    normalized in self.WEEKDAY_BOUNDS_FALLBACK_MARKETS
-                    and last_provider_session is not None
-                    and start <= last_provider_session < end
-                ):
-                    provider_lookup_end = last_provider_session
-                raw_sessions = calendar.sessions_in_range(start, provider_lookup_end)
+            provider_lookup_start = start
+            provider_lookup_end = end
+            if normalized in self.WEEKDAY_BOUNDS_FALLBACK_MARKETS:
+                if first_provider_session is not None:
+                    provider_lookup_start = max(start, first_provider_session)
+                if last_provider_session is not None:
+                    provider_lookup_end = min(end, last_provider_session)
+            raw_sessions = calendar.sessions_in_range(
+                provider_lookup_start,
+                provider_lookup_end,
+            )
             provider_sessions = self._extend_with_weekday_bounds_fallback(
                 normalized,
                 raw_sessions,
                 start=start,
                 end=end,
+                first_provider_session=first_provider_session,
                 last_provider_session=last_provider_session,
             )
             return self._apply_session_overrides(
