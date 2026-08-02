@@ -11,8 +11,6 @@ from datetime import date
 
 import numpy as np
 import pytest
-from sqlalchemy.orm import Session
-
 from app.domain.common.errors import EntityNotFoundError
 from app.domain.common.query import (
     FilterMode,
@@ -21,16 +19,17 @@ from app.domain.common.query import (
     SortOrder,
     SortSpec,
 )
-from app.domain.scanning.filter_expression_model import FilterExpression, QuerySpec
 from app.domain.feature_store.models import FeaturePage, FeatureRow, FeatureRowWrite
 from app.domain.feature_store.quality import DQInputs
-from app.infra.db.models.feature_store import (  # noqa: F401 — register models
+from app.domain.scanning.filter_expression_model import FilterExpression, QuerySpec
+from app.infra.db.models.feature_store import (
     FeatureRun,
     FeatureRunPointer,
     FeatureRunUniverseSymbol,
     StockFeatureDaily,
 )
 from app.infra.db.repositories.feature_store_repo import SqlFeatureStoreRepository
+from sqlalchemy.orm import Session
 
 from .conftest import count_queries
 
@@ -577,6 +576,51 @@ class TestJoinedColumnFilters:
         )
 
         assert item.extended_fields["se_setup_score"] == 82.0
+        assert "se_explain" not in item.extended_fields
+        assert "se_candidates" not in item.extended_fields
+
+    def test_all_scan_results_strips_setup_payload_in_sql_projection(
+        self, repo: SqlFeatureStoreRepository, session: Session, engine
+    ):
+        run_id = _create_run(session)
+        repo.upsert_snapshot_rows(
+            run_id,
+            [
+                FeatureRowWrite(
+                    symbol="AAPL",
+                    as_of_date=date(2026, 2, 17),
+                    composite_score=90.0,
+                    overall_rating=5,
+                    passes_count=3,
+                    details={
+                        "rating": "Strong Buy",
+                        "setup_engine": {
+                            "setup_score": 82.0,
+                            "pattern_primary": "VCP",
+                            "explain": {"summary": "x" * 10_000},
+                            "candidates": [{"pattern": "base"} for _ in range(200)],
+                        },
+                    },
+                )
+            ],
+        )
+
+        with count_queries(engine) as counter:
+            [item] = repo.query_all_as_scan_results(
+                run_id,
+                FilterExpression(),
+                SortSpec(field="composite_score", order=SortOrder.DESC),
+                include_setup_payload=False,
+            )
+
+        feature_selects = [
+            statement.lower()
+            for statement in counter["statements"]
+            if "from stock_feature_daily" in statement.lower()
+        ]
+        assert any("json_remove" in statement for statement in feature_selects)
+        assert item.extended_fields["se_setup_score"] == 82.0
+        assert item.extended_fields["se_pattern_primary"] == "VCP"
         assert "se_explain" not in item.extended_fields
         assert "se_candidates" not in item.extended_fields
 
