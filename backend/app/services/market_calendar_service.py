@@ -157,7 +157,10 @@ class MarketCalendarService:
         cache_key = (provider_engine, calendar_id, provider_calendar_id)
         if cache_key not in self._calendar_cache:
             self._calendar_cache[cache_key] = RawMarketCalendarAdapter(
-                provider(provider_calendar_id)
+                provider(provider_calendar_id),
+                cache_namespace=(
+                    f"{provider_engine.value}:{calendar_id}:{provider_calendar_id}"
+                ),
             )
         return self._calendar_cache[cache_key]
 
@@ -247,14 +250,22 @@ class MarketCalendarService:
         *,
         start: date,
         end: date,
+        last_provider_session: date | None,
     ) -> list[date]:
         session_days = set(sessions)
-        if market in self.WEEKDAY_BOUNDS_FALLBACK_MARKETS:
+        if (
+            market in self.WEEKDAY_BOUNDS_FALLBACK_MARKETS
+            and last_provider_session is not None
+        ):
             if session_days:
-                fallback_start = max(session_days) + timedelta(days=1)
-                if fallback_start <= end:
+                last_returned_session = max(session_days)
+                fallback_start = last_returned_session + timedelta(days=1)
+                if (
+                    last_returned_session >= last_provider_session
+                    and fallback_start <= end
+                ):
                     session_days.update(self._weekday_trading_days(fallback_start, end))
-            else:
+            elif last_provider_session < start:
                 session_days.update(self._weekday_trading_days(start, end))
         return sorted(session_days)
 
@@ -283,6 +294,10 @@ class MarketCalendarService:
             or "out of bounds" in message
             or "last session" in message
             or "first session" in message
+            or "latest date" in message
+            or "earliest date" in message
+            or "last date" in message
+            or "first date" in message
         )
 
     @staticmethod
@@ -330,9 +345,9 @@ class MarketCalendarService:
             calendar = self._get_calendar(normalized, mic=mic)
             return calendar.is_session(pd.Timestamp(candidate_day))
         except Exception as exc:
-            if (
-                normalized in self.WEEKDAY_BOUNDS_FALLBACK_MARKETS
-                and self._is_calendar_bounds_error(exc)
+            if normalized in self.WEEKDAY_BOUNDS_FALLBACK_MARKETS and (
+                self._is_calendar_bounds_error(exc)
+                or isinstance(exc, CalendarScheduleUnavailable)
             ):
                 return self._is_weekday(candidate_day)
             raise
@@ -359,6 +374,7 @@ class MarketCalendarService:
                 calendar.sessions_in_range(start, end),
                 start=start,
                 end=end,
+                last_provider_session=calendar.last_session_date(),
             )
             return self._apply_session_overrides(
                 normalized,

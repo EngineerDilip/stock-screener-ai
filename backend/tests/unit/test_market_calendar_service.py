@@ -120,6 +120,18 @@ class _BoundsCalendar:
         raise ValueError("Requested date is later than the last session available")
 
 
+class _EarliestLatestBoundsCalendar:
+    def __init__(self, message: str):
+        self.message = message
+
+    def is_session(self, session: pd.Timestamp) -> bool:
+        raise ValueError(self.message)
+
+
+class _ScheduleUnavailableCalendar:
+    pass
+
+
 class _BrokenScheduleCalendar:
     def is_session(self, session: pd.Timestamp) -> bool:
         return True
@@ -135,6 +147,12 @@ class _SessionCalendar:
 
     def is_session(self, session: pd.Timestamp) -> bool:
         return session.date() in self._session_dates
+
+
+class _BoundedSessionCalendar(_SessionCalendar):
+    def __init__(self, sessions, last_session):
+        super().__init__(sessions)
+        self.last_session = pd.Timestamp(last_session)
 
 
 def _service_with_provider(provider_factory, **kwargs):
@@ -436,6 +454,57 @@ def test_calendar_bounds_fallback_uses_weekdays(market):
 
     assert service.is_trading_day(market, date(2026, 4, 10)) is True
     assert service.is_trading_day(market, date(2026, 4, 11)) is False
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "The requested date is before the earliest date supported by the calendar",
+        "The requested date is after the latest date supported by the calendar",
+    ],
+)
+def test_calendar_bounds_fallback_recognizes_earliest_latest_messages(message):
+    service = _service_with_provider(
+        lambda _: _EarliestLatestBoundsCalendar(message),
+    )
+
+    assert service.is_trading_day("CN", date(2026, 4, 10)) is True
+
+
+@pytest.mark.parametrize("market", ["CN", "SG"])
+def test_calendar_schedule_unavailable_fallback_uses_weekdays(market):
+    service = _service_with_provider(lambda _: _ScheduleUnavailableCalendar())
+
+    assert service.is_trading_day(market, date(2026, 4, 10)) is True
+    assert service.is_trading_day(market, date(2026, 4, 11)) is False
+
+
+def test_weekday_bounds_fallback_does_not_readd_provider_known_holidays():
+    service = _service_with_provider(
+        lambda _: _BoundedSessionCalendar(
+            sessions=[date(2026, 4, 10), date(2026, 12, 31)],
+            last_session=date(2026, 12, 31),
+        ),
+    )
+
+    assert service.trading_days("CN", date(2026, 4, 10), date(2026, 4, 13)) == [
+        date(2026, 4, 10),
+    ]
+
+
+def test_weekday_bounds_fallback_extends_after_provider_last_session():
+    service = _service_with_provider(
+        lambda _: _BoundedSessionCalendar(
+            sessions=[date(2025, 12, 31)],
+            last_session=date(2025, 12, 31),
+        ),
+    )
+
+    assert service.trading_days("CN", date(2026, 1, 1), date(2026, 1, 5)) == [
+        date(2026, 1, 1),
+        date(2026, 1, 2),
+        date(2026, 1, 5),
+    ]
 
 
 @pytest.mark.parametrize("market", ["CN", "SG"])
