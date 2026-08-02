@@ -366,6 +366,12 @@ class MarketRsActivationValidator:
             calculation_date=through_date,
             errors=errors,
         )
+        self._validate_live_rrg(
+            db,
+            market=market,
+            through_date=through_date,
+            errors=errors,
+        )
         return tuple(dict.fromkeys(errors))
 
     def revalidate_static(

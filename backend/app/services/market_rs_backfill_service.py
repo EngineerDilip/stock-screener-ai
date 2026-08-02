@@ -234,7 +234,11 @@ class MarketRsBackfillService:
                         },
                     )
                 )
-                release_session_memory(db, stage="backfill_date")
+                release_session_memory(
+                    db,
+                    stage="backfill_date",
+                    end_transaction=True,
+                )
                 continue
             stage = "stock_calculation"
             try:
@@ -280,10 +284,18 @@ class MarketRsBackfillService:
                         group_row_count=len(groups),
                     )
                 )
-                release_session_memory(db, stage="backfill_date")
+                release_session_memory(
+                    db,
+                    stage="backfill_date",
+                    end_transaction=True,
+                )
             except (SoftTimeLimitExceeded, DBAPIError):
                 db.rollback()
-                release_session_memory(db, stage="backfill_date")
+                release_session_memory(
+                    db,
+                    stage="backfill_date",
+                    end_transaction=True,
+                )
                 raise
             except Exception as exc:
                 db.rollback()
@@ -312,7 +324,11 @@ class MarketRsBackfillService:
                         diagnostics=diagnostics,
                     )
                 )
-                release_session_memory(db, stage="backfill_date")
+                release_session_memory(
+                    db,
+                    stage="backfill_date",
+                    end_transaction=True,
+                )
 
         completed = tuple(item for item in results if item.status == "completed")
         failed = tuple(item for item in results if item.status == "failed")

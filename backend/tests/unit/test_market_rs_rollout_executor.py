@@ -8,7 +8,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-
 from app.domain.relative_strength import (
     BALANCED_RS_FORMULA_VERSION,
     GroupSnapshotIdentity,
@@ -436,3 +435,41 @@ def test_executor_treats_live_group_snapshot_as_best_effort(
 
     assert outcome.market == "US"
     assert rollout.activation_requested is True
+
+
+def test_executor_closes_transactions_before_stage_cleanup(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from app.services import market_rs_rollout_executor as module
+
+    cleanup_calls: list[dict[str, object]] = []
+
+    def record_cleanup(_db, **kwargs):
+        cleanup_calls.append(kwargs)
+
+    monkeypatch.setattr(module, "release_session_memory", record_cleanup)
+    rollout = _RolloutFake()
+    executor = MarketRsActivationExecutor(
+        rollout_service=rollout,
+        feature_snapshot_builder=lambda **_kwargs: 99,
+        static_exporter=lambda **_kwargs: None,
+        live_group_publisher=MagicMock(),
+    )
+
+    executor.execute(
+        MagicMock(),
+        request=MarketRsActivationRequest(
+            market="US",
+            through_date=date(2026, 7, 29),
+            static_staging_dir=tmp_path / "stage",
+        ),
+    )
+
+    assert cleanup_calls == [
+        {"stage": "backfill", "end_transaction": True},
+        {"stage": "feature_snapshot", "end_transaction": True},
+        {"stage": "static_export", "end_transaction": True},
+        {"stage": "validation", "end_transaction": True},
+        {"stage": "activation", "end_transaction": True},
+    ]

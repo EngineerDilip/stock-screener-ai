@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -115,3 +116,41 @@ def test_max_rss_mb_converts_linux_kilobytes(monkeypatch):
     )
 
     assert module._max_rss_mb() == 128.0
+
+
+def test_release_session_memory_rolls_back_clean_open_transaction(monkeypatch):
+    import app.services.runtime_diagnostics as module
+
+    db = MagicMock()
+    db.in_transaction.return_value = True
+    db.new = set()
+    db.dirty = set()
+    db.deleted = set()
+    monkeypatch.setattr(module.gc, "collect", MagicMock())
+
+    module.release_session_memory(db, stage="validation", end_transaction=True)
+
+    db.rollback.assert_called_once_with()
+    db.expire_all.assert_called_once_with()
+    db.expunge_all.assert_called_once_with()
+    module.gc.collect.assert_called_once_with()
+
+
+def test_release_session_memory_rejects_open_transaction_with_pending_writes(
+    monkeypatch,
+):
+    import app.services.runtime_diagnostics as module
+
+    db = MagicMock()
+    db.in_transaction.return_value = True
+    db.new = {"pending row"}
+    db.dirty = set()
+    db.deleted = set()
+    monkeypatch.setattr(module.gc, "collect", MagicMock())
+
+    with pytest.raises(RuntimeError, match="pending ORM changes"):
+        module.release_session_memory(db, stage="backfill", end_transaction=True)
+
+    db.rollback.assert_not_called()
+    db.expire_all.assert_not_called()
+    db.expunge_all.assert_not_called()

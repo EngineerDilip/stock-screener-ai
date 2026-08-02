@@ -7,9 +7,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from celery.exceptions import SoftTimeLimitExceeded
-from sqlalchemy.exc import OperationalError, SQLAlchemyError
-
 from app.config import settings
 from app.domain.feature_store.models import RunStatus
 from app.domain.relative_strength import (
@@ -31,6 +28,8 @@ from app.services.market_rs_rollout_service import (
 from app.services.market_rs_static_artifact_validator import (
     MarketRsStaticArtifactValidator,
 )
+from celery.exceptions import SoftTimeLimitExceeded
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 
 def _service(
@@ -998,7 +997,6 @@ def test_successful_activation_revalidates_then_commits_both_pointers(
         service.validator,
         "revalidate_runtime",
         runtime_revalidate,
-        raising=False,
     )
     validation = ActivationValidationReport(
         market="US",
@@ -1089,6 +1087,81 @@ def test_live_activation_revalidates_runtime_groups_before_commit(monkeypatch):
     )
 
     with pytest.raises(MarketRsActivationRejected, match="Missing eligible Group rows"):
+        service.activate(
+            db,
+            market="US",
+            formula_version=BALANCED_RS_FORMULA_VERSION,
+            feature_run_id=99,
+            validation=validation,
+            static_staging_dir=None,
+        )
+
+    repository.activate_formula.assert_not_called()
+    db.commit.assert_not_called()
+    db.rollback.assert_called_once_with()
+
+
+def test_live_activation_revalidates_runtime_rrg_before_commit(monkeypatch):
+    through_date = date(2026, 4, 10)
+    repository = MagicMock()
+    repository.get_completed_exact.return_value = SimpleNamespace(
+        id=42,
+        universe_hash="universe-a",
+        eligible_symbol_count=2,
+    )
+    feature_repository = MagicMock()
+    feature_repository.get_run.return_value = SimpleNamespace(
+        id=99,
+        status=SimpleNamespace(value="published"),
+        universe_hash="feature-a",
+        as_of_date=through_date,
+        config={
+            "market": "US",
+            "rs_formula_version": BALANCED_RS_FORMULA_VERSION,
+            "market_rs_run_id": 42,
+            "rs_as_of_date": "2026-04-10",
+            "rs_universe_size": 2,
+        },
+    )
+    service = _service(
+        repository=repository,
+        feature_factory=lambda _db: feature_repository,
+    )
+    db = MagicMock()
+
+    def accept_runtime_groups(*_args, **_kwargs):
+        return repository.get_completed_exact.return_value
+
+    def reject_rrg_payload(*_args, errors, **_kwargs):
+        errors.append(
+            "Balanced RRG history is insufficient for guarded activation: "
+            "Only 11 usable weeks are available."
+        )
+        return "insufficient_balanced_history"
+
+    monkeypatch.setattr(
+        service.validator,
+        "_validate_run_and_groups",
+        accept_runtime_groups,
+    )
+    monkeypatch.setattr(service.validator, "_validate_live_rrg", reject_rrg_payload)
+    validation = ActivationValidationReport(
+        market="US",
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+        through_date=through_date,
+        first_valid_date=through_date,
+        candidate_count=1,
+        latest_market_rs_run_id=42,
+        latest_universe_hash="universe-a",
+        feature_run_id=99,
+        feature_universe_hash="feature-a",
+        static_bundle_sha256=None,
+        errors=(),
+        artifact_policy=MarketRsActivationArtifactPolicy.LIVE_RUNTIME,
+        rrg_status="available",
+    )
+
+    with pytest.raises(MarketRsActivationRejected, match="Balanced RRG history"):
         service.activate(
             db,
             market="US",

@@ -200,7 +200,7 @@ class MarketRsActivationExecutor:
                 "One or more required backfill dates failed; repair the reported "
                 "dates before activation"
             )
-        release_session_memory(db, stage="backfill")
+        release_session_memory(db, stage="backfill", end_transaction=True)
 
         with log_runtime_stage(
             logger,
@@ -213,7 +213,7 @@ class MarketRsActivationExecutor:
                 market=market,
                 through_date=request.through_date,
             )
-        release_session_memory(db, stage="feature_snapshot")
+        release_session_memory(db, stage="feature_snapshot", end_transaction=True)
 
         if request.artifact_policy.requires_static_artifacts:
             assert staging_dir is not None
@@ -230,7 +230,7 @@ class MarketRsActivationExecutor:
                     feature_run_id=feature_run_id,
                     static_staging_dir=staging_dir,
                 )
-            release_session_memory(db, stage="static_export")
+            release_session_memory(db, stage="static_export", end_transaction=True)
 
         with log_runtime_stage(
             logger,
@@ -257,7 +257,7 @@ class MarketRsActivationExecutor:
                 f"{validation.artifact_policy.value} does not match the requested "
                 f"policy {request.artifact_policy.value}"
             )
-        release_session_memory(db, stage="validation")
+        release_session_memory(db, stage="validation", end_transaction=True)
         with log_runtime_stage(
             logger,
             "market_rs.activation.commit",
@@ -274,7 +274,7 @@ class MarketRsActivationExecutor:
                 validation=validation,
                 static_staging_dir=staging_dir,
             )
-        release_session_memory(db, stage="activation")
+        release_session_memory(db, stage="activation", end_transaction=True)
         identity = GroupSnapshotIdentity(
             market=market,
             as_of_date=request.through_date,
