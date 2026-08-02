@@ -251,6 +251,37 @@ class TestHappyPath:
         assert count == 3
 
     @_PATCH_TRADING_DAY
+    def test_publish_dq_inputs_are_loaded_from_persisted_rows(self, _mock_td):
+        class RecordingFeatureStore(FakeFeatureStoreRepository):
+            def __init__(self) -> None:
+                super().__init__()
+                self.dq_input_run_ids: list[int] = []
+
+            def get_run_dq_inputs(self, run_id: int):
+                self.dq_input_run_ids.append(run_id)
+                return super().get_run_dq_inputs(run_id)
+
+        universe = FakeUniverseRepository(["AAPL", "MSFT", "GOOGL"])
+        feature_runs = FakeFeatureRunRepository()
+        feature_store = RecordingFeatureStore()
+        uow = FakeUnitOfWork(
+            universe=universe,
+            feature_runs=feature_runs,
+            feature_store=feature_store,
+        )
+        use_case = BuildDailyFeatureSnapshotUseCase(scanner=FakeScanner())
+
+        result = use_case.execute(
+            uow,
+            _make_cmd(chunk_size=2),
+            FakeProgressSink(),
+            FakeCancellationToken(),
+        )
+
+        assert result.status == RunStatus.PUBLISHED.value
+        assert feature_store.dq_input_run_ids == [result.run_id]
+
+    @_PATCH_TRADING_DAY
     def test_universe_symbols_saved(self, _mock_td):
         uow, scanner = _make_uow(symbols=["AAPL", "TSLA"])
         use_case = BuildDailyFeatureSnapshotUseCase(scanner=scanner)
