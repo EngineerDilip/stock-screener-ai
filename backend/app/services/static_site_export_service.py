@@ -368,11 +368,12 @@ class StaticSiteExportService:
                 formula_version=formula_version,
             ),
         )
+        del scan_rows
         chart_manifest = self._export_chart_bundle(
             output_dir=output_dir,
             generated_at=generated_at,
             run=latest_run,
-            rows=scan_rows,
+            rows=(),
             serialized_rows=serialized_rows,
             path_prefix=path_prefix,
             groups_payload=groups_payload,
@@ -706,6 +707,7 @@ class StaticSiteExportService:
             FilterExpression(),
             SortSpec(field="composite_score", order=SortOrder.DESC),
             include_sparklines=include_sparklines,
+            include_setup_payload=False,
         )
 
     def _load_scan_export_source(self, db: Session, run: FeatureRun) -> tuple[list[Any], Any]:

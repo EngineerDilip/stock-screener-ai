@@ -14,6 +14,7 @@ from app.services.market_rs_inputs import MarketRsInputUnavailable
 from app.services.market_rs_rollout_contracts import (
     ActivationValidationReport,
     BackfillReport,
+    MarketRsActivationArtifactPolicy,
 )
 from app.services.market_rs_rollout_executor import (
     MarketRsActivationExecutionError,
@@ -229,8 +230,9 @@ def test_bootstrap_balanced_market_rs_requires_successful_activation(monkeypatch
             feature_universe_hash="universe",
             static_bundle_sha256="bundle",
             errors=(),
+            artifact_policy=MarketRsActivationArtifactPolicy.LIVE_RUNTIME,
         ),
-        static_staging_dir="stage",
+        static_staging_dir=None,
     )
 
     result = module.bootstrap_balanced_market_rs.run(
@@ -241,6 +243,10 @@ def test_bootstrap_balanced_market_rs_requires_successful_activation(monkeypatch
     assert result["status"] == "activated"
     assert result["formula_version"] == BALANCED_RS_FORMULA_VERSION
     assert executor.execute.call_args.kwargs["request"].market == "US"
+    assert executor.execute.call_args.kwargs["request"].artifact_policy is (
+        MarketRsActivationArtifactPolicy.LIVE_RUNTIME
+    )
+    assert executor.execute.call_args.kwargs["request"].static_staging_dir is None
     calendar.last_completed_trading_day.assert_called_once_with("US")
     started.assert_called_once()
     completed.assert_called_once()
@@ -302,8 +308,9 @@ def test_bootstrap_balanced_market_rs_uses_rollout_resolved_through_date(
             feature_universe_hash="universe",
             static_bundle_sha256="bundle",
             errors=(),
+            artifact_policy=MarketRsActivationArtifactPolicy.LIVE_RUNTIME,
         ),
-        static_staging_dir="stage",
+        static_staging_dir=None,
     )
 
     module.bootstrap_balanced_market_rs.run(
@@ -319,6 +326,9 @@ def test_bootstrap_balanced_market_rs_uses_rollout_resolved_through_date(
     assert (
         executor.execute.call_args.kwargs["request"].through_date
         == selected_through_date
+    )
+    assert executor.execute.call_args.kwargs["request"].artifact_policy is (
+        MarketRsActivationArtifactPolicy.LIVE_RUNTIME
     )
 
 

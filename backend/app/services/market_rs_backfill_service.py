@@ -27,6 +27,7 @@ from app.services.market_rs_rollout_contracts import (
     normalize_rollout_market,
 )
 from app.services.market_rs_snapshot_service import MarketRsSnapshotService
+from app.services.runtime_diagnostics import release_session_memory
 
 
 class MarketRsBackfillService:
@@ -212,6 +213,7 @@ class MarketRsBackfillService:
                 market=normalized,
                 as_of_date=calculation_date,
                 formula_version=BALANCED_RS_FORMULA_VERSION,
+                load_rows=False,
             )
             if start_date is not None and calculation_date < start_date and run is None:
                 results.append(
@@ -231,6 +233,11 @@ class MarketRsBackfillService:
                             ),
                         },
                     )
+                )
+                release_session_memory(
+                    db,
+                    stage="backfill_date",
+                    end_transaction=True,
                 )
                 continue
             stage = "stock_calculation"
@@ -277,8 +284,18 @@ class MarketRsBackfillService:
                         group_row_count=len(groups),
                     )
                 )
+                release_session_memory(
+                    db,
+                    stage="backfill_date",
+                    end_transaction=True,
+                )
             except (SoftTimeLimitExceeded, DBAPIError):
                 db.rollback()
+                release_session_memory(
+                    db,
+                    stage="backfill_date",
+                    end_transaction=True,
+                )
                 raise
             except Exception as exc:
                 db.rollback()
@@ -306,6 +323,11 @@ class MarketRsBackfillService:
                         reason_code=reason_code,
                         diagnostics=diagnostics,
                     )
+                )
+                release_session_memory(
+                    db,
+                    stage="backfill_date",
+                    end_transaction=True,
                 )
 
         completed = tuple(item for item in results if item.status == "completed")

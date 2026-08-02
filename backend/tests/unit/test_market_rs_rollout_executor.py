@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-
 from app.domain.relative_strength import (
     BALANCED_RS_FORMULA_VERSION,
     GroupSnapshotIdentity,
@@ -16,6 +16,7 @@ from app.services.market_rs_activation_coverage import MarketRsActivationCoverag
 from app.services.market_rs_rollout_contracts import (
     ActivationValidationReport,
     BackfillReport,
+    MarketRsActivationArtifactPolicy,
 )
 from app.services.market_rs_rollout_executor import (
     MarketRsActivationExecutionError,
@@ -56,6 +57,7 @@ def _validation(*, ok: bool = True):
         feature_universe_hash="universe",
         static_bundle_sha256="bundle",
         errors=errors,
+        artifact_policy=MarketRsActivationArtifactPolicy.STATIC_SITE,
     )
 
 
@@ -100,16 +102,25 @@ class _RolloutFake:
         coverage,
         feature_run_id,
         static_staging_dir,
+        artifact_policy=MarketRsActivationArtifactPolicy.STATIC_SITE,
     ):
         assert coverage is self.coverage
         assert feature_run_id == 99
-        assert static_staging_dir.is_absolute()
+        if artifact_policy.requires_static_artifacts:
+            assert static_staging_dir is not None
+            assert static_staging_dir.is_absolute()
+        else:
+            assert static_staging_dir is None
+        self.artifact_policy = artifact_policy
         self.validation_requested = True
         if self.events is not None:
             self.events.append("validate")
-        return self.validation
+        if self.validation.artifact_policy is artifact_policy:
+            return self.validation
+        return replace(self.validation, artifact_policy=artifact_policy)
 
-    def activate(self, _db, **_kwargs) -> None:
+    def activate(self, _db, **kwargs) -> None:
+        self.activation_kwargs = kwargs
         self.activation_requested = True
         if self.events is not None:
             self.events.append("activate")
@@ -168,7 +179,69 @@ def test_executor_activates_only_after_bounded_publication_gates(
     assert rollout.backfill_requested
     assert rollout.validation_requested
     assert rollout.activation_requested
-    db.expire_all.assert_called_once_with()
+    assert db.expire_all.call_count >= 1
+    assert db.expunge_all.call_count >= 1
+
+
+def test_live_activation_uses_report_policy_without_static_staging_dir() -> None:
+    events: list[str] = []
+    rollout = _RolloutFake(events=events)
+    static_exporter = MagicMock(side_effect=AssertionError("static export is live-only dead weight"))
+    executor = MarketRsActivationExecutor(
+        rollout_service=rollout,
+        feature_snapshot_builder=(lambda **kwargs: events.append("feature") or 99),
+        static_exporter=static_exporter,
+        live_group_publisher=lambda identity: events.append("publish_live"),
+    )
+    db = MagicMock()
+
+    outcome = executor.execute(
+        db,
+        request=MarketRsActivationRequest(
+            market="US",
+            through_date=date(2026, 7, 29),
+            artifact_policy=MarketRsActivationArtifactPolicy.LIVE_RUNTIME,
+        ),
+    )
+
+    assert outcome.market == "US"
+    assert outcome.static_staging_dir is None
+    static_exporter.assert_not_called()
+    assert rollout.artifact_policy is MarketRsActivationArtifactPolicy.LIVE_RUNTIME
+    assert rollout.activation_kwargs["static_staging_dir"] is None
+    assert rollout.activation_kwargs["validation"].artifact_policy is (
+        MarketRsActivationArtifactPolicy.LIVE_RUNTIME
+    )
+    assert events == ["backfill", "feature", "validate", "activate", "publish_live"]
+    assert db.expunge_all.call_count >= 1
+
+
+def test_executor_rejects_validation_policy_mismatch() -> None:
+    class _PolicyMismatchRollout(_RolloutFake):
+        def validate_activation(self, _db, **_kwargs):
+            self.validation_requested = True
+            return self.validation
+
+    rollout = _PolicyMismatchRollout(validation=_validation())
+    executor = MarketRsActivationExecutor(
+        rollout_service=rollout,
+        feature_snapshot_builder=lambda **_kwargs: 99,
+        static_exporter=MagicMock(),
+        live_group_publisher=MagicMock(),
+    )
+
+    with pytest.raises(MarketRsActivationExecutionError, match="artifact policy"):
+        executor.execute(
+            MagicMock(),
+            request=MarketRsActivationRequest(
+                market="US",
+                through_date=date(2026, 7, 29),
+                artifact_policy=MarketRsActivationArtifactPolicy.LIVE_RUNTIME,
+            ),
+        )
+
+    assert rollout.validation_requested is True
+    assert rollout.activation_requested is False
 
 
 def test_executor_stops_before_publication_when_backfill_failed(tmp_path: Path) -> None:
@@ -362,3 +435,41 @@ def test_executor_treats_live_group_snapshot_as_best_effort(
 
     assert outcome.market == "US"
     assert rollout.activation_requested is True
+
+
+def test_executor_closes_transactions_before_stage_cleanup(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from app.services import market_rs_rollout_executor as module
+
+    cleanup_calls: list[dict[str, object]] = []
+
+    def record_cleanup(_db, **kwargs):
+        cleanup_calls.append(kwargs)
+
+    monkeypatch.setattr(module, "release_session_memory", record_cleanup)
+    rollout = _RolloutFake()
+    executor = MarketRsActivationExecutor(
+        rollout_service=rollout,
+        feature_snapshot_builder=lambda **_kwargs: 99,
+        static_exporter=lambda **_kwargs: None,
+        live_group_publisher=MagicMock(),
+    )
+
+    executor.execute(
+        MagicMock(),
+        request=MarketRsActivationRequest(
+            market="US",
+            through_date=date(2026, 7, 29),
+            static_staging_dir=tmp_path / "stage",
+        ),
+    )
+
+    assert cleanup_calls == [
+        {"stage": "backfill", "end_transaction": True},
+        {"stage": "feature_snapshot", "end_transaction": True},
+        {"stage": "static_export", "end_transaction": True},
+        {"stage": "validation", "end_transaction": True},
+        {"stage": "activation", "end_transaction": True},
+    ]

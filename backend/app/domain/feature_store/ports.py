@@ -357,7 +357,9 @@ class FeatureStoreRepository(abc.ABC):
         run_id: int,
         expression: FilterExpression,
         sort: SortSpec,
+        *,
         include_sparklines: bool = False,
+        include_setup_payload: bool = True,
     ) -> tuple[ScanResultItemDomain, ...]:
         """Return all rows from a feature run (no pagination; for export).
 

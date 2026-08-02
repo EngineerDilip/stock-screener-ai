@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date
 import hashlib
 import json
 import math
+from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.domain.markets import get_market_catalog
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
+from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
 from app.models.industry import IBDGroupRank
 from app.services.static_groups_rrg_export import (
     StaticGroupsRRGDatabasePayloadSource,
@@ -25,10 +26,24 @@ from app.services.static_site_export_service import SCAN_BUNDLE_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)
+class StaticScanRows:
+    chunk_paths: tuple[Path, ...]
+    row_count: int
+
+    def iter_rows(self):
+        for chunk_path in self.chunk_paths:
+            chunk = json.loads(chunk_path.read_text(encoding="utf-8"))
+            chunk_rows = chunk.get("rows") or []
+            for row in chunk_rows:
+                if isinstance(row, dict):
+                    yield row
+
+
+@dataclass(frozen=True)
 class StaticRsArtifactDocuments:
     manifest: dict[str, Any]
     groups: dict[str, Any]
-    scan_rows: tuple[dict[str, Any], ...]
+    scan_rows: StaticScanRows | tuple[dict[str, Any], ...]
 
 
 @dataclass(frozen=True)
@@ -44,7 +59,24 @@ class StaticArtifactValidationResult:
     errors: tuple[str, ...]
 
 
+def _iter_static_scan_rows(
+    scan_rows: StaticScanRows | tuple[dict[str, Any], ...],
+):
+    if isinstance(scan_rows, StaticScanRows):
+        return scan_rows.iter_rows()
+    return iter(scan_rows)
+
+
 class MarketRsStaticArtifactValidator:
+    def __init__(
+        self,
+        *,
+        market_rs_repository: MarketRsRunRepository | None = None,
+        stream_stock_rows: bool = True,
+    ) -> None:
+        self.market_rs_repository = market_rs_repository or MarketRsRunRepository()
+        self.stream_stock_rows = stream_stock_rows
+
     @staticmethod
     def _json_file(path: Path) -> dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -191,6 +223,7 @@ class MarketRsStaticArtifactValidator:
                 errors=errors,
             )
         self._validate_stock_parity(
+            db=db,
             latest_run=latest_run,
             through_date=through_date,
             documents=documents,
@@ -232,14 +265,15 @@ class MarketRsStaticArtifactValidator:
         feature_run_id: int,
         expected_identity: dict[str, Any],
         errors: list[str],
-    ) -> tuple[dict[str, Any], ...]:
+    ) -> StaticScanRows:
         root = Path(static_staging_dir).resolve()
         chunk_refs = scan_payload.get("chunks")
         if not isinstance(chunk_refs, list):
             errors.append("Staged Scan manifest.chunks must be a list.")
-            return ()
+            return StaticScanRows(chunk_paths=(), row_count=0)
 
-        rows: list[dict[str, Any]] = []
+        row_count = 0
+        ordered_chunk_paths: list[Path] = []
         referenced_paths: set[Path] = set()
         for expected_index, chunk_ref in enumerate(chunk_refs, start=1):
             if not isinstance(chunk_ref, dict) or not isinstance(
@@ -294,7 +328,8 @@ class MarketRsStaticArtifactValidator:
                 errors.append(
                     f"Staged Scan chunk {chunk_ref['path']} count does not match its rows."
                 )
-            rows.extend(chunk_rows)
+            row_count += len(chunk_rows)
+            ordered_chunk_paths.append(chunk_path)
 
         discovered_paths = {
             path.resolve()
@@ -305,9 +340,12 @@ class MarketRsStaticArtifactValidator:
             errors.append(
                 "Staged Scan chunk files do not exactly match the manifest."
             )
-        if scan_payload.get("rows_total") != len(rows):
+        if scan_payload.get("rows_total") != row_count:
             errors.append("Staged Scan rows_total does not match its chunks.")
-        return tuple(rows)
+        return StaticScanRows(
+            chunk_paths=tuple(ordered_chunk_paths),
+            row_count=row_count,
+        )
 
     @staticmethod
     def _validate_group_parity(
@@ -374,16 +412,33 @@ class MarketRsStaticArtifactValidator:
                         f"{live.industry_group}.{field}."
                     )
 
-    @staticmethod
     def _validate_stock_parity(
+        self,
         *,
+        db: Session | None = None,
         latest_run: Any,
         through_date: date,
         documents: StaticRsArtifactDocuments,
         errors: list[str],
     ) -> None:
-        scan_rows = documents.scan_rows
-        stock_by_symbol = {row.symbol: row for row in latest_run.rows}
+        if self.stream_stock_rows:
+            if db is None:
+                errors.append(
+                    "Cannot stream canonical Market RS rows without a database session."
+                )
+                stock_by_symbol = {}
+            else:
+                stock_by_symbol = {
+                    row.symbol: row
+                    for row in self.market_rs_repository.iter_stock_rows_for_run(
+                        db,
+                        run_id=latest_run.id,
+                    )
+                }
+        else:
+            stock_by_symbol = {
+                row.symbol: row for row in latest_run.rows
+            }
         stock_fields = {
             "rs_rating": "overall_rs",
             "rs_rating_1m": "rs_1m",
@@ -397,10 +452,7 @@ class MarketRsStaticArtifactValidator:
             "rs_universe_size": latest_run.eligible_symbol_count,
         }
         compared = 0
-        for static_row in sorted(
-            scan_rows,
-            key=lambda row: str(row.get("symbol")),
-        ):
+        for static_row in _iter_static_scan_rows(documents.scan_rows):
             stock = stock_by_symbol.get(static_row.get("symbol"))
             for field, expected in expected_identity.items():
                 if static_row.get(field) != expected:
@@ -422,7 +474,7 @@ class MarketRsStaticArtifactValidator:
                         f"Live/static stock mismatch for "
                         f"{stock.symbol}.{static_field}."
                     )
-        if latest_run.rows and compared == 0:
+        if stock_by_symbol and compared == 0:
             errors.append(
                 "No staged Scan rows overlap the canonical Market RS run."
             )
@@ -497,4 +549,5 @@ __all__ = [
     "StaticArtifactFingerprint",
     "StaticArtifactValidationResult",
     "StaticRsArtifactDocuments",
+    "StaticScanRows",
 ]

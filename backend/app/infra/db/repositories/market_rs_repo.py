@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from typing import Iterator
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, object_session, selectinload
@@ -24,6 +26,23 @@ from app.models.industry import IBDGroupRank
 SUPPORTED_FORMULAS = frozenset(
     {BALANCED_RS_FORMULA_VERSION, LEGACY_RS_FORMULA_VERSION}
 )
+
+
+@dataclass(frozen=True)
+class StockRsSnapshotRecord:
+    symbol: str
+    overall_rs: int
+    rs_1m: int
+    rs_3m: int
+    rs_6m: int
+    rs_9m: int
+    rs_12m: int
+    weighted_composite: float
+    excess_return_1m: float
+    excess_return_3m: float
+    excess_return_6m: float
+    excess_return_9m: float
+    excess_return_12m: float
 
 
 class MarketRsFormulaNotConfigured(LookupError):
@@ -278,18 +297,61 @@ class MarketRsRunRepository:
         market: str,
         as_of_date: date,
         formula_version: str,
+        load_rows: bool = True,
     ) -> MarketRsRun | None:
-        return (
-            self._run_query(
-                db,
-                market=market,
-                as_of_date=as_of_date,
-                formula_version=formula_version,
-            )
-            .options(selectinload(MarketRsRun.rows))
-            .filter(MarketRsRun.status == "completed")
-            .one_or_none()
+        query = self._run_query(
+            db,
+            market=market,
+            as_of_date=as_of_date,
+            formula_version=formula_version,
         )
+        if load_rows:
+            query = query.options(selectinload(MarketRsRun.rows))
+        return query.filter(MarketRsRun.status == "completed").one_or_none()
+
+    def iter_stock_rows_for_run(
+        self,
+        db: Session,
+        *,
+        run_id: int,
+        batch_size: int = 1000,
+    ) -> Iterator[StockRsSnapshotRecord]:
+        query = (
+            db.query(
+                StockRsSnapshot.symbol,
+                StockRsSnapshot.overall_rs,
+                StockRsSnapshot.rs_1m,
+                StockRsSnapshot.rs_3m,
+                StockRsSnapshot.rs_6m,
+                StockRsSnapshot.rs_9m,
+                StockRsSnapshot.rs_12m,
+                StockRsSnapshot.weighted_composite,
+                StockRsSnapshot.excess_return_1m,
+                StockRsSnapshot.excess_return_3m,
+                StockRsSnapshot.excess_return_6m,
+                StockRsSnapshot.excess_return_9m,
+                StockRsSnapshot.excess_return_12m,
+            )
+            .filter(StockRsSnapshot.run_id == run_id)
+            .order_by(StockRsSnapshot.symbol)
+            .yield_per(max(1, int(batch_size)))
+        )
+        for row in query:
+            yield StockRsSnapshotRecord(
+                symbol=row.symbol,
+                overall_rs=int(row.overall_rs),
+                rs_1m=int(row.rs_1m),
+                rs_3m=int(row.rs_3m),
+                rs_6m=int(row.rs_6m),
+                rs_9m=int(row.rs_9m),
+                rs_12m=int(row.rs_12m),
+                weighted_composite=float(row.weighted_composite),
+                excess_return_1m=float(row.excess_return_1m),
+                excess_return_3m=float(row.excess_return_3m),
+                excess_return_6m=float(row.excess_return_6m),
+                excess_return_9m=float(row.excess_return_9m),
+                excess_return_12m=float(row.excess_return_12m),
+            )
 
     def get_latest_completed(
         self,
@@ -298,16 +360,15 @@ class MarketRsRunRepository:
         market: str,
         formula_version: str,
         through_date: date | None = None,
+        load_rows: bool = True,
     ) -> MarketRsRun | None:
-        query = (
-            db.query(MarketRsRun)
-            .options(selectinload(MarketRsRun.rows))
-            .filter(
-                MarketRsRun.market == market.upper(),
-                MarketRsRun.formula_version == formula_version,
-                MarketRsRun.status == "completed",
-            )
+        query = db.query(MarketRsRun).filter(
+            MarketRsRun.market == market.upper(),
+            MarketRsRun.formula_version == formula_version,
+            MarketRsRun.status == "completed",
         )
+        if load_rows:
+            query = query.options(selectinload(MarketRsRun.rows))
         if through_date is not None:
             query = query.filter(MarketRsRun.as_of_date <= through_date)
         return query.order_by(

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from pathlib import Path
-from tempfile import TemporaryDirectory
 
 from sqlalchemy.exc import DBAPIError
 
@@ -19,6 +17,7 @@ from app.services.market_activity_service import (
 )
 from app.services.market_rs_inputs import MarketRsInputUnavailable
 from app.services.market_rs_rollout_contracts import (
+    MarketRsActivationArtifactPolicy,
     MarketRsBootstrapThroughDateResolution,
 )
 from app.services.market_rs_rollout_executor import MarketRsActivationRequest
@@ -140,15 +139,14 @@ def bootstrap_balanced_market_rs(
             task_id=task_id,
             message="Preparing balanced Market RS publication",
         )
-        with TemporaryDirectory(prefix=f"market-rs-{market_code.lower()}-") as raw_dir:
-            outcome = get_market_rs_activation_executor().execute(
-                db,
-                request=MarketRsActivationRequest(
-                    market=market_code,
-                    through_date=through_date,
-                    static_staging_dir=Path(raw_dir),
-                ),
-            )
+        outcome = get_market_rs_activation_executor().execute(
+            db,
+            request=MarketRsActivationRequest(
+                market=market_code,
+                through_date=through_date,
+                artifact_policy=MarketRsActivationArtifactPolicy.LIVE_RUNTIME,
+            ),
+        )
         mark_market_activity_completed(
             db,
             market=market_code,

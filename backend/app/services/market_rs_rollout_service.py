@@ -26,6 +26,7 @@ from app.services.market_rs_rollout_contracts import (
     ActivationValidationReport,
     BackfillDateResult,
     BackfillReport,
+    MarketRsActivationArtifactPolicy,
     MarketRsActivationRejected,
     MarketRsBootstrapThroughDateResolution,
 )
@@ -154,13 +155,17 @@ class MarketRsRolloutService:
         *,
         coverage: MarketRsActivationCoverage,
         feature_run_id: int,
-        static_staging_dir: Path,
+        static_staging_dir: Path | None,
+        artifact_policy: MarketRsActivationArtifactPolicy = (
+            MarketRsActivationArtifactPolicy.STATIC_SITE
+        ),
     ) -> ActivationValidationReport:
         return self.validator.validate(
             db,
             coverage=coverage,
             feature_run_id=feature_run_id,
             static_staging_dir=static_staging_dir,
+            artifact_policy=artifact_policy,
         )
 
     def revalidate_static(
@@ -188,7 +193,7 @@ class MarketRsRolloutService:
         formula_version: str,
         feature_run_id: int,
         validation: ActivationValidationReport,
-        static_staging_dir: Path,
+        static_staging_dir: Path | None,
     ) -> None:
         self.activator.activate(
             db,

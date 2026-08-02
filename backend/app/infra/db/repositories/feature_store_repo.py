@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import Text, cast, func
+from sqlalchemy import Text, case, cast, func, type_coerce
+from sqlalchemy.dialects.postgresql import JSONB, array
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -31,23 +34,55 @@ from app.infra.db.models.feature_store import (
     FeatureRunUniverseSymbol,
     StockFeatureDaily,
 )
-from app.infra.db.portability import json_text
-from app.infra.serialization import (
-    coerce_bool_or_false,
-    convert_numpy_types,
-    normalize_string_list,
-)
+from app.infra.db.portability import dialect_name, is_postgres, json_text
 from app.infra.query.feature_store_query import (
     apply_filter_expression,
     apply_filters,
     apply_sort_all,
     apply_sort_and_paginate,
 )
+from app.infra.serialization import (
+    coerce_bool_or_false,
+    convert_numpy_types,
+    normalize_string_list,
+)
 from app.models.stock import StockFundamental
 from app.models.stock_universe import StockUniverse
 from app.services.growth_cadence_service import build_row_field_availability
 
 _BATCH_SIZE = 500
+
+_FEATURE_JOINED_COLUMNS = (
+    StockUniverse.name,
+    StockUniverse.market,
+    StockUniverse.exchange,
+    StockUniverse.currency,
+    StockFundamental.market_cap_usd,
+    StockFundamental.adv_usd,
+    StockFundamental.institutional_ownership,
+    StockFundamental.insider_ownership,
+    StockFundamental.short_interest,
+    StockFundamental.growth_reporting_cadence,
+    StockFundamental.growth_metric_basis,
+)
+
+
+@dataclass(frozen=True)
+class _ProjectedFeatureRow:
+    run_id: int
+    symbol: str
+    as_of_date: Any
+    composite_score: Any
+    overall_rating: Any
+    passes_count: Any
+    rs_line_new_high: Any
+    rs_line_new_high_before_price: Any
+    rs_line_blue_dot_recent: Any
+    rs_line_new_high_date: Any
+    details_json: Any
+
+
+_PROJECTED_FEATURE_FIELD_COUNT = len(_ProjectedFeatureRow.__dataclass_fields__)
 
 
 def _feature_results_query(session: Session, run_id: int):
@@ -61,22 +96,55 @@ def _feature_results_query(session: Session, run_id: int):
     return (
         session.query(
             StockFeatureDaily,
-            StockUniverse.name,
-            StockUniverse.market,
-            StockUniverse.exchange,
-            StockUniverse.currency,
-            StockFundamental.market_cap_usd,
-            StockFundamental.adv_usd,
-            StockFundamental.institutional_ownership,
-            StockFundamental.insider_ownership,
-            StockFundamental.short_interest,
-            StockFundamental.growth_reporting_cadence,
-            StockFundamental.growth_metric_basis,
+            *_FEATURE_JOINED_COLUMNS,
         )
         .outerjoin(StockUniverse, StockFeatureDaily.symbol == StockUniverse.symbol)
         .outerjoin(StockFundamental, StockFeatureDaily.symbol == StockFundamental.symbol)
         .filter(StockFeatureDaily.run_id == run_id)
     )
+
+
+def _feature_results_without_setup_payload_query(session: Session, run_id: int):
+    """Project details_json without setup explain/candidate blobs."""
+    return (
+        session.query(
+            StockFeatureDaily.run_id,
+            StockFeatureDaily.symbol,
+            StockFeatureDaily.as_of_date,
+            StockFeatureDaily.composite_score,
+            StockFeatureDaily.overall_rating,
+            StockFeatureDaily.passes_count,
+            StockFeatureDaily.rs_line_new_high,
+            StockFeatureDaily.rs_line_new_high_before_price,
+            StockFeatureDaily.rs_line_blue_dot_recent,
+            StockFeatureDaily.rs_line_new_high_date,
+            _details_without_setup_payload(session).label("details_json"),
+            *_FEATURE_JOINED_COLUMNS,
+        )
+        .outerjoin(StockUniverse, StockFeatureDaily.symbol == StockUniverse.symbol)
+        .outerjoin(StockFundamental, StockFeatureDaily.symbol == StockFundamental.symbol)
+        .filter(StockFeatureDaily.run_id == run_id)
+    )
+
+
+def _details_without_setup_payload(session: Session):
+    column = StockFeatureDaily.details_json
+    if is_postgres(session):
+        return (
+            cast(column, JSONB)
+            .op("#-")(array(["setup_engine", "explain"]))
+            .op("#-")(array(["setup_engine", "candidates"]))
+        )
+    if dialect_name(session) == "sqlite":
+        return type_coerce(
+            func.json_remove(
+                column,
+                "$.setup_engine.explain",
+                "$.setup_engine.candidates",
+            ),
+            column.type,
+        )
+    return column
 
 
 def _feature_results_symbol_query(session: Session, run_id: int):
@@ -98,8 +166,17 @@ def _unpack_feature_joined_row(row) -> tuple[Any, dict[str, Any]]:
     scan_result_repo, so feature-store-backed and legacy-table scans expose
     the same transparency signal.
     """
+    values = tuple(row)
+    if len(values) == _PROJECTED_FEATURE_FIELD_COUNT + len(_FEATURE_JOINED_COLUMNS):
+        feature_row = _ProjectedFeatureRow(
+            *values[:_PROJECTED_FEATURE_FIELD_COUNT]
+        )
+        joined_values = values[_PROJECTED_FEATURE_FIELD_COUNT:]
+    else:
+        feature_row = values[0]
+        joined_values = values[1:]
+
     (
-        feature_row,
         name,
         market,
         exchange,
@@ -111,7 +188,7 @@ def _unpack_feature_joined_row(row) -> tuple[Any, dict[str, Any]]:
         short_interest,
         growth_reporting_cadence,
         growth_metric_basis,
-    ) = row
+    ) = joined_values
 
     joined = {
         "company_name": name,
@@ -132,6 +209,18 @@ def _unpack_feature_joined_row(row) -> tuple[Any, dict[str, Any]]:
         "growth_metric_basis": growth_metric_basis,
     }
     return feature_row, joined
+
+
+def _coerce_details_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 
 
 def _upsert_stmt(session: Session, values: list[dict[str, Any]]):
@@ -262,37 +351,52 @@ class SqlFeatureStoreRepository(FeatureStoreRepository):
         )
 
     def get_run_dq_inputs(self, run_id: int) -> DQInputs:
-        # Feature rows for this run
-        rows = (
+        row_count, null_count, mean_score = (
             self._session.query(
-                StockFeatureDaily.symbol,
-                StockFeatureDaily.composite_score,
-                StockFeatureDaily.overall_rating,
+                func.count(StockFeatureDaily.symbol),
+                func.sum(
+                    case(
+                        (StockFeatureDaily.composite_score.is_(None), 1),
+                        else_=0,
+                    )
+                ),
+                func.avg(StockFeatureDaily.composite_score),
             )
             .filter(StockFeatureDaily.run_id == run_id)
-            .all()
+            .one()
         )
-
-        # Universe symbols for this run
-        universe_rows = (
-            self._session.query(FeatureRunUniverseSymbol.symbol)
-            .filter(FeatureRunUniverseSymbol.run_id == run_id)
-            .all()
+        result_symbols = tuple(
+            symbol
+            for (symbol,) in (
+                self._session.query(StockFeatureDaily.symbol)
+                .filter(StockFeatureDaily.run_id == run_id)
+                .all()
+            )
         )
-        universe_symbols = tuple(r.symbol for r in universe_rows)
-
-        result_symbols = tuple(r.symbol for r in rows)
-        scores = tuple(r.composite_score for r in rows if r.composite_score is not None)
-        ratings = tuple(r.overall_rating for r in rows if r.overall_rating is not None)
-        null_count = sum(1 for r in rows if r.composite_score is None)
+        distinct_rating_count = (
+            self._session.query(func.count(func.distinct(StockFeatureDaily.overall_rating)))
+            .filter(
+                StockFeatureDaily.run_id == run_id,
+                StockFeatureDaily.overall_rating.isnot(None),
+            )
+            .scalar()
+        )
+        universe_symbols = tuple(
+            symbol
+            for (symbol,) in (
+                self._session.query(FeatureRunUniverseSymbol.symbol)
+                .filter(FeatureRunUniverseSymbol.run_id == run_id)
+                .all()
+            )
+        )
 
         return DQInputs(
             expected_row_count=len(universe_symbols),
-            actual_row_count=len(rows),
-            null_score_count=null_count,
-            total_row_count=len(rows),
-            scores=scores,
-            ratings=ratings,
+            actual_row_count=int(row_count or 0),
+            null_score_count=int(null_count or 0),
+            total_row_count=int(row_count or 0),
+            score_mean=float(mean_score) if mean_score is not None else None,
+            distinct_rating_count=int(distinct_rating_count or 0),
             universe_symbols=universe_symbols,
             result_symbols=result_symbols,
         )
@@ -574,6 +678,7 @@ class SqlFeatureStoreRepository(FeatureStoreRepository):
         sort: SortSpec,
         *,
         include_sparklines: bool = False,
+        include_setup_payload: bool = True,
     ) -> tuple[ScanResultItemDomain, ...]:
         """Query feature store and return ALL results (no pagination).
 
@@ -584,7 +689,11 @@ class SqlFeatureStoreRepository(FeatureStoreRepository):
         if run is None:
             raise EntityNotFoundError("FeatureRun", run_id)
 
-        q = _feature_results_query(self._session, run_id)
+        q = (
+            _feature_results_query(self._session, run_id)
+            if include_setup_payload
+            else _feature_results_without_setup_payload_query(self._session, run_id)
+        )
         q = apply_filter_expression(q, expression)
         rows = apply_sort_all(q, sort)
 
@@ -592,6 +701,7 @@ class SqlFeatureStoreRepository(FeatureStoreRepository):
             _map_feature_to_scan_result(
                 *_unpack_feature_joined_row(row),
                 include_sparklines=include_sparklines,
+                include_setup_payload=include_setup_payload,
             )
             for row in rows
         )
@@ -749,7 +859,7 @@ def _map_feature_to_scan_result(
     dedicated SQL columns. ``joined`` carries the StockUniverse +
     StockFundamental outer-join columns (see ``_unpack_feature_joined_row``).
     """
-    d: dict[str, Any] = row.details_json or {}
+    d = _coerce_details_dict(row.details_json)
 
     raw_score = row.composite_score
     clamped_score = (
