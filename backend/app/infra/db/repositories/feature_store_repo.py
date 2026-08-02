@@ -167,14 +167,14 @@ def _unpack_feature_joined_row(row) -> tuple[Any, dict[str, Any]]:
     the same transparency signal.
     """
     values = tuple(row)
-    if isinstance(values[0], StockFeatureDaily):
-        feature_row = values[0]
-        joined_values = values[1:]
-    else:
+    if len(values) == _PROJECTED_FEATURE_FIELD_COUNT + len(_FEATURE_JOINED_COLUMNS):
         feature_row = _ProjectedFeatureRow(
             *values[:_PROJECTED_FEATURE_FIELD_COUNT]
         )
         joined_values = values[_PROJECTED_FEATURE_FIELD_COUNT:]
+    else:
+        feature_row = values[0]
+        joined_values = values[1:]
 
     (
         name,
