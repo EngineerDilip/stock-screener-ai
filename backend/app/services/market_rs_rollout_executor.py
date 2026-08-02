@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import logging
 from dataclasses import dataclass
 from datetime import date
@@ -19,8 +20,10 @@ from app.services.market_rs_activation_coverage import MarketRsActivationCoverag
 from app.services.market_rs_rollout_contracts import (
     ActivationValidationReport,
     BackfillReport,
+    MarketRsActivationArtifactPolicy,
     normalize_rollout_market,
 )
+from app.services.runtime_diagnostics import log_runtime_stage
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +71,10 @@ class MarketRsRollout(Protocol):
         *,
         coverage: MarketRsActivationCoverage,
         feature_run_id: int,
-        static_staging_dir: Path,
+        static_staging_dir: Path | None,
+        artifact_policy: MarketRsActivationArtifactPolicy = (
+            MarketRsActivationArtifactPolicy.STATIC_SITE
+        ),
     ) -> ActivationValidationReport: ...
 
     def activate(
@@ -79,7 +85,7 @@ class MarketRsRollout(Protocol):
         formula_version: str,
         feature_run_id: int,
         validation: ActivationValidationReport,
-        static_staging_dir: Path,
+        static_staging_dir: Path | None,
     ) -> None: ...
 
 
@@ -87,7 +93,10 @@ class MarketRsRollout(Protocol):
 class MarketRsActivationRequest:
     market: str
     through_date: date
-    static_staging_dir: Path
+    static_staging_dir: Path | None = None
+    artifact_policy: MarketRsActivationArtifactPolicy = (
+        MarketRsActivationArtifactPolicy.STATIC_SITE
+    )
 
 
 @dataclass(frozen=True)
@@ -97,7 +106,7 @@ class MarketRsActivationOutcome:
     formula_version: str
     feature_run_id: int
     validation: ActivationValidationReport
-    static_staging_dir: str
+    static_staging_dir: str | None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -128,6 +137,15 @@ def validate_static_staging_directory(path: Path) -> Path:
     return resolved
 
 
+def _release_session_memory(db: Session, *, stage: str) -> None:
+    try:
+        db.expire_all()
+        db.expunge_all()
+    except Exception:
+        logger.debug("Session cleanup failed after %s", stage, exc_info=True)
+    gc.collect()
+
+
 class MarketRsActivationExecutor:
     def __init__(
         self,
@@ -152,52 +170,115 @@ class MarketRsActivationExecutor:
             market = normalize_rollout_market(request.market)
         except ValueError as exc:
             raise MarketRsActivationExecutionError(str(exc)) from exc
-        staging_dir = validate_static_staging_directory(request.static_staging_dir)
-        try:
-            coverage = self.rollout_service.activation_coverage(
-                market=market,
-                through_date=request.through_date,
+        if request.artifact_policy.requires_static_artifacts:
+            if request.static_staging_dir is None:
+                raise MarketRsActivationExecutionError(
+                    "Static staging directory is required for static artifact activation"
+                )
+            staging_dir: Path | None = validate_static_staging_directory(
+                request.static_staging_dir
             )
+        else:
+            staging_dir = None
+        try:
+            with log_runtime_stage(
+                logger,
+                "market_rs.activation.coverage",
+                market=market,
+                through_date=request.through_date.isoformat(),
+                artifact_policy=request.artifact_policy.value,
+            ):
+                coverage = self.rollout_service.activation_coverage(
+                    market=market,
+                    through_date=request.through_date,
+                )
         except ValueError as exc:
             raise MarketRsActivationExecutionError(str(exc)) from exc
-        report = self.rollout_service.backfill_activation(
-            db,
-            coverage=coverage,
-        )
+        with log_runtime_stage(
+            logger,
+            "market_rs.activation.backfill",
+            market=market,
+            through_date=request.through_date.isoformat(),
+            artifact_policy=request.artifact_policy.value,
+        ):
+            report = self.rollout_service.backfill_activation(
+                db,
+                coverage=coverage,
+            )
         if not report.ok or report.failed_count:
             raise MarketRsActivationExecutionError(
                 "One or more required backfill dates failed; repair the reported "
                 "dates before activation"
             )
+        _release_session_memory(db, stage="backfill")
 
-        feature_run_id = self.feature_snapshot_builder(
+        with log_runtime_stage(
+            logger,
+            "market_rs.activation.feature_snapshot",
             market=market,
-            through_date=request.through_date,
-        )
-        self.static_exporter(
+            through_date=request.through_date.isoformat(),
+            artifact_policy=request.artifact_policy.value,
+        ):
+            feature_run_id = self.feature_snapshot_builder(
+                market=market,
+                through_date=request.through_date,
+            )
+        _release_session_memory(db, stage="feature_snapshot")
+
+        if request.artifact_policy.requires_static_artifacts:
+            assert staging_dir is not None
+            with log_runtime_stage(
+                logger,
+                "market_rs.activation.static_export",
+                market=market,
+                through_date=request.through_date.isoformat(),
+                feature_run_id=feature_run_id,
+                artifact_policy=request.artifact_policy.value,
+            ):
+                self.static_exporter(
+                    market=market,
+                    feature_run_id=feature_run_id,
+                    static_staging_dir=staging_dir,
+                )
+            _release_session_memory(db, stage="static_export")
+
+        with log_runtime_stage(
+            logger,
+            "market_rs.activation.validate",
             market=market,
+            through_date=request.through_date.isoformat(),
             feature_run_id=feature_run_id,
-            static_staging_dir=staging_dir,
-        )
-        db.expire_all()
-        validation = self.rollout_service.validate_activation(
-            db,
-            coverage=coverage,
-            feature_run_id=feature_run_id,
-            static_staging_dir=staging_dir,
-        )
+            artifact_policy=request.artifact_policy.value,
+        ):
+            validation = self.rollout_service.validate_activation(
+                db,
+                coverage=coverage,
+                feature_run_id=feature_run_id,
+                static_staging_dir=staging_dir,
+                artifact_policy=request.artifact_policy,
+            )
         if not validation.ok:
             raise MarketRsActivationExecutionError(
                 "Activation validation failed: " + "; ".join(validation.errors)
             )
-        self.rollout_service.activate(
-            db,
+        _release_session_memory(db, stage="validation")
+        with log_runtime_stage(
+            logger,
+            "market_rs.activation.commit",
             market=market,
-            formula_version=BALANCED_RS_FORMULA_VERSION,
+            through_date=request.through_date.isoformat(),
             feature_run_id=feature_run_id,
-            validation=validation,
-            static_staging_dir=staging_dir,
-        )
+            artifact_policy=validation.artifact_policy.value,
+        ):
+            self.rollout_service.activate(
+                db,
+                market=market,
+                formula_version=BALANCED_RS_FORMULA_VERSION,
+                feature_run_id=feature_run_id,
+                validation=validation,
+                static_staging_dir=staging_dir,
+            )
+        _release_session_memory(db, stage="activation")
         identity = GroupSnapshotIdentity(
             market=market,
             as_of_date=request.through_date,
@@ -220,7 +301,7 @@ class MarketRsActivationExecutor:
             formula_version=BALANCED_RS_FORMULA_VERSION,
             feature_run_id=feature_run_id,
             validation=validation,
-            static_staging_dir=str(staging_dir),
+            static_staging_dir=str(staging_dir) if staging_dir is not None else None,
         )
 
 

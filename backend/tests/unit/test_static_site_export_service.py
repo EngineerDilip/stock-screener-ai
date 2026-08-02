@@ -145,12 +145,21 @@ def test_load_scan_export_rows_uses_empty_filter_expression(
     service, session_factory = service_and_session_factory
     observed = {}
 
-    def query_all(_repo, run_id, expression, sort, *, include_sparklines=False):
+    def query_all(
+        _repo,
+        run_id,
+        expression,
+        sort,
+        *,
+        include_sparklines=False,
+        include_setup_payload=True,
+    ):
         observed.update(
             run_id=run_id,
             expression=expression,
             sort=sort,
             include_sparklines=include_sparklines,
+            include_setup_payload=include_setup_payload,
         )
         return ()
 
@@ -171,6 +180,7 @@ def test_load_scan_export_rows_uses_empty_filter_expression(
     assert observed["run_id"] == 17
     assert observed["expression"] == FilterExpression()
     assert observed["include_sparklines"] is True
+    assert observed["include_setup_payload"] is False
 
 
 def _static_rrg_payload(market: str, as_of_date: str) -> dict:

@@ -21,7 +21,7 @@ from app.domain.common.query import (
     SortOrder,
     SortSpec,
 )
-from app.domain.scanning.filter_expression_model import QuerySpec
+from app.domain.scanning.filter_expression_model import FilterExpression, QuerySpec
 from app.domain.feature_store.models import FeaturePage, FeatureRow, FeatureRowWrite
 from app.domain.feature_store.quality import DQInputs
 from app.infra.db.models.feature_store import (  # noqa: F401 — register models
@@ -288,8 +288,8 @@ class TestGetRunDqInputs:
         assert dq.actual_row_count == 3
         assert dq.null_score_count == 0
         assert dq.total_row_count == 3
-        assert set(dq.scores) == {80.0, 90.0, 70.0}
-        assert len(dq.ratings) == 3
+        assert dq.score_mean == pytest.approx(80.0)
+        assert dq.distinct_rating_count == 1
         assert set(dq.universe_symbols) == {"AAPL", "MSFT", "GOOG"}
         assert set(dq.result_symbols) == {"AAPL", "MSFT", "GOOG"}
 
@@ -312,8 +312,8 @@ class TestGetRunDqInputs:
 
         assert dq.null_score_count == 1
         assert dq.actual_row_count == 2
-        # Null score excluded from scores tuple
-        assert dq.scores == (80.0,)
+        # Null score is excluded from the aggregate score mean.
+        assert dq.score_mean == pytest.approx(80.0)
 
     def test_empty_run_returns_zeros(self, repo: SqlFeatureStoreRepository, session: Session):
         run_id = _create_run(session)
@@ -323,8 +323,8 @@ class TestGetRunDqInputs:
         assert dq.expected_row_count == 0
         assert dq.actual_row_count == 0
         assert dq.null_score_count == 0
-        assert dq.scores == ()
-        assert dq.ratings == ()
+        assert dq.score_mean is None
+        assert dq.distinct_rating_count == 0
         assert dq.universe_symbols == ()
         assert dq.result_symbols == ()
 
@@ -543,6 +543,42 @@ class TestJoinedColumnFilters:
         assert item.extended_fields["adr_percent"] == 10.0
         assert item.extended_fields["rs_rating_1m"] == 50.0
         assert item.extended_fields["rs_rating"] is None
+
+    def test_all_scan_results_can_skip_setup_engine_payload(
+        self, repo: SqlFeatureStoreRepository, session: Session
+    ):
+        run_id = _create_run(session)
+        repo.upsert_snapshot_rows(
+            run_id,
+            [
+                FeatureRowWrite(
+                    symbol="AAPL",
+                    as_of_date=date(2026, 2, 17),
+                    composite_score=90.0,
+                    overall_rating=5,
+                    passes_count=3,
+                    details={
+                        "rating": "Strong Buy",
+                        "setup_engine": {
+                            "setup_score": 82.0,
+                            "explain": {"summary": "large payload"},
+                            "candidates": [{"pattern": "base"}],
+                        },
+                    },
+                )
+            ],
+        )
+
+        [item] = repo.query_all_as_scan_results(
+            run_id,
+            FilterExpression(),
+            SortSpec(field="composite_score", order=SortOrder.DESC),
+            include_setup_payload=False,
+        )
+
+        assert item.extended_fields["se_setup_score"] == 82.0
+        assert "se_explain" not in item.extended_fields
+        assert "se_candidates" not in item.extended_fields
 
 
 # ---------------------------------------------------------------------------

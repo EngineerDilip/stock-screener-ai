@@ -62,6 +62,7 @@ class CanonicalGroupRankingService:
             market=normalized_market,
             as_of_date=as_of_date,
             formula_version=formula_version,
+            load_rows=False,
         )
         if run is None:
             raise CanonicalGroupRankingUnavailable(
@@ -69,7 +70,10 @@ class CanonicalGroupRankingService:
                 f"on {as_of_date.isoformat()} ({formula_version})"
             )
 
-        stock_rows = {row.symbol: row for row in run.rows}
+        stock_rows = {
+            row.symbol: row
+            for row in self.repository.iter_stock_rows_for_run(db, run_id=run.id)
+        }
         market_caps = dict(
             db.query(StockUniverse.symbol, StockUniverse.market_cap)
             .filter(

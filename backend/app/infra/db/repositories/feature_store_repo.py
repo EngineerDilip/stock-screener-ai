@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from sqlalchemy import Text, cast, func
+from sqlalchemy import Text, case, cast, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -262,37 +262,52 @@ class SqlFeatureStoreRepository(FeatureStoreRepository):
         )
 
     def get_run_dq_inputs(self, run_id: int) -> DQInputs:
-        # Feature rows for this run
-        rows = (
+        row_count, null_count, mean_score = (
             self._session.query(
-                StockFeatureDaily.symbol,
-                StockFeatureDaily.composite_score,
-                StockFeatureDaily.overall_rating,
+                func.count(StockFeatureDaily.symbol),
+                func.sum(
+                    case(
+                        (StockFeatureDaily.composite_score.is_(None), 1),
+                        else_=0,
+                    )
+                ),
+                func.avg(StockFeatureDaily.composite_score),
             )
             .filter(StockFeatureDaily.run_id == run_id)
-            .all()
+            .one()
         )
-
-        # Universe symbols for this run
-        universe_rows = (
-            self._session.query(FeatureRunUniverseSymbol.symbol)
-            .filter(FeatureRunUniverseSymbol.run_id == run_id)
-            .all()
+        result_symbols = tuple(
+            symbol
+            for (symbol,) in (
+                self._session.query(StockFeatureDaily.symbol)
+                .filter(StockFeatureDaily.run_id == run_id)
+                .all()
+            )
         )
-        universe_symbols = tuple(r.symbol for r in universe_rows)
-
-        result_symbols = tuple(r.symbol for r in rows)
-        scores = tuple(r.composite_score for r in rows if r.composite_score is not None)
-        ratings = tuple(r.overall_rating for r in rows if r.overall_rating is not None)
-        null_count = sum(1 for r in rows if r.composite_score is None)
+        distinct_rating_count = (
+            self._session.query(func.count(func.distinct(StockFeatureDaily.overall_rating)))
+            .filter(
+                StockFeatureDaily.run_id == run_id,
+                StockFeatureDaily.overall_rating.isnot(None),
+            )
+            .scalar()
+        )
+        universe_symbols = tuple(
+            symbol
+            for (symbol,) in (
+                self._session.query(FeatureRunUniverseSymbol.symbol)
+                .filter(FeatureRunUniverseSymbol.run_id == run_id)
+                .all()
+            )
+        )
 
         return DQInputs(
             expected_row_count=len(universe_symbols),
-            actual_row_count=len(rows),
-            null_score_count=null_count,
-            total_row_count=len(rows),
-            scores=scores,
-            ratings=ratings,
+            actual_row_count=int(row_count or 0),
+            null_score_count=int(null_count or 0),
+            total_row_count=int(row_count or 0),
+            score_mean=float(mean_score) if mean_score is not None else None,
+            distinct_rating_count=int(distinct_rating_count or 0),
             universe_symbols=universe_symbols,
             result_symbols=result_symbols,
         )
@@ -574,6 +589,7 @@ class SqlFeatureStoreRepository(FeatureStoreRepository):
         sort: SortSpec,
         *,
         include_sparklines: bool = False,
+        include_setup_payload: bool = True,
     ) -> tuple[ScanResultItemDomain, ...]:
         """Query feature store and return ALL results (no pagination).
 
@@ -592,6 +608,7 @@ class SqlFeatureStoreRepository(FeatureStoreRepository):
             _map_feature_to_scan_result(
                 *_unpack_feature_joined_row(row),
                 include_sparklines=include_sparklines,
+                include_setup_payload=include_setup_payload,
             )
             for row in rows
         )

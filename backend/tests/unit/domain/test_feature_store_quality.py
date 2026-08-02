@@ -165,47 +165,45 @@ class TestCheckScoreDistribution:
     """Score distribution DQ check."""
 
     def test_in_range_mean(self):
-        scores = [40.0, 50.0, 60.0]  # mean = 50
-        result = check_score_distribution(scores, (30.0, 70.0))
+        result = check_score_distribution(50.0, (30.0, 70.0))
         assert result.passed is True
 
     def test_out_of_range_mean(self):
-        scores = [90.0, 95.0, 100.0]  # mean = 95
-        result = check_score_distribution(scores, (30.0, 70.0))
+        result = check_score_distribution(95.0, (30.0, 70.0))
         assert result.passed is False
 
     def test_empty_scores_fail(self):
-        result = check_score_distribution([], (30.0, 70.0))
+        result = check_score_distribution(None, (30.0, 70.0))
         assert result.passed is False
         assert "no scores" in result.message
 
     def test_single_score(self):
-        result = check_score_distribution([50.0], (40.0, 60.0))
+        result = check_score_distribution(50.0, (40.0, 60.0))
         assert result.passed is True
         assert result.actual_value == pytest.approx(50.0)
 
     def test_custom_severity(self):
         result = check_score_distribution(
-            [50.0], (40.0, 60.0), severity=DQSeverity.CRITICAL
+            50.0, (40.0, 60.0), severity=DQSeverity.CRITICAL
         )
         assert result.severity == DQSeverity.CRITICAL
 
     def test_message_includes_range(self):
-        result = check_score_distribution([50.0], (30.0, 70.0))
+        result = check_score_distribution(50.0, (30.0, 70.0))
         assert "[30.0, 70.0]" in result.message
 
     def test_threshold_is_midpoint(self):
-        result = check_score_distribution([50.0], (30.0, 70.0))
+        result = check_score_distribution(50.0, (30.0, 70.0))
         assert result.threshold == pytest.approx(50.0)
 
     def test_boundary_low(self):
         """Mean exactly at low bound passes."""
-        result = check_score_distribution([30.0], (30.0, 70.0))
+        result = check_score_distribution(30.0, (30.0, 70.0))
         assert result.passed is True
 
     def test_boundary_high(self):
         """Mean exactly at high bound passes."""
-        result = check_score_distribution([70.0], (30.0, 70.0))
+        result = check_score_distribution(70.0, (30.0, 70.0))
         assert result.passed is True
 
 
@@ -311,40 +309,40 @@ class TestCheckRatingDistribution:
     """Rating distribution DQ check."""
 
     def test_multiple_distinct_ratings_pass(self):
-        result = check_rating_distribution([1, 2, 3, 4, 5])
+        result = check_rating_distribution(5)
         assert result.passed is True
         assert result.check_name == DQ_RATING_DISTRIBUTION
 
     def test_single_value_fails(self):
-        result = check_rating_distribution([3, 3, 3, 3])
+        result = check_rating_distribution(1)
         assert result.passed is False
 
     def test_empty_ratings_fail(self):
-        result = check_rating_distribution([])
+        result = check_rating_distribution(0)
         assert result.passed is False
         assert result.actual_value == 0.0
 
     def test_exact_threshold_passes(self):
-        result = check_rating_distribution([1, 2], min_distinct=2)
+        result = check_rating_distribution(2, min_distinct=2)
         assert result.passed is True
         assert result.actual_value == 2.0
 
     def test_below_threshold_fails(self):
-        result = check_rating_distribution([1], min_distinct=2)
+        result = check_rating_distribution(1, min_distinct=2)
         assert result.passed is False
 
     def test_custom_severity(self):
         result = check_rating_distribution(
-            [1, 2], severity=DQSeverity.CRITICAL
+            2, severity=DQSeverity.CRITICAL
         )
         assert result.severity == DQSeverity.CRITICAL
 
     def test_custom_min_distinct(self):
-        result = check_rating_distribution([1, 2, 3], min_distinct=3)
+        result = check_rating_distribution(3, min_distinct=3)
         assert result.passed is True
 
     def test_message_contains_count(self):
-        result = check_rating_distribution([1, 2, 3])
+        result = check_rating_distribution(3)
         assert "3 distinct" in result.message
 
 
@@ -478,8 +476,8 @@ class TestRunAllDQChecks:
             actual_row_count=10,
             null_score_count=0,
             total_row_count=10,
-            scores=tuple(50.0 + i for i in range(10)),
-            ratings=(1, 2, 3, 4, 5, 1, 2, 3, 4, 5),
+            score_mean=54.5,
+            distinct_rating_count=5,
             universe_symbols=tuple(f"SYM{i}" for i in range(10)),
             result_symbols=tuple(f"SYM{i}" for i in range(10)),
         )

@@ -7,9 +7,8 @@ severity, actual/threshold values, and a human-readable message.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from collections.abc import Sequence
-from statistics import mean
+from dataclasses import dataclass
 
 from .models import DQSeverity
 
@@ -90,8 +89,8 @@ class DQInputs:
     actual_row_count: int
     null_score_count: int
     total_row_count: int
-    scores: tuple[float, ...]
-    ratings: tuple[int, ...]
+    score_mean: float | None
+    distinct_rating_count: int
     universe_symbols: tuple[str, ...]
     result_symbols: tuple[str, ...]
 
@@ -162,20 +161,20 @@ def check_null_rate(
 
 
 def check_score_distribution(
-    scores: Sequence[float],
+    score_mean: float | None,
     expected_mean_range: tuple[float, float],
     severity: DQSeverity = DQSeverity.WARNING,
 ) -> DQResult:
-    """Check that the mean of *scores* falls within *expected_mean_range*.
+    """Check that the score mean falls within *expected_mean_range*.
 
-    Empty *scores* always fail.  The ``threshold`` field is set to the
+    Missing score means always fail.  The ``threshold`` field is set to the
     midpoint of the range for simple display; the ``message`` includes
     the full range.
     """
     low, high = expected_mean_range
     midpoint = (low + high) / 2.0
 
-    if len(scores) == 0:
+    if score_mean is None:
         return DQResult(
             check_name=DQ_SCORE_DISTRIBUTION,
             passed=False,
@@ -188,7 +187,7 @@ def check_score_distribution(
             ),
         )
 
-    actual_mean = mean(scores)
+    actual_mean = float(score_mean)
     passed = low <= actual_mean <= high
     return DQResult(
         check_name=DQ_SCORE_DISTRIBUTION,
@@ -205,15 +204,15 @@ def check_score_distribution(
 
 
 def check_rating_distribution(
-    ratings: Sequence[int],
+    distinct_count: int,
     min_distinct: int = 2,
     severity: DQSeverity = DQSeverity.WARNING,
 ) -> DQResult:
     """Check that ratings contain at least *min_distinct* distinct values.
 
-    Empty ratings always fail (0 distinct < 2).
+    A zero distinct count always fails when min_distinct is positive.
     """
-    distinct = len(set(ratings))
+    distinct = int(distinct_count)
     passed = distinct >= min_distinct
     return DQResult(
         check_name=DQ_RATING_DISTRIBUTION,
@@ -285,11 +284,11 @@ def run_all_dq_checks(
             max_rate=thresholds.null_max_rate,
         ),
         check_score_distribution(
-            list(inputs.scores),
+            inputs.score_mean,
             thresholds.score_mean_range,
         ),
         check_rating_distribution(
-            list(inputs.ratings),
+            inputs.distinct_rating_count,
             min_distinct=thresholds.min_distinct_ratings,
         ),
         check_symbol_coverage(

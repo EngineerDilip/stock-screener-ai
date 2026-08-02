@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import date
+from enum import Enum
 
 from app.services.static_rrg_history_contract import (
     STATIC_RRG_HISTORY_SCHEMA_VERSION,
@@ -16,6 +17,15 @@ def normalize_rollout_market(market: str) -> str:
     if normalized == "SHARED":
         raise ValueError("Market RS rollout requires an explicit market")
     return normalized
+
+
+class MarketRsActivationArtifactPolicy(str, Enum):
+    STATIC_SITE = "static_site"
+    LIVE_RUNTIME = "live_runtime"
+
+    @property
+    def requires_static_artifacts(self) -> bool:
+        return self is MarketRsActivationArtifactPolicy.STATIC_SITE
 
 
 @dataclass(frozen=True)
@@ -109,6 +119,9 @@ class ActivationValidationReport:
     feature_universe_hash: str | None
     static_bundle_sha256: str | None
     errors: tuple[str, ...]
+    artifact_policy: MarketRsActivationArtifactPolicy = (
+        MarketRsActivationArtifactPolicy.STATIC_SITE
+    )
     rrg_status: str | None = None
     rrg_history_schema_version: str = STATIC_RRG_HISTORY_SCHEMA_VERSION
 
@@ -126,6 +139,7 @@ class ActivationValidationReport:
         )
         payload["ok"] = self.ok
         payload["errors"] = list(self.errors)
+        payload["artifact_policy"] = self.artifact_policy.value
         return payload
 
 
@@ -139,6 +153,7 @@ __all__ = [
     "ActivationValidationReport",
     "BackfillDateResult",
     "BackfillReport",
+    "MarketRsActivationArtifactPolicy",
     "MarketRsBootstrapThroughDateResolution",
     "MarketRsActivationRejected",
     "normalize_rollout_market",

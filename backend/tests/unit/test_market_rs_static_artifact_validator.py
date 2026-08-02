@@ -172,6 +172,37 @@ def test_validate_checks_every_scan_shard_and_requires_exact_row_identity(
     assert result.bundle_fingerprint is not None
 
 
+def test_load_scan_rows_returns_stream_source_instead_of_materialized_tuple(
+    tmp_path,
+):
+    market_dir = _staged_bundle(tmp_path)
+    scan_payload = json.loads(
+        (market_dir / "scan" / "manifest.json").read_text(encoding="utf-8")
+    )
+    identity = {
+        "rs_formula_version": BALANCED_RS_FORMULA_VERSION,
+        "market_rs_run_id": 42,
+        "rs_as_of_date": "2026-04-10",
+        "rs_universe_size": 2,
+    }
+    errors: list[str] = []
+
+    scan_rows = MarketRsStaticArtifactValidator()._load_scan_rows(  # noqa: SLF001
+        tmp_path,
+        market_dir=market_dir,
+        scan_payload=scan_payload,
+        feature_run_id=99,
+        expected_identity=identity,
+        errors=errors,
+    )
+
+    assert errors == []
+    assert not isinstance(scan_rows, tuple)
+    assert scan_rows.row_count == 2
+    assert [row["symbol"] for row in scan_rows.iter_rows()] == ["AAA", "BBB"]
+    assert [row["symbol"] for row in scan_rows.iter_rows()] == ["AAA", "BBB"]
+
+
 def test_stock_parity_allows_audited_rows_excluded_from_canonical_ratings():
     latest_run = SimpleNamespace(
         id=42,
@@ -216,7 +247,7 @@ def test_stock_parity_allows_audited_rows_excluded_from_canonical_ratings():
     )
     errors: list[str] = []
 
-    MarketRsStaticArtifactValidator._validate_stock_parity(
+    MarketRsStaticArtifactValidator()._validate_stock_parity(
         latest_run=latest_run,
         through_date=date(2026, 4, 10),
         documents=documents,
@@ -224,6 +255,54 @@ def test_stock_parity_allows_audited_rows_excluded_from_canonical_ratings():
     )
 
     assert errors == []
+
+
+def test_stock_parity_uses_injected_market_rs_row_source():
+    latest_run = SimpleNamespace(id=42, eligible_symbol_count=1, rows=[])
+    identity = {
+        "rs_formula_version": BALANCED_RS_FORMULA_VERSION,
+        "market_rs_run_id": 42,
+        "rs_as_of_date": "2026-04-10",
+        "rs_universe_size": 1,
+    }
+    documents = StaticRsArtifactDocuments(
+        manifest={},
+        groups={},
+        scan_rows=(
+            {
+                "symbol": "AAA",
+                "rs_rating": 90,
+                "rs_rating_1m": 88,
+                "rs_rating_3m": 89,
+                "rs_rating_12m": 91,
+                **identity,
+            },
+        ),
+    )
+    repository = MagicMock()
+    repository.iter_stock_rows_for_run.return_value = (
+        SimpleNamespace(
+            symbol="AAA",
+            overall_rs=90,
+            rs_1m=88,
+            rs_3m=89,
+            rs_12m=91,
+        )
+        for _ in range(1)
+    )
+    validator = MarketRsStaticArtifactValidator(market_rs_repository=repository)
+    errors: list[str] = []
+
+    validator._validate_stock_parity(  # noqa: SLF001
+        db=MagicMock(),
+        latest_run=latest_run,
+        through_date=date(2026, 4, 10),
+        documents=documents,
+        errors=errors,
+    )
+
+    assert errors == []
+    repository.iter_stock_rows_for_run.assert_called_once()
 
 
 def test_rrg_validation_accepts_market_where_rrg_is_not_enabled(

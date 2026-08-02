@@ -105,7 +105,7 @@ class MarketRsActivator:
         formula_version: str,
         feature_run_id: int,
         validation: ActivationValidationReport,
-        static_staging_dir: Path,
+        static_staging_dir: Path | None,
     ) -> None:
         normalized = normalize_rollout_market(market)
         if not validation.ok:
@@ -121,44 +121,50 @@ class MarketRsActivator:
                 ("Activation request does not match its validation report.",)
             )
 
-        manifest_path = Path(static_staging_dir) / "manifest.json"
-        if not manifest_path.is_file():
-            raise MarketRsActivationRejected(
-                ("Validated static manifest disappeared before activation.",)
-            )
-        current_fingerprint = MarketRsStaticArtifactValidator.bundle_fingerprint(
-            Path(static_staging_dir),
-            market=normalized,
-        )
-        if current_fingerprint.sha256 != validation.static_bundle_sha256:
-            raise MarketRsActivationRejected(
-                ("Validated static bundle changed after validation.",)
-            )
-        static_errors = self.validator.revalidate_static(
-            db,
-            market=normalized,
-            through_date=validation.through_date,
-            feature_run_id=feature_run_id,
-            static_staging_dir=Path(static_staging_dir),
-        )
-        post_validation_fingerprint = (
-            MarketRsStaticArtifactValidator.bundle_fingerprint(
-                Path(static_staging_dir),
+        if validation.artifact_policy.requires_static_artifacts:
+            if static_staging_dir is None:
+                raise MarketRsActivationRejected(
+                    ("Validated static staging directory is missing.",)
+                )
+            staging_path = Path(static_staging_dir)
+            manifest_path = staging_path / "manifest.json"
+            if not manifest_path.is_file():
+                raise MarketRsActivationRejected(
+                    ("Validated static manifest disappeared before activation.",)
+                )
+            current_fingerprint = MarketRsStaticArtifactValidator.bundle_fingerprint(
+                staging_path,
                 market=normalized,
             )
-        )
-        if (
-            static_errors
-            or post_validation_fingerprint.sha256
-            != current_fingerprint.sha256
-        ):
-            raise MarketRsActivationRejected(
-                static_errors
-                or (
-                    "Validated static bundle changed during activation "
-                    "revalidation.",
+            if current_fingerprint.sha256 != validation.static_bundle_sha256:
+                raise MarketRsActivationRejected(
+                    ("Validated static bundle changed after validation.",)
+                )
+            static_errors = self.validator.revalidate_static(
+                db,
+                market=normalized,
+                through_date=validation.through_date,
+                feature_run_id=feature_run_id,
+                static_staging_dir=staging_path,
+            )
+            post_validation_fingerprint = (
+                MarketRsStaticArtifactValidator.bundle_fingerprint(
+                    staging_path,
+                    market=normalized,
                 )
             )
+            if (
+                static_errors
+                or post_validation_fingerprint.sha256
+                != current_fingerprint.sha256
+            ):
+                raise MarketRsActivationRejected(
+                    static_errors
+                    or (
+                        "Validated static bundle changed during activation "
+                        "revalidation.",
+                    )
+                )
 
         try:
             current_run = self.repository.get_completed_exact(
@@ -166,6 +172,7 @@ class MarketRsActivator:
                 market=normalized,
                 as_of_date=validation.through_date,
                 formula_version=formula_version,
+                load_rows=False,
             )
             if (
                 current_run is None

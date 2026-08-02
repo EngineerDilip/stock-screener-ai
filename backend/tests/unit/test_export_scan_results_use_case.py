@@ -49,15 +49,28 @@ class TrackingFeatureStoreRepo(FakeFeatureStoreRepository):
         super().__init__()
         self.last_query_all_args: dict | None = None
 
-    def query_all_as_scan_results(self, run_id, expression, sort, *, include_sparklines=False):
+    def query_all_as_scan_results(
+        self,
+        run_id,
+        expression,
+        sort,
+        *,
+        include_sparklines=False,
+        include_setup_payload=True,
+    ):
         self.last_query_all_args = {
             "run_id": run_id,
             "expression": expression,
             "sort": sort,
             "include_sparklines": include_sparklines,
+            "include_setup_payload": include_setup_payload,
         }
         return super().query_all_as_scan_results(
-            run_id, expression, sort, include_sparklines=include_sparklines
+            run_id,
+            expression,
+            sort,
+            include_sparklines=include_sparklines,
+            include_setup_payload=include_setup_payload,
         )
 
 

@@ -796,8 +796,8 @@ class FakeFeatureStoreRepository(FeatureStoreRepository):
             actual_row_count=len(rows),
             null_score_count=null_count,
             total_row_count=len(rows),
-            scores=scores,
-            ratings=ratings,
+            score_mean=(sum(scores) / len(scores)) if scores else None,
+            distinct_rating_count=len(set(ratings)),
             universe_symbols=tuple(universe),
             result_symbols=result_symbols,
         )
@@ -923,7 +923,15 @@ class FakeFeatureStoreRepository(FeatureStoreRepository):
             if (r.details or {}).get("gics_sector") == gics_sector
         )
 
-    def query_all_as_scan_results(self, run_id, expression, sort, *, include_sparklines=False):
+    def query_all_as_scan_results(
+        self,
+        run_id,
+        expression,
+        sort,
+        *,
+        include_sparklines=False,
+        include_setup_payload=True,
+    ):
         """Bridge method: return all rows as ScanResultItemDomain (no pagination)."""
         if run_id not in self._rows:
             raise EntityNotFoundError("FeatureRun", run_id)

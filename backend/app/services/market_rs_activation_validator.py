@@ -30,10 +30,16 @@ from app.services.market_rs_activation_coverage import MarketRsActivationCoverag
 from app.services.market_rs_backfill_service import MarketRsBackfillService
 from app.services.market_rs_rollout_contracts import (
     ActivationValidationReport,
+    MarketRsActivationArtifactPolicy,
     normalize_rollout_market,
 )
 from app.services.market_rs_static_artifact_validator import (
     MarketRsStaticArtifactValidator,
+)
+from app.services.static_groups_rrg_export import (
+    StaticGroupsRRGDatabasePayloadSource,
+    StaticGroupsRRGUnavailableError,
+    StaticGroupsRRGUnavailableReason,
 )
 from app.services.static_market_artifact_contract import STATIC_SITE_SCHEMA_VERSION
 
@@ -67,6 +73,7 @@ class MarketRsActivationValidator:
             market=market,
             as_of_date=calculation_date,
             formula_version=BALANCED_RS_FORMULA_VERSION,
+            load_rows=False,
         )
         if run is None:
             errors.append(
@@ -77,12 +84,11 @@ class MarketRsActivationValidator:
             errors.append(
                 f"Market RS run for {calculation_date} has an incompatible price basis."
             )
-        if len(run.rows) != int(run.eligible_symbol_count):
-            errors.append(
-                f"Stock row count mismatch for {calculation_date}: "
-                f"{len(run.rows)} != {run.eligible_symbol_count}."
-            )
-        for row in run.rows:
+        row_count = 0
+        eligible_symbols: set[str] = set()
+        for row in self.repository.iter_stock_rows_for_run(db, run_id=run.id):
+            row_count += 1
+            eligible_symbols.add(row.symbol)
             ratings = (
                 row.overall_rs,
                 row.rs_1m,
@@ -105,6 +111,12 @@ class MarketRsActivationValidator:
                     f"on {calculation_date}."
                 )
 
+        if row_count != int(run.eligible_symbol_count):
+            errors.append(
+                f"Stock row count mismatch for {calculation_date}: "
+                f"{row_count} != {run.eligible_symbol_count}."
+            )
+
         if not get_market_catalog().get(market).capabilities.group_rankings:
             return run
 
@@ -117,7 +129,6 @@ class MarketRsActivationValidator:
             )
             .all()
         )
-        eligible_symbols = {row.symbol for row in run.rows}
         expected_groups: set[str] = set()
         try:
             memberships = IBDIndustryService.get_group_memberships(
@@ -206,11 +217,15 @@ class MarketRsActivationValidator:
         *,
         coverage: MarketRsActivationCoverage,
         feature_run_id: int,
-        static_staging_dir: Path,
+        static_staging_dir: Path | None,
+        artifact_policy: MarketRsActivationArtifactPolicy = (
+            MarketRsActivationArtifactPolicy.STATIC_SITE
+        ),
     ) -> ActivationValidationReport:
         normalized = normalize_rollout_market(coverage.market)
         through_date = coverage.through_date
         errors: list[str] = []
+        staging_path = Path(static_staging_dir) if static_staging_dir is not None else None
         candidates = coverage.required_dates
         first_valid = coverage.start_date if candidates else None
         if not candidates:
@@ -248,26 +263,42 @@ class MarketRsActivationValidator:
 
         bundle_hash = None
         rrg_status = None
-        if latest_run is not None:
-            try:
-                static_result = self.static_validator.validate(
-                    db,
-                    market=normalized,
-                    through_date=through_date,
-                    latest_run=latest_run,
-                    feature_run_id=feature_run_id,
-                    static_staging_dir=Path(static_staging_dir),
-                )
-                bundle_hash = (
-                    static_result.bundle_fingerprint.sha256
-                    if static_result.bundle_fingerprint is not None
-                    else None
-                )
-                rrg_status = static_result.rrg_status
-                errors.extend(static_result.errors)
-            except Exception as exc:
-                errors.append(f"Staged static artifact validation failed: {exc}")
-        elif not (Path(static_staging_dir) / "manifest.json").is_file():
+        if latest_run is not None and artifact_policy.requires_static_artifacts:
+            if staging_path is None:
+                errors.append("Missing static staging directory for artifact validation.")
+            else:
+                try:
+                    static_result = self.static_validator.validate(
+                        db,
+                        market=normalized,
+                        through_date=through_date,
+                        latest_run=latest_run,
+                        feature_run_id=feature_run_id,
+                        static_staging_dir=staging_path,
+                    )
+                    bundle_hash = (
+                        static_result.bundle_fingerprint.sha256
+                        if static_result.bundle_fingerprint is not None
+                        else None
+                    )
+                    rrg_status = static_result.rrg_status
+                    errors.extend(static_result.errors)
+                except Exception as exc:
+                    errors.append(f"Staged static artifact validation failed: {exc}")
+        elif latest_run is not None:
+            rrg_status = self._validate_live_rrg(
+                db,
+                market=normalized,
+                through_date=through_date,
+                errors=errors,
+            )
+        elif (
+            artifact_policy.requires_static_artifacts
+            and (
+                staging_path is None
+                or not (staging_path / "manifest.json").is_file()
+            )
+        ):
             errors.append(f"Missing staged {STATIC_SITE_SCHEMA_VERSION} manifest.")
 
         return ActivationValidationReport(
@@ -281,9 +312,44 @@ class MarketRsActivationValidator:
             feature_run_id=getattr(feature, "id", feature_run_id),
             feature_universe_hash=getattr(feature, "universe_hash", None),
             static_bundle_sha256=bundle_hash,
+            artifact_policy=artifact_policy,
             errors=tuple(dict.fromkeys(errors)),
             rrg_status=rrg_status,
         )
+
+    @staticmethod
+    def _validate_live_rrg(
+        db: Session,
+        *,
+        market: str,
+        through_date: date,
+        errors: list[str],
+    ) -> str | None:
+        try:
+            StaticGroupsRRGDatabasePayloadSource(
+                schema_version=STATIC_SITE_SCHEMA_VERSION,
+            ).build(
+                db=db,
+                generated_at="validation",
+                expected_as_of_date=through_date,
+                market=market,
+                formula_version=BALANCED_RS_FORMULA_VERSION,
+            )
+        except StaticGroupsRRGUnavailableError as exc:
+            if exc.reason_code is StaticGroupsRRGUnavailableReason.NOT_ENABLED:
+                return "not_enabled"
+            if exc.reason_code is StaticGroupsRRGUnavailableReason.INSUFFICIENT_HISTORY:
+                errors.append(
+                    "Balanced RRG history is insufficient for guarded activation: "
+                    f"{exc.reason}"
+                )
+                return "insufficient_balanced_history"
+            errors.append(
+                "Balanced RRG validation failed "
+                f"({exc.reason_code.value}): {exc.reason}"
+            )
+            return None
+        return "available"
 
     def revalidate_static(
         self,

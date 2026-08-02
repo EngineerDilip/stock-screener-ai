@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import gc
+import logging
 from datetime import date
 
 from celery.exceptions import SoftTimeLimitExceeded
@@ -27,6 +29,17 @@ from app.services.market_rs_rollout_contracts import (
     normalize_rollout_market,
 )
 from app.services.market_rs_snapshot_service import MarketRsSnapshotService
+
+logger = logging.getLogger(__name__)
+
+
+def _release_backfill_date_memory(db: Session) -> None:
+    try:
+        db.expire_all()
+        db.expunge_all()
+    except Exception:
+        logger.debug("Market RS backfill session cleanup failed", exc_info=True)
+    gc.collect()
 
 
 class MarketRsBackfillService:
@@ -212,6 +225,7 @@ class MarketRsBackfillService:
                 market=normalized,
                 as_of_date=calculation_date,
                 formula_version=BALANCED_RS_FORMULA_VERSION,
+                load_rows=False,
             )
             if start_date is not None and calculation_date < start_date and run is None:
                 results.append(
@@ -232,6 +246,7 @@ class MarketRsBackfillService:
                         },
                     )
                 )
+                _release_backfill_date_memory(db)
                 continue
             stage = "stock_calculation"
             try:
@@ -277,8 +292,10 @@ class MarketRsBackfillService:
                         group_row_count=len(groups),
                     )
                 )
+                _release_backfill_date_memory(db)
             except (SoftTimeLimitExceeded, DBAPIError):
                 db.rollback()
+                _release_backfill_date_memory(db)
                 raise
             except Exception as exc:
                 db.rollback()
@@ -307,6 +324,7 @@ class MarketRsBackfillService:
                         diagnostics=diagnostics,
                     )
                 )
+                _release_backfill_date_memory(db)
 
         completed = tuple(item for item in results if item.status == "completed")
         failed = tuple(item for item in results if item.status == "failed")

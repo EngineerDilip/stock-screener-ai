@@ -713,6 +713,7 @@ def build_daily_snapshot(
                         market=effective_market,
                         as_of_date=as_of,
                         formula_version=formula,
+                        load_rows=False,
                     )
                     source_compatible = bool(
                         exact_run is not None

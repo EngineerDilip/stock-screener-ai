@@ -87,6 +87,7 @@ class MarketRsSnapshotService:
             market=market,
             as_of_date=as_of_date,
             formula_version=formula_version,
+            load_rows=False,
         )
         if existing is not None and balanced_run_has_required_price_basis(existing):
             return existing

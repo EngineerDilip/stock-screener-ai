@@ -79,6 +79,18 @@ class StaticChartBundleExporter:
         row_by_symbol: dict[str, Any] = {}
         ordered_rows = list(rows)
 
+        def item_symbol(item):
+            if isinstance(item, dict):
+                return item.get("symbol")
+            return getattr(item, "symbol", None)
+
+        def item_payload(item):
+            if item is None:
+                return None
+            if isinstance(item, dict):
+                return item
+            return self._serialize_scan_row(item)
+
         def emit(symbol, *, rank, stock_data, price_df, fundamentals_value):
             bars = self._serialize_chart_bars(price_df)
             if not bars:
@@ -124,7 +136,7 @@ class StaticChartBundleExporter:
                 if row.get("symbol")
             }
             for row in ordered_rows:
-                symbol = getattr(row, "symbol", None)
+                symbol = item_symbol(row)
                 if symbol and symbol not in row_by_symbol:
                     row_by_symbol[symbol] = row
             for offset in range(0, len(extra), self._config.lookup_batch_size):
@@ -136,11 +148,8 @@ class StaticChartBundleExporter:
                     emit(
                         symbol,
                         rank=None,
-                        stock_data=(
-                            self._serialize_scan_row(domain_row)
-                            if domain_row
-                            else serialized_by_symbol.get(symbol)
-                        ),
+                        stock_data=item_payload(domain_row)
+                        or serialized_by_symbol.get(symbol),
                         price_df=price_data.get(symbol),
                         fundamentals_value=fundamentals.get(symbol),
                     )
@@ -152,17 +161,7 @@ class StaticChartBundleExporter:
             )
 
         if serialized_rows is not None:
-            raw_rows = {
-                getattr(row, "symbol", None): row
-                for row in rows
-                if getattr(row, "symbol", None)
-            }
-            ordered_symbols = [row["symbol"] for row in serialized_rows if row.get("symbol")]
-            ordered_rows = [raw_rows[symbol] for symbol in ordered_symbols if symbol in raw_rows]
-            seen = {getattr(row, "symbol", None) for row in ordered_rows}
-            ordered_rows.extend(
-                row for row in rows if getattr(row, "symbol", None) not in seen
-            )
+            ordered_rows = list(serialized_rows)
 
         for start in range(0, len(ordered_rows), self._config.lookup_batch_size):
             if len(entries) >= self._config.chart_limit:
@@ -170,20 +169,20 @@ class StaticChartBundleExporter:
             batch_rows = list(
                 ordered_rows[start : start + self._config.lookup_batch_size]
             )
-            symbols = [row.symbol for row in batch_rows if getattr(row, "symbol", None)]
+            symbols = [symbol for row in batch_rows if (symbol := item_symbol(row))]
             price_data = self._price_cache.get_many_cached_only(symbols, period="2y")
             fundamentals = self._fundamentals_cache.get_many_cached_only(symbols)
             for rank, row in enumerate(batch_rows, start=start + 1):
                 if len(entries) >= self._config.chart_limit:
                     break
-                symbol = getattr(row, "symbol", None)
+                symbol = item_symbol(row)
                 if not symbol:
                     continue
                 row_by_symbol[symbol] = row
                 emit(
                     symbol,
                     rank=rank,
-                    stock_data=self._serialize_scan_row(row),
+                    stock_data=item_payload(row),
                     price_df=price_data.get(symbol),
                     fundamentals_value=fundamentals.get(symbol),
                 )

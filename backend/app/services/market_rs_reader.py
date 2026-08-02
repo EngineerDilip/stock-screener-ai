@@ -97,6 +97,7 @@ class SqlMarketRsReader:
                     db,
                     market=normalized_market,
                     formula_version=resolved_formula,
+                    load_rows=False,
                 )
             else:
                 run = self._repository.get_completed_exact(
@@ -104,6 +105,7 @@ class SqlMarketRsReader:
                     market=normalized_market,
                     as_of_date=as_of_date,
                     formula_version=resolved_formula,
+                    load_rows=False,
                 )
             if run is None:
                 requested_date = as_of_date.isoformat() if as_of_date else "latest"

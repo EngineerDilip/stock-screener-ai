@@ -571,6 +571,7 @@ class IBDGroupRankService:
                 market=snapshot.market,
                 as_of_date=snapshot.as_of_date,
                 formula_version=snapshot.formula_version,
+                load_rows=False,
             )
             if (
                 run is None

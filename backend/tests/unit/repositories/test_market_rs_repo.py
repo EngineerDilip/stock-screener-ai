@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 
 import pytest
+from sqlalchemy import inspect
 from sqlalchemy.orm import sessionmaker
 
 from app.domain.relative_strength import (
@@ -65,6 +66,63 @@ def test_completed_run_is_invisible_until_rows_and_status_commit(db_session):
         as_of_date=AS_OF,
         formula_version=BALANCED_RS_FORMULA_VERSION,
     ) is None
+
+
+def test_completed_run_can_skip_snapshot_row_hydration(db_session):
+    repo = MarketRsRunRepository()
+    run = repo.start_or_restart(db_session, **_run_kwargs())
+    repo.replace_rows(
+        db_session,
+        run,
+        {"AAA": _score("AAA", 70), "BBB": _score("BBB", 80)},
+    )
+    repo.mark_completed(run, excluded_symbol_count=0, diagnostics={})
+    db_session.commit()
+    db_session.expunge_all()
+
+    metadata = repo.get_completed_exact(
+        db_session,
+        market="US",
+        as_of_date=AS_OF,
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+        load_rows=False,
+    )
+
+    assert metadata is not None
+    assert metadata.eligible_symbol_count == 2
+    assert "rows" in inspect(metadata).unloaded
+
+    db_session.expunge_all()
+    hydrated = repo.get_completed_exact(
+        db_session,
+        market="US",
+        as_of_date=AS_OF,
+        formula_version=BALANCED_RS_FORMULA_VERSION,
+        load_rows=True,
+    )
+
+    assert hydrated is not None
+    assert "rows" not in inspect(hydrated).unloaded
+
+
+def test_iter_stock_rows_for_run_returns_scalar_snapshots(db_session):
+    repo = MarketRsRunRepository()
+    run = repo.start_or_restart(db_session, **_run_kwargs())
+    repo.replace_rows(
+        db_session,
+        run,
+        {"AAA": _score("AAA", 70), "BBB": _score("BBB", 80)},
+    )
+    repo.mark_completed(run, excluded_symbol_count=0, diagnostics={})
+    run_id = run.id
+    db_session.commit()
+    db_session.expunge_all()
+
+    rows = list(repo.iter_stock_rows_for_run(db_session, run_id=run_id, batch_size=1))
+
+    assert [row.symbol for row in rows] == ["AAA", "BBB"]
+    assert rows[0].overall_rs == 70
+    assert not isinstance(rows[0], StockRsSnapshot)
 
 
 def test_list_completed_runs_filters_window_formula_and_status(db_session):
