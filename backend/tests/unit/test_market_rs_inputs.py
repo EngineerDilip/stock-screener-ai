@@ -13,7 +13,6 @@ from app.services.point_in_time_universe_service import (
     PointInTimeUniverseUnavailable,
 )
 
-
 ANCHORS = {
     0: date(2026, 4, 10),
     21: date(2026, 3, 10),
@@ -42,6 +41,26 @@ class _CalendarStub:
     def session_anchors(_market, _as_of_date, *, offsets):
         assert set(offsets) == {21, 63, 126, 189, 252}
         return dict(ANCHORS)
+
+    @staticmethod
+    def calendar_metadata(market):
+        return {
+            "market": market,
+            "calendar_id": "XNYS",
+            "provider_calendar_id": "XNYS",
+            "calendar_provider": "exchange_calendars",
+        }
+
+
+class _CalendarWithMetadata(_CalendarStub):
+    @staticmethod
+    def calendar_metadata(market):
+        return {
+            "market": market,
+            "calendar_id": "XTKS",
+            "provider_calendar_id": "JPX",
+            "calendar_provider": "pandas_market_calendars",
+        }
 
 
 class _BenchmarkRegistryStub:
@@ -171,6 +190,50 @@ def test_load_fails_when_no_benchmark_has_every_exact_anchor(db_session):
     assert exc_info.value.reason_code == "benchmark_adjusted_anchor_missing"
     assert exc_info.value.benchmark_symbol == "SPY"
     assert exc_info.value.expected_symbol_count == 1
+    assert exc_info.value.diagnostics["calendar_metadata"] == {
+        "market": "US",
+        "calendar_id": "XNYS",
+        "provider_calendar_id": "XNYS",
+        "calendar_provider": "exchange_calendars",
+    }
+
+
+def test_missing_benchmark_anchor_reports_price_backed_calendar_diagnostics(
+    db_session,
+):
+    db_session.add_all(
+        [
+            *_complete_rows("AAA", {offset: 100.0 for offset in ANCHORS}),
+            *[
+                _price("^N225", offset, adjusted=100.0)
+                for offset in ANCHORS
+                if offset != 21
+            ],
+        ]
+    )
+    db_session.commit()
+    loader = MarketRsInputLoader(
+        point_in_time_universe=_UniverseStub(("AAA",)),
+        market_calendar=_CalendarWithMetadata(),
+        benchmark_registry=_BenchmarkRegistryStub(candidates=("^N225",)),
+    )
+
+    with pytest.raises(MarketRsInputUnavailable) as exc_info:
+        loader.load(db_session, market="JP", as_of_date=ANCHORS[0])
+
+    diagnostics = exc_info.value.diagnostics
+    assert diagnostics["missing_anchor_dates"] == {
+        "^N225": [ANCHORS[21].isoformat()]
+    }
+    assert diagnostics["benchmark_anchor_price_coverage"]["^N225"] == pytest.approx(
+        5 / 6
+    )
+    assert diagnostics["calendar_metadata"] == {
+        "market": "JP",
+        "calendar_id": "XTKS",
+        "provider_calendar_id": "JPX",
+        "calendar_provider": "pandas_market_calendars",
+    }
 
 
 def test_load_fails_when_current_price_coverage_is_below_ninety_percent(db_session):

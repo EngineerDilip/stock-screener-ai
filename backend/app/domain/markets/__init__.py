@@ -14,6 +14,11 @@ from .catalog import (
     MarketCatalogError,
     get_market_catalog,
 )
+from .calendar_policy import (
+    CalendarProvider,
+    CalendarSessionOverride,
+    calendar_session_probe_expectations,
+)
 from .market import (
     SUPPORTED_MARKET_CODE_ORDER,
     SUPPORTED_MARKET_CODES,
@@ -67,6 +72,8 @@ __all__ = [
     "MarketProfile",
     "MarketRegistry",
     "BenchmarkFacts",
+    "CalendarProvider",
+    "CalendarSessionOverride",
     "MicFacts",
     "MicAliasDefinition",
     "MicAliasRegistry",
@@ -76,6 +83,7 @@ __all__ = [
     "SUPPORTED_MARKET_CODE_ORDER",
     "SUPPORTED_MARKET_CODES",
     "UnsupportedMarketError",
+    "calendar_session_probe_expectations",
     "get_market_catalog",
     "market_registry",
     "mic_alias_registry",

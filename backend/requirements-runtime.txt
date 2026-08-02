@@ -15,7 +15,8 @@ baostock>=0.8.9
 defusedxml>=0.7.1
 curl_cffi>=0.7.0
 pandas==2.2.0
-pandas-market-calendars>=4.5.0
+pandas-market-calendars==5.3.0
+exchange-calendars==4.11.1
 numpy==1.26.3
 requests==2.31.0
 openpyxl>=3.1.0

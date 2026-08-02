@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from datetime import date
+from typing import Protocol
 
 from sqlalchemy.orm import Session
 
@@ -61,12 +62,26 @@ class MarketRsInputUnavailable(RuntimeError):
         self.expected_symbol_count = expected_symbol_count
 
 
+class MarketCalendarForRsInputs(Protocol):
+    def session_anchors(
+        self,
+        market: str,
+        as_of_date: date,
+        *,
+        offsets: tuple[int, ...],
+    ) -> dict[int, date]:
+        ...
+
+    def calendar_metadata(self, market: str) -> dict[str, str | None]:
+        ...
+
+
 class MarketRsInputLoader:
     def __init__(
         self,
         *,
         point_in_time_universe: PointInTimeUniverseService | None = None,
-        market_calendar: MarketCalendarService | None = None,
+        market_calendar: MarketCalendarForRsInputs | None = None,
         benchmark_registry: BenchmarkRegistryService = benchmark_registry,
     ) -> None:
         self._point_in_time_universe = (
@@ -162,6 +177,7 @@ class MarketRsInputLoader:
             None,
         )
         if benchmark_symbol is None:
+            anchor_count = len(anchor_dates)
             missing_by_candidate = {
                 candidate: sorted(
                     anchor.isoformat()
@@ -170,10 +186,25 @@ class MarketRsInputLoader:
                 )
                 for candidate in benchmark_candidates
             }
+            price_coverage_by_candidate = {
+                candidate: (
+                    (anchor_count - len(missing_dates)) / anchor_count
+                    if anchor_count
+                    else 0.0
+                )
+                for candidate, missing_dates in missing_by_candidate.items()
+            }
+            diagnostics: dict[str, object] = {
+                "missing_anchor_dates": missing_by_candidate,
+                "benchmark_anchor_price_coverage": price_coverage_by_candidate,
+                "calendar_metadata": self._market_calendar.calendar_metadata(
+                    normalized
+                ),
+            }
             raise MarketRsInputUnavailable(
                 f"No {normalized} benchmark has every exact RS session anchor",
                 reason_code=MARKET_RS_REASON_BENCHMARK_ADJUSTED_ANCHOR_MISSING,
-                diagnostics={"missing_anchor_dates": missing_by_candidate},
+                diagnostics=diagnostics,
                 **context,
             )
 
