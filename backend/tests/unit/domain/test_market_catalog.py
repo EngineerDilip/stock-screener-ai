@@ -16,7 +16,9 @@ from app.domain.universe.indexes import index_registry
 def test_market_catalog_lists_supported_markets_in_runtime_order() -> None:
     catalog = get_market_catalog()
 
-    assert catalog.supported_market_codes() == list(market_registry.supported_market_codes())
+    assert catalog.supported_market_codes() == list(
+        market_registry.supported_market_codes()
+    )
 
 
 def test_market_catalog_entry_contains_stable_market_facts() -> None:
@@ -143,6 +145,7 @@ def test_market_catalog_entry_exposes_canonical_mic_and_currency_facts() -> None
         is CalendarProvider.PANDAS_MARKET_CALENDARS
     )
     assert india.mic_facts_for("XBOM").calendar_id == "XBOM"
+    assert india.mic_facts_for("XBOM").provider_calendar_id == "BSE"
     assert (
         india.mic_facts_for("XBOM").calendar_provider
         is CalendarProvider.PANDAS_MARKET_CALENDARS
@@ -151,7 +154,10 @@ def test_market_catalog_entry_exposes_canonical_mic_and_currency_facts() -> None
     jp = catalog.get("JP")
     assert jp.primary_mic_facts.calendar_id == "XTKS"
     assert jp.primary_mic_facts.provider_calendar_id == "JPX"
-    assert jp.primary_mic_facts.calendar_provider is CalendarProvider.PANDAS_MARKET_CALENDARS
+    assert (
+        jp.primary_mic_facts.calendar_provider
+        is CalendarProvider.PANDAS_MARKET_CALENDARS
+    )
 
 
 def test_market_catalog_entry_rejects_mic_facts_outside_declared_mics() -> None:
@@ -191,7 +197,9 @@ def test_market_catalog_entry_rejects_mic_facts_outside_declared_mics() -> None:
         )
 
 
-def test_market_catalog_entry_rejects_mic_fact_currency_outside_supported_currencies() -> None:
+def test_market_catalog_entry_rejects_mic_fact_currency_outside_supported_currencies() -> (
+    None
+):
     with pytest.raises(ValueError, match="MIC default currencies"):
         MarketCatalogEntry(
             code="XX",

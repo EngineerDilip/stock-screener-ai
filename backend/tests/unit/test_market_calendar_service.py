@@ -55,8 +55,64 @@ class _FallbackCalendar:
         return any(s.date() == session.date() for s in self.sessions)
 
 
+class _BreakCalendar:
+    def __init__(self):
+        self.sessions = [pd.Timestamp("2026-04-10")]
+        self.schedule = pd.DataFrame(
+            {
+                "market_open": [pd.Timestamp("2026-04-10 00:00:00+00:00")],
+                "break_start": [pd.Timestamp("2026-04-10 02:30:00+00:00")],
+                "break_end": [pd.Timestamp("2026-04-10 03:30:00+00:00")],
+                "market_close": [pd.Timestamp("2026-04-10 06:00:00+00:00")],
+            },
+            index=self.sessions,
+        )
+
+    def is_session(self, session: pd.Timestamp) -> bool:
+        return any(s.date() == session.date() for s in self.sessions)
+
+
 class _ProviderCalendar:
     pass
+
+
+class _RangeScheduleCalendar:
+    def __init__(self):
+        self.calls = []
+        self.session_dates = {
+            date(2026, 3, 18),
+            date(2026, 3, 19),
+            date(2026, 3, 20),
+            date(2026, 3, 23),
+        }
+
+    def schedule(self, *, start_date: pd.Timestamp, end_date: pd.Timestamp):
+        start = start_date.date()
+        end = end_date.date()
+        self.calls.append((start, end))
+        sessions = [
+            pd.Timestamp(session_date)
+            for session_date in sorted(self.session_dates)
+            if start <= session_date <= end
+        ]
+        return pd.DataFrame(
+            {
+                "market_open": [
+                    pd.Timestamp.combine(
+                        session.date(), datetime.min.time()
+                    ).tz_localize("UTC")
+                    for session in sessions
+                ],
+                "market_close": [
+                    pd.Timestamp.combine(
+                        session.date(), datetime.min.time()
+                    ).tz_localize("UTC")
+                    + pd.Timedelta(hours=6)
+                    for session in sessions
+                ],
+            },
+            index=sessions,
+        )
 
 
 class _BoundsCalendar:
@@ -184,6 +240,17 @@ def test_is_market_open_schedule_fallback_treats_close_minute_as_closed():
     assert service.is_market_open("IN", now=close_minute_ist) is False
 
 
+def test_is_market_open_schedule_fallback_excludes_intraday_break():
+    service = _service_with_provider(lambda _: _BreakCalendar())
+    morning_tokyo = datetime.fromisoformat("2026-04-10T10:00:00+09:00")
+    lunch_tokyo = datetime.fromisoformat("2026-04-10T12:00:00+09:00")
+    afternoon_tokyo = datetime.fromisoformat("2026-04-10T13:00:00+09:00")
+
+    assert service.is_market_open("JP", now=morning_tokyo) is True
+    assert service.is_market_open("JP", now=lunch_tokyo) is False
+    assert service.is_market_open("JP", now=afternoon_tokyo) is True
+
+
 def test_india_pmc_lookup_uses_provider_specific_calendar_id():
     calls = []
     service = MarketCalendarService(
@@ -207,19 +274,21 @@ def test_india_secondary_mic_lookup_uses_pmc_provider():
     service = MarketCalendarService(
         calendar_providers={
             CalendarProvider.PANDAS_MARKET_CALENDARS: (
-                lambda calendar_id: calls.append(("pmc", calendar_id))
-                or _ProviderCalendar()
+                lambda calendar_id: (
+                    calls.append(("pmc", calendar_id)) or _ProviderCalendar()
+                )
             ),
             CalendarProvider.EXCHANGE_CALENDARS: (
-                lambda calendar_id: calls.append(("xcals", calendar_id))
-                or _ProviderCalendar()
+                lambda calendar_id: (
+                    calls.append(("xcals", calendar_id)) or _ProviderCalendar()
+                )
             ),
         }
     )
 
     service._get_calendar("IN", mic="XBOM")
 
-    assert calls == [("pmc", "XBOM")]
+    assert calls == [("pmc", "BSE")]
 
 
 def test_japan_lookup_uses_jpx_pmc_calendar_provider():
@@ -227,12 +296,14 @@ def test_japan_lookup_uses_jpx_pmc_calendar_provider():
     service = MarketCalendarService(
         calendar_providers={
             CalendarProvider.PANDAS_MARKET_CALENDARS: (
-                lambda calendar_id: calls.append(("pmc", calendar_id))
-                or _ProviderCalendar()
+                lambda calendar_id: (
+                    calls.append(("pmc", calendar_id)) or _ProviderCalendar()
+                )
             ),
             CalendarProvider.EXCHANGE_CALENDARS: (
-                lambda calendar_id: calls.append(("xcals", calendar_id))
-                or _ProviderCalendar()
+                lambda calendar_id: (
+                    calls.append(("xcals", calendar_id)) or _ProviderCalendar()
+                )
             ),
         }
     )
@@ -247,12 +318,14 @@ def test_singapore_lookup_uses_exchange_calendars_calendar_id():
     service = MarketCalendarService(
         calendar_providers={
             CalendarProvider.PANDAS_MARKET_CALENDARS: (
-                lambda calendar_id: calls.append(("pmc", calendar_id))
-                or _ProviderCalendar()
+                lambda calendar_id: (
+                    calls.append(("pmc", calendar_id)) or _ProviderCalendar()
+                )
             ),
             CalendarProvider.EXCHANGE_CALENDARS: (
-                lambda calendar_id: calls.append(("xcals", calendar_id))
-                or _ProviderCalendar()
+                lambda calendar_id: (
+                    calls.append(("xcals", calendar_id)) or _ProviderCalendar()
+                )
             ),
         }
     )
@@ -298,7 +371,7 @@ def test_injected_calendar_provider_uses_mic_specific_provider_calendar_id():
 
     service._get_calendar("IN", mic="XBOM")
 
-    assert calls == ["XBOM"]
+    assert calls == ["BSE"]
 
 
 def test_trading_day_lookup_uses_mic_specific_calendar_id():
@@ -308,7 +381,7 @@ def test_trading_day_lookup_uses_mic_specific_calendar_id():
     )
 
     assert service.is_trading_day("IN", date(2026, 4, 10), mic="XBOM") is True
-    assert calls == ["XBOM"]
+    assert calls == ["BSE"]
 
 
 def test_closed_date_overrides_hide_provider_sessions_from_anchors():
@@ -320,9 +393,7 @@ def test_closed_date_overrides_hide_provider_sessions_from_anchors():
     ]
     service = _service_with_provider(
         lambda _name: _SessionCalendar(sessions),
-        session_overrides=(
-            CalendarSessionOverride("JP", date(2026, 3, 20), False),
-        ),
+        session_overrides=(CalendarSessionOverride("JP", date(2026, 3, 20), False),),
     )
 
     assert service.is_trading_day("JP", date(2026, 3, 20)) is False
@@ -337,6 +408,14 @@ def test_closed_date_overrides_hide_provider_sessions_from_anchors():
     }
 
 
+def test_positive_session_overrides_are_rejected():
+    with pytest.raises(ValueError, match="positive trading-day overrides"):
+        _service_with_provider(
+            lambda _name: _FakeCalendar(),
+            session_overrides=(CalendarSessionOverride("JP", date(2026, 3, 20), True),),
+        )
+
+
 def test_last_completed_trading_day_respects_closed_date_overrides():
     sessions = [
         pd.Timestamp("2026-03-19"),
@@ -344,9 +423,7 @@ def test_last_completed_trading_day_respects_closed_date_overrides():
     ]
     service = _service_with_provider(
         lambda _name: _SessionCalendar(sessions),
-        session_overrides=(
-            CalendarSessionOverride("JP", date(2026, 3, 20), False),
-        ),
+        session_overrides=(CalendarSessionOverride("JP", date(2026, 3, 20), False),),
     )
     noon_tokyo = datetime.fromisoformat("2026-03-20T12:00:00+09:00")
 
@@ -368,8 +445,12 @@ def test_last_completed_trading_day_bounds_fallback(market):
     before_close = datetime.fromisoformat("2026-04-10T15:00:00+08:00")
     after_close = datetime.fromisoformat("2026-04-10T16:00:00+08:00")
 
-    assert service.last_completed_trading_day(market, now=before_close) == date(2026, 4, 9)
-    assert service.last_completed_trading_day(market, now=after_close) == date(2026, 4, 10)
+    assert service.last_completed_trading_day(market, now=before_close) == date(
+        2026, 4, 9
+    )
+    assert service.last_completed_trading_day(market, now=after_close) == date(
+        2026, 4, 10
+    )
 
 
 @pytest.mark.parametrize("market", ["CN", "SG"])
@@ -382,14 +463,24 @@ def test_last_completed_trading_day_does_not_mask_provider_type_errors(market):
         service.last_completed_trading_day(market, now=after_close)
 
 
+def test_trading_days_uses_range_schedule_and_applies_overrides():
+    calendar = _RangeScheduleCalendar()
+    service = _service_with_provider(lambda _: calendar)
+
+    assert service.trading_days("JP", date(2026, 3, 18), date(2026, 3, 23)) == [
+        date(2026, 3, 18),
+        date(2026, 3, 19),
+        date(2026, 3, 23),
+    ]
+    assert calendar.calls == [(date(2026, 3, 18), date(2026, 3, 23))]
+
+
 def test_session_anchors_return_exact_market_session_offsets():
     sessions = pd.date_range("2025-01-01", periods=260, freq="B")
     service = _service_with_provider(lambda _name: _SessionCalendar(sessions))
     as_of = sessions[-1].date()
 
-    anchors = service.session_anchors(
-        "US", as_of, offsets=(21, 63, 126, 189, 252)
-    )
+    anchors = service.session_anchors("US", as_of, offsets=(21, 63, 126, 189, 252))
 
     assert anchors[0] == as_of
     assert anchors[21] == sessions[-22].date()

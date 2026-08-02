@@ -127,19 +127,33 @@ def collect_calendar_benchmark_invariants(
     calendar_metadata: dict[str, dict[str, str | None]] = {}
     session_probe_expectations = calendar_session_probe_expectations()
 
-    for market in markets:
+    for raw_market in markets:
+        try:
+            market = service.normalize_market(raw_market)
+        except ValueError as exc:
+            market = str(raw_market)
+            benchmark_mismatches[market] = f"unsupported market: {exc}"
+            continue
         try:
             got = registry.get_primary_symbol(market)
         except (KeyError, ValueError) as exc:
             benchmark_mismatches[market] = f"lookup failed: {exc}"
             continue
-        expected_benchmark = EXPECTED_BENCHMARK_SYMBOLS[market]
-        if got != expected_benchmark:
+        expected_benchmark = EXPECTED_BENCHMARK_SYMBOLS.get(market)
+        if expected_benchmark is None:
+            benchmark_mismatches[market] = (
+                f"no expected benchmark symbol configured for {market}"
+            )
+        elif got != expected_benchmark:
             benchmark_mismatches[market] = f"expected {expected_benchmark}, got {got}"
 
         calendar_id = service.calendar_id(market)
-        expected_calendar_id = EXPECTED_CALENDAR_IDS[market]
-        if calendar_id != expected_calendar_id:
+        expected_calendar_id = EXPECTED_CALENDAR_IDS.get(market)
+        if expected_calendar_id is None:
+            calendar_id_mismatches[market] = (
+                f"no expected calendar ID configured for {market}"
+            )
+        elif calendar_id != expected_calendar_id:
             calendar_id_mismatches[market] = (
                 f"expected {expected_calendar_id}, got {calendar_id}"
             )

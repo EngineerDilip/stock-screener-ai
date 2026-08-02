@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, fields, replace
-from typing import Iterable
 
 from .calendar_policy import CalendarProvider
 from .mic import MicFacts
@@ -350,6 +350,7 @@ MARKET_CATALOG = MarketCatalog(
                     "XBOM",
                     timezone="Asia/Kolkata",
                     default_currency="INR",
+                    provider_calendar_id="BSE",
                     calendar_provider=CalendarProvider.PANDAS_MARKET_CALENDARS,
                 ),
             ),
