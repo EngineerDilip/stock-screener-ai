@@ -83,7 +83,12 @@ class RawMarketCalendarAdapter:
                 continue
             if callable(attr_value):
                 attr_value = attr_value()
-            return pd.Timestamp(attr_value).date()
+            if attr_value is None:
+                continue
+            timestamp = pd.Timestamp(attr_value)
+            if pd.isna(timestamp):
+                continue
+            return timestamp.date()
 
         sessions_attr = getattr(self.raw_calendar, "sessions", None)
         if sessions_attr is None:

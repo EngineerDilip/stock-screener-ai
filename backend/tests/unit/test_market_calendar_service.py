@@ -155,6 +155,17 @@ class _BoundedSessionCalendar(_SessionCalendar):
         self.last_session = pd.Timestamp(last_session)
 
 
+class _RangeBoundedSessionCalendar(_BoundedSessionCalendar):
+    def sessions_in_range(self, start_session: pd.Timestamp, end_session: pd.Timestamp):
+        if end_session.date() > self.last_session.date():
+            raise ValueError("Requested end is later than the last session available")
+        return tuple(
+            session
+            for session in self.sessions
+            if start_session.date() <= session.date() <= end_session.date()
+        )
+
+
 def _service_with_provider(provider_factory, **kwargs):
     return MarketCalendarService(
         calendar_providers={
@@ -501,6 +512,23 @@ def test_weekday_bounds_fallback_extends_after_provider_last_session():
     )
 
     assert service.trading_days("CN", date(2026, 1, 1), date(2026, 1, 5)) == [
+        date(2026, 1, 1),
+        date(2026, 1, 2),
+        date(2026, 1, 5),
+    ]
+
+
+def test_weekday_bounds_fallback_preserves_provider_prefix_when_range_exceeds_bounds():
+    service = _service_with_provider(
+        lambda _: _RangeBoundedSessionCalendar(
+            sessions=[date(2025, 12, 29), date(2025, 12, 31)],
+            last_session=date(2025, 12, 31),
+        ),
+    )
+
+    assert service.trading_days("CN", date(2025, 12, 29), date(2026, 1, 5)) == [
+        date(2025, 12, 29),
+        date(2025, 12, 31),
         date(2026, 1, 1),
         date(2026, 1, 2),
         date(2026, 1, 5),

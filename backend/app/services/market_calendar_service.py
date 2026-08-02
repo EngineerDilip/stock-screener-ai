@@ -369,12 +369,28 @@ class MarketCalendarService:
         normalized = self.normalize_market(market)
         try:
             calendar = self._get_calendar(normalized, mic=mic)
+            last_provider_session = calendar.last_session_date()
+            if (
+                normalized in self.WEEKDAY_BOUNDS_FALLBACK_MARKETS
+                and last_provider_session is not None
+                and last_provider_session < start
+            ):
+                raw_sessions = ()
+            else:
+                provider_lookup_end = end
+                if (
+                    normalized in self.WEEKDAY_BOUNDS_FALLBACK_MARKETS
+                    and last_provider_session is not None
+                    and start <= last_provider_session < end
+                ):
+                    provider_lookup_end = last_provider_session
+                raw_sessions = calendar.sessions_in_range(start, provider_lookup_end)
             provider_sessions = self._extend_with_weekday_bounds_fallback(
                 normalized,
-                calendar.sessions_in_range(start, end),
+                raw_sessions,
                 start=start,
                 end=end,
-                last_provider_session=calendar.last_session_date(),
+                last_provider_session=last_provider_session,
             )
             return self._apply_session_overrides(
                 normalized,

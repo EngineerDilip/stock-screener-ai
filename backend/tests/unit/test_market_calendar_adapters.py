@@ -35,10 +35,19 @@ class _ScheduleCalendar:
         return pd.DataFrame(index=sessions)
 
 
+class _CallableLastSessionCalendar:
+    def __init__(self):
+        self.sessions = [pd.Timestamp("2026-01-07")]
+
+    def last_session(self):
+        return None
+
+
 def test_sessions_in_range_uses_redis_cache(monkeypatch):
     redis = _FakeRedis()
     calendar = _ScheduleCalendar()
     monkeypatch.setattr(module, "get_redis_client", lambda: redis)
+    monkeypatch.setattr(module, "_session_range_cache_retry_after", 0.0)
     adapter = RawMarketCalendarAdapter(
         calendar,
         cache_namespace="exchange_calendars:XSES:XSES",
@@ -57,3 +66,9 @@ def test_sessions_in_range_uses_redis_cache(monkeypatch):
             '["2026-01-02","2026-01-05"]',
         )
     ]
+
+
+def test_last_session_date_falls_back_when_callable_returns_none():
+    adapter = RawMarketCalendarAdapter(_CallableLastSessionCalendar())
+
+    assert adapter.last_session_date() == date(2026, 1, 7)
