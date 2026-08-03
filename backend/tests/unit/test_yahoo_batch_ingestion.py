@@ -1243,6 +1243,30 @@ def test_get_cached_only_fresh_requires_requested_session(monkeypatch):
     ) is frame
 
 
+def test_get_cached_only_fresh_required_session_bypasses_global_freshness(monkeypatch):
+    service = PriceCacheService(
+        redis_client=None,
+        session_factory=lambda: MagicMock(),
+    )
+    frame = _price_df(date(2026, 3, 20), 123.0)
+    monkeypatch.setattr(
+        service,
+        "_get_from_database",
+        lambda symbol, period: (frame, date(2026, 3, 20)),
+    )
+    monkeypatch.setattr(service, "_is_data_fresh", lambda _last: False)
+    monkeypatch.setattr(
+        service,
+        "_is_intraday_data_stale",
+        lambda _symbol: False,
+    )
+
+    assert service.get_cached_only_fresh(
+        "7203.T",
+        required_as_of_date=date(2026, 3, 20),
+    ) is frame
+
+
 def test_get_many_cached_only_fresh_requires_requested_session(monkeypatch):
     service = PriceCacheService(
         redis_client=None,
@@ -1277,6 +1301,37 @@ def test_get_many_cached_only_fresh_requires_requested_session(monkeypatch):
 
     assert result["AAPL"] is complete
     assert result["MSFT"] is None
+
+
+def test_get_many_cached_only_fresh_required_session_bypasses_global_freshness(monkeypatch):
+    service = PriceCacheService(
+        redis_client=None,
+        session_factory=lambda: MagicMock(),
+    )
+    frame = _price_df(date(2026, 3, 20), 123.0)
+    missing_target = _price_df(date(2026, 3, 19), 122.0)
+    monkeypatch.setattr(
+        service,
+        "_get_many_from_database",
+        lambda symbols, period: {
+            "7203.T": (frame, date(2026, 3, 20)),
+            "6758.T": (missing_target, date(2026, 3, 19)),
+        },
+    )
+    monkeypatch.setattr(service, "_is_data_fresh", lambda _last: False)
+    monkeypatch.setattr(
+        service,
+        "_is_intraday_data_stale",
+        lambda _symbol: False,
+    )
+
+    result = service.get_many_cached_only_fresh(
+        ["7203.T", "6758.T"],
+        required_as_of_date=date(2026, 3, 20),
+    )
+
+    assert result["7203.T"] is frame
+    assert result["6758.T"] is None
 
 
 def test_get_many_cached_only_fresh_filters_stale_database_rows(monkeypatch):

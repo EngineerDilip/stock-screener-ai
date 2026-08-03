@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from ..models.stock_universe import StockUniverse
 from ..models.market_breadth import MarketBreadth
+from ..domain.providers.price_symbol_support import split_supported_price_symbols
 from .breadth_coverage import (
     BreadthCalculationResult,
     BreadthCoverageReport,
@@ -189,6 +190,8 @@ class BreadthCalculatorService:
             DerivedDataExecutionPolicy.provider_allowed()
         ),
         cache_only: bool | None = None,
+        exclude_unsupported_price_symbols: bool = False,
+        required_as_of_date: date | None = None,
     ) -> Dict:
         """
         Calculate and persist breadth for an entire historical range.
@@ -230,11 +233,27 @@ class BreadthCalculatorService:
             StockUniverse.is_active == True,
             StockUniverse.market == self.market,
         ).all()
+        skipped_unsupported_symbols: list[str] = []
+        if exclude_unsupported_price_symbols:
+            supported_symbols, skipped_unsupported_symbols = split_supported_price_symbols(
+                [stock.symbol for stock in active_stocks]
+            )
+            supported_symbol_set = set(supported_symbols)
+            active_stocks = [
+                stock
+                for stock in active_stocks
+                if stock.symbol in supported_symbol_set
+            ]
         logger.info(
             "Backfilling breadth for %s trading days across %s active stocks",
             len(ordered_dates),
             len(active_stocks),
         )
+        if skipped_unsupported_symbols:
+            logger.info(
+                "Skipping %s unsupported Yahoo price symbols in breadth backfill",
+                len(skipped_unsupported_symbols),
+            )
 
         metrics_by_date = {calc_date: self._empty_metrics() for calc_date in ordered_dates}
         outcomes_by_date = {
@@ -257,9 +276,13 @@ class BreadthCalculatorService:
             )
 
             batch_symbols = [stock.symbol for stock in batch]
+            cache_load_kwargs = {}
+            if required_as_of_date is not None:
+                cache_load_kwargs["required_as_of_date"] = required_as_of_date
             price_data_by_symbol, batch_cache_miss_symbols = self._load_price_data_for_batch(
                 batch_symbols=batch_symbols,
                 cache_only=policy.cache_only,
+                **cache_load_kwargs,
             )
             price_coverage.record_batch(
                 batch_symbols,
@@ -348,6 +371,13 @@ class BreadthCalculatorService:
             'errors': len(error_dates),
             'error_dates': error_dates,
         }
+        if exclude_unsupported_price_symbols:
+            result.update({
+                "skipped_unsupported_symbols": len(skipped_unsupported_symbols),
+                "unsupported_symbols_sample": (
+                    sorted(set(skipped_unsupported_symbols))[:20]
+                ),
+            })
         if policy.cache_only:
             aggregate_outcomes = sum(
                 (
@@ -383,9 +413,12 @@ class BreadthCalculatorService:
         }
 
         metrics_by_date: Dict[date, Dict] = {}
+        index_by_date = self._latest_index_by_date(prices_df.index)
         for calc_date in calculation_dates:
-            end_ts = self._timestamp_for_index(calc_date, prices_df.index)
-            latest_idx = prices_df.index.searchsorted(end_ts, side='right') - 1
+            latest_idx = index_by_date.get(calc_date)
+            if latest_idx is None:
+                logger.debug("No exact cached bar for %s", calc_date)
+                continue
             if latest_idx < 69:
                 logger.debug(f"Insufficient cached data through {calc_date}: {latest_idx + 1} days")
                 continue
@@ -398,6 +431,16 @@ class BreadthCalculatorService:
             }
 
         return metrics_by_date
+
+    @staticmethod
+    def _latest_index_by_date(index) -> dict[date, int]:
+        positions: dict[date, int] = {}
+        for position, index_value in enumerate(index):
+            try:
+                positions[pd.Timestamp(index_value).date()] = position
+            except (TypeError, ValueError):
+                continue
+        return positions
 
     @staticmethod
     def _timestamp_for_index(item_date: date, index) -> pd.Timestamp:

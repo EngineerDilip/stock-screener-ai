@@ -136,6 +136,7 @@ def test_daily_and_backfill_serializers_share_one_report():
         "target_symbols": 2,
         "symbols_with_cached_history": 1,
         "cache_miss_stocks": 1,
+        "error_stocks": 1,
         "cache_miss_symbols_sample": ["BBB"],
         "cache_coverage_ratio": 0.5,
         "insufficient_history_observations": 1,
