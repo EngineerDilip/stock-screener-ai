@@ -215,6 +215,7 @@ def test_static_daily_refresh_skips_exposure_when_breadth_history_errors(monkeyp
 
 def test_ensure_breadth_history_marks_backfill_errors_not_completed(monkeypatch):
     as_of_date = date(2026, 7, 31)
+    backfill_kwargs: dict[str, object] = {}
 
     class _FakeQuery:
         def filter(self, *args, **kwargs):
@@ -232,6 +233,7 @@ def test_ensure_breadth_history_marks_backfill_errors_not_completed(monkeypatch)
             self.market = market
 
         def backfill_range(self, **kwargs):
+            backfill_kwargs.update(kwargs)
             return {
                 "total_dates": 1,
                 "processed": 0,
@@ -253,6 +255,7 @@ def test_ensure_breadth_history_marks_backfill_errors_not_completed(monkeypatch)
     assert result["status"] == "errored"
     assert result["errors"] == 1
     assert result["error_dates"] == ["2026-07-31"]
+    assert backfill_kwargs["exclude_unsupported_price_symbols"] is True
 
 
 def test_ensure_breadth_history_marks_calculation_errors_not_completed(monkeypatch):

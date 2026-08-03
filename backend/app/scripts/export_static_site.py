@@ -641,6 +641,7 @@ def _ensure_breadth_history(
             end_date=recompute_dates[-1],
             trading_dates=recompute_dates,
             cache_only=True,
+            exclude_unsupported_price_symbols=True,
         )
         error = _static_breadth_backfill_error(stats)
         stats.update(

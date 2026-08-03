@@ -567,6 +567,50 @@ def test_backfill_range_cache_only_reports_gaps_without_provider_fallback():
     price_cache.get_historical_data.assert_not_called()
 
 
+def test_backfill_range_can_exclude_unsupported_yahoo_symbols(monkeypatch):
+    db = _make_db_session()
+    db.add_all([
+        StockUniverse(
+            symbol="7203.T",
+            market="JP",
+            is_active=True,
+            status=UNIVERSE_STATUS_ACTIVE,
+        ),
+        StockUniverse(
+            symbol="0335.T",
+            market="JP",
+            is_active=True,
+            status=UNIVERSE_STATUS_ACTIVE,
+        ),
+    ])
+    db.commit()
+
+    trading_date = date(2026, 3, 20)
+    supported_df = _make_price_df(trading_date)
+    service = BreadthCalculatorService(db, MagicMock(), market="JP")
+    load_prices = MagicMock(return_value=({"7203.T": supported_df}, set()))
+    monkeypatch.setattr(service, "_load_price_data_for_batch", load_prices)
+    monkeypatch.setattr(service, "_store_breadth_records", MagicMock())
+
+    result = service.backfill_range(
+        trading_date,
+        trading_date,
+        trading_dates=[trading_date],
+        policy=_policy("refresh_guarded", trading_date),
+        exclude_unsupported_price_symbols=True,
+    )
+
+    load_prices.assert_called_once_with(
+        batch_symbols=["7203.T"],
+        cache_only=True,
+    )
+    assert result["processed"] == 1
+    assert result["target_symbols"] == 1
+    assert result["cache_miss_stocks"] == 0
+    assert result["skipped_unsupported_symbols"] == 1
+    assert result["unsupported_symbols_sample"] == ["0335.T"]
+
+
 def test_backfill_range_cache_only_reports_calculation_errors(monkeypatch):
     db = _make_db_session()
     db.add_all([

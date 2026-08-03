@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from ..models.stock_universe import StockUniverse
 from ..models.market_breadth import MarketBreadth
+from ..domain.providers.price_symbol_support import split_supported_price_symbols
 from .breadth_coverage import (
     BreadthCalculationResult,
     BreadthCoverageReport,
@@ -189,6 +190,7 @@ class BreadthCalculatorService:
             DerivedDataExecutionPolicy.provider_allowed()
         ),
         cache_only: bool | None = None,
+        exclude_unsupported_price_symbols: bool = False,
     ) -> Dict:
         """
         Calculate and persist breadth for an entire historical range.
@@ -230,11 +232,27 @@ class BreadthCalculatorService:
             StockUniverse.is_active == True,
             StockUniverse.market == self.market,
         ).all()
+        skipped_unsupported_symbols: list[str] = []
+        if exclude_unsupported_price_symbols:
+            supported_symbols, skipped_unsupported_symbols = split_supported_price_symbols(
+                [stock.symbol for stock in active_stocks]
+            )
+            supported_symbol_set = set(supported_symbols)
+            active_stocks = [
+                stock
+                for stock in active_stocks
+                if stock.symbol in supported_symbol_set
+            ]
         logger.info(
             "Backfilling breadth for %s trading days across %s active stocks",
             len(ordered_dates),
             len(active_stocks),
         )
+        if skipped_unsupported_symbols:
+            logger.info(
+                "Skipping %s unsupported Yahoo price symbols in breadth backfill",
+                len(skipped_unsupported_symbols),
+            )
 
         metrics_by_date = {calc_date: self._empty_metrics() for calc_date in ordered_dates}
         outcomes_by_date = {
@@ -348,6 +366,13 @@ class BreadthCalculatorService:
             'errors': len(error_dates),
             'error_dates': error_dates,
         }
+        if exclude_unsupported_price_symbols:
+            result.update({
+                "skipped_unsupported_symbols": len(skipped_unsupported_symbols),
+                "unsupported_symbols_sample": (
+                    sorted(set(skipped_unsupported_symbols))[:20]
+                ),
+            })
         if policy.cache_only:
             aggregate_outcomes = sum(
                 (
