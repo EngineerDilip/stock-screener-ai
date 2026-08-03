@@ -611,6 +611,35 @@ def test_backfill_range_can_exclude_unsupported_yahoo_symbols(monkeypatch):
     assert result["unsupported_symbols_sample"] == ["0335.T"]
 
 
+def test_backfill_range_can_require_target_date_cached_prices(monkeypatch):
+    db = _make_db_session()
+    db.add(StockUniverse(symbol="AAA", is_active=True, status=UNIVERSE_STATUS_ACTIVE))
+    db.commit()
+
+    trading_date = date(2026, 3, 20)
+    service = BreadthCalculatorService(db, MagicMock())
+    load_prices = MagicMock(
+        return_value=({"AAA": _make_price_df(trading_date)}, set())
+    )
+    monkeypatch.setattr(service, "_load_price_data_for_batch", load_prices)
+    monkeypatch.setattr(service, "_store_breadth_records", MagicMock())
+
+    result = service.backfill_range(
+        trading_date,
+        trading_date,
+        trading_dates=[trading_date],
+        policy=_policy("refresh_guarded", trading_date),
+        required_as_of_date=trading_date,
+    )
+
+    assert result["processed"] == 1
+    load_prices.assert_called_once_with(
+        batch_symbols=["AAA"],
+        cache_only=True,
+        required_as_of_date=trading_date,
+    )
+
+
 def test_backfill_range_cache_only_reports_calculation_errors(monkeypatch):
     db = _make_db_session()
     db.add_all([

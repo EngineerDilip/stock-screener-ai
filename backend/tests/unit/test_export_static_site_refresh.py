@@ -5,6 +5,8 @@ from datetime import date
 from types import SimpleNamespace
 
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
+from app.models.market_breadth import MarketBreadth
+from app.models.stock_universe import StockUniverse
 from app.scripts import export_static_site
 from app.services.market_exposure_service import EXPOSURE_BACKFILL_DAYS
 from app.services.static_market_publish_policy import StaticMarketRsArtifactState
@@ -256,6 +258,110 @@ def test_ensure_breadth_history_marks_backfill_errors_not_completed(monkeypatch)
     assert result["errors"] == 1
     assert result["error_dates"] == ["2026-07-31"]
     assert backfill_kwargs["exclude_unsupported_price_symbols"] is True
+    assert backfill_kwargs["required_as_of_date"] == as_of_date
+
+
+def test_ensure_breadth_history_recomputes_incomplete_existing_rows(monkeypatch):
+    as_of_date = date(2026, 7, 31)
+    backfill_kwargs: dict[str, object] = {}
+
+    class _FakeQuery:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def filter(self, *args, **kwargs):
+            return self
+
+        def all(self):
+            return self.rows
+
+    class _FakeDb(_FakeSession):
+        def query(self, entity, *args):
+            if entity is MarketBreadth:
+                return _FakeQuery([
+                    SimpleNamespace(date=as_of_date, total_stocks_scanned=1)
+                ])
+            if entity is StockUniverse.symbol:
+                return _FakeQuery([("AAA",), ("BBB",)])
+            return _FakeQuery([])
+
+    class _FakeBreadthCalculator:
+        def __init__(self, db, price_cache, *, market):
+            self.market = market
+
+        def backfill_range(self, **kwargs):
+            backfill_kwargs.update(kwargs)
+            return {
+                "total_dates": 1,
+                "processed": 1,
+                "errors": 0,
+                "error_dates": [],
+                "target_symbols": 2,
+                "symbols_with_cached_history": 2,
+                "cache_miss_stocks": 0,
+                "error_stocks": 0,
+                "cache_coverage_ratio": 1.0,
+            }
+
+    monkeypatch.setattr(export_static_site, "SessionLocal", lambda: _FakeDb())
+    monkeypatch.setattr(export_static_site, "_generate_trading_dates", lambda *args, **kwargs: [as_of_date])
+    monkeypatch.setattr(export_static_site, "get_price_cache", lambda: object())
+    monkeypatch.setattr(export_static_site, "BreadthCalculatorService", _FakeBreadthCalculator)
+
+    result = export_static_site._ensure_breadth_history(
+        as_of_date=as_of_date,
+        market="HK",
+        min_trading_days=0,
+    )
+
+    assert result["status"] == "completed"
+    assert result["incomplete_existing_dates"] == 1
+    assert result["recomputed_dates"] == 1
+    assert backfill_kwargs["trading_dates"] == [as_of_date]
+
+
+def test_ensure_breadth_history_skips_validated_existing_rows(monkeypatch):
+    as_of_date = date(2026, 7, 31)
+
+    class _FakeQuery:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def filter(self, *args, **kwargs):
+            return self
+
+        def all(self):
+            return self.rows
+
+    class _FakeDb(_FakeSession):
+        def query(self, entity, *args):
+            if entity is MarketBreadth:
+                return _FakeQuery([
+                    SimpleNamespace(date=as_of_date, total_stocks_scanned=2)
+                ])
+            if entity is StockUniverse.symbol:
+                return _FakeQuery([("AAA",), ("BBB",)])
+            return _FakeQuery([])
+
+    monkeypatch.setattr(export_static_site, "SessionLocal", lambda: _FakeDb())
+    monkeypatch.setattr(export_static_site, "_generate_trading_dates", lambda *args, **kwargs: [as_of_date])
+    monkeypatch.setattr(
+        export_static_site,
+        "BreadthCalculatorService",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("validated existing breadth should not recompute")
+        ),
+    )
+
+    result = export_static_site._ensure_breadth_history(
+        as_of_date=as_of_date,
+        market="HK",
+        min_trading_days=0,
+    )
+
+    assert result["status"] == "skipped"
+    assert result["validated_existing_dates"] == 1
+    assert result["target_symbols"] == 2
 
 
 def test_ensure_breadth_history_marks_calculation_errors_not_completed(monkeypatch):

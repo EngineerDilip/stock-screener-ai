@@ -10,14 +10,16 @@ from typing import Any, Literal, Mapping, Sequence
 
 from app.config import settings
 from app.database import SessionLocal
+from app.domain.markets import market_registry
+from app.domain.providers.price_symbol_support import split_supported_price_symbols
 from app.domain.relative_strength import (
     BALANCED_RS_FORMULA_VERSION,
     LEGACY_RS_FORMULA_VERSION,
 )
-from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
 from app.infra.db.models.feature_store import FeatureRunPointer
+from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
 from app.models.market_breadth import MarketBreadth
-from app.domain.markets import market_registry
+from app.models.stock_universe import StockUniverse
 from app.scripts._runtime import prepare_runtime, repo_root
 from app.services.breadth_calculator_service import BreadthCalculatorService
 from app.services.bulk_data_fetcher import BulkDataFetcher
@@ -597,20 +599,41 @@ def _ensure_breadth_history(
         }
 
     with SessionLocal() as db:
-        existing_dates = {
-            record_date
-            for record_date, in db.query(MarketBreadth.date)
+        existing_rows = (
+            db.query(MarketBreadth)
             .filter(
                 MarketBreadth.date >= target_dates[0],
                 MarketBreadth.date <= as_of_date,
                 MarketBreadth.market == normalized_market,
             )
             .all()
-        }
+        )
+        existing_by_date = {row.date: row for row in existing_rows}
+        existing_dates = set(existing_by_date)
         missing_dates = [calc_date for calc_date in target_dates if calc_date not in existing_dates]
-        recompute_dates = sorted(set(missing_dates + [as_of_date]))
+        supported_symbol_count = _static_breadth_supported_symbol_count(
+            db,
+            market=normalized_market,
+        )
+        if supported_symbol_count <= 0:
+            incomplete_existing_dates = list(target_dates)
+        else:
+            incomplete_existing_dates = [
+                calc_date
+                for calc_date in target_dates
+                if (
+                    calc_date in existing_by_date
+                    and int(existing_by_date[calc_date].total_stocks_scanned or 0)
+                    < supported_symbol_count
+                )
+            ]
+        recompute_dates = sorted(set(missing_dates + incomplete_existing_dates + [as_of_date]))
 
-        if len(recompute_dates) == 1 and as_of_date in existing_dates:
+        if (
+            len(recompute_dates) == 1
+            and as_of_date in existing_dates
+            and as_of_date not in incomplete_existing_dates
+        ):
             print(
                 f"[static-breadth] Existing breadth history already covers the last "
                 f"{len(target_dates)} trading days through {as_of_date}.",
@@ -624,6 +647,8 @@ def _ensure_breadth_history(
                 "target_trading_days": len(target_dates),
                 "missing_dates": 0,
                 "recomputed_dates": 0,
+                "validated_existing_dates": len(target_dates),
+                "target_symbols": supported_symbol_count,
             }
 
         print(
@@ -642,6 +667,7 @@ def _ensure_breadth_history(
             trading_dates=recompute_dates,
             cache_only=True,
             exclude_unsupported_price_symbols=True,
+            required_as_of_date=as_of_date,
         )
         error = _static_breadth_backfill_error(stats)
         stats.update(
@@ -652,12 +678,27 @@ def _ensure_breadth_history(
                 "lookback_start_date": start_date.isoformat(),
                 "target_trading_days": len(target_dates),
                 "missing_dates": len(missing_dates),
+                "incomplete_existing_dates": len(incomplete_existing_dates),
                 "recomputed_dates": len(recompute_dates),
             }
         )
         if error:
             stats["error"] = error
         return stats
+
+
+def _static_breadth_supported_symbol_count(db, *, market: str) -> int:
+    symbols = [
+        symbol
+        for symbol, in db.query(StockUniverse.symbol)
+        .filter(
+            StockUniverse.is_active.is_(True),
+            StockUniverse.market == market,
+        )
+        .all()
+    ]
+    supported_symbols, _unsupported_symbols = split_supported_price_symbols(symbols)
+    return len(supported_symbols)
 
 
 def _static_breadth_backfill_error(stats: Mapping[str, Any]) -> str | None:

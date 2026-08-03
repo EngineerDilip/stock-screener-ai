@@ -191,6 +191,7 @@ class BreadthCalculatorService:
         ),
         cache_only: bool | None = None,
         exclude_unsupported_price_symbols: bool = False,
+        required_as_of_date: date | None = None,
     ) -> Dict:
         """
         Calculate and persist breadth for an entire historical range.
@@ -275,9 +276,13 @@ class BreadthCalculatorService:
             )
 
             batch_symbols = [stock.symbol for stock in batch]
+            cache_load_kwargs = {}
+            if required_as_of_date is not None:
+                cache_load_kwargs["required_as_of_date"] = required_as_of_date
             price_data_by_symbol, batch_cache_miss_symbols = self._load_price_data_for_batch(
                 batch_symbols=batch_symbols,
                 cache_only=policy.cache_only,
+                **cache_load_kwargs,
             )
             price_coverage.record_batch(
                 batch_symbols,
