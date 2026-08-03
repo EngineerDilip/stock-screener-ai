@@ -193,6 +193,7 @@ class BreadthCoverageReport:
             "target_symbols": self.candidate_stocks,
             "symbols_with_cached_history": self.symbols_with_cached_history,
             "cache_miss_stocks": self.cache_miss_stocks,
+            "error_stocks": self.error_stocks,
             "cache_miss_symbols_sample": list(self.cache_miss_symbols_sample),
             "cache_coverage_ratio": self.cache_coverage_ratio,
             "insufficient_history_observations": (

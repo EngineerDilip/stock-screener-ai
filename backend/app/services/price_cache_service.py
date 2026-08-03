@@ -247,14 +247,6 @@ class PriceCacheService:
             logger.debug(f"Fresh cache-only MISS for {symbol}")
             return None
 
-        if not self._is_data_fresh(last_date):
-            logger.debug(f"Fresh cache-only STALE for {symbol} (last: {last_date})")
-            return None
-
-        if self._is_intraday_data_stale(symbol):
-            logger.debug(f"Fresh cache-only INTRADAY_STALE for {symbol}")
-            return None
-
         if not self._contains_required_as_of_date(
             cached_data,
             required_as_of_date,
@@ -264,6 +256,14 @@ class PriceCacheService:
                 symbol,
                 required_as_of_date,
             )
+            return None
+
+        if required_as_of_date is None and not self._is_data_fresh(last_date):
+            logger.debug(f"Fresh cache-only STALE for {symbol} (last: {last_date})")
+            return None
+
+        if self._is_intraday_data_stale(symbol):
+            logger.debug(f"Fresh cache-only INTRADAY_STALE for {symbol}")
             return None
 
         logger.debug(f"Fresh cache-only HIT for {symbol} (last: {last_date})")
@@ -310,7 +310,10 @@ class PriceCacheService:
             if (
                 data is not None
                 and not data.empty
-                and self._is_data_fresh(last_date)
+                and (
+                    required_as_of_date is not None
+                    or self._is_data_fresh(last_date)
+                )
                 and not self._is_intraday_data_stale(symbol)
                 and self._contains_required_as_of_date(
                     data,
