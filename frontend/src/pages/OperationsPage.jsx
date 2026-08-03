@@ -93,6 +93,8 @@ function formatCancelLabel(strategy) {
       return 'Revoke';
     case 'scan_cancel':
       return 'Cancel scan';
+    case 'force_terminate':
+      return 'Force stop';
     case 'force_cancel_refresh':
       return 'Force cancel';
     case 'revoke_and_remove_from_queue':
@@ -465,7 +467,7 @@ function JobsTable({ jobs, onCancel, cancellingTaskId, cancelInFlight }) {
                   <Button
                     size="small"
                     variant="outlined"
-                    color={job.cancel_strategy === 'force_cancel_refresh' ? 'error' : 'primary'}
+                    color={['force_cancel_refresh', 'force_terminate'].includes(job.cancel_strategy) ? 'error' : 'primary'}
                     onClick={() => onCancel(job.task_id)}
                     disabled={isCancelling}
                   >

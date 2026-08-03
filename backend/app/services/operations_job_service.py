@@ -196,6 +196,8 @@ def _cancel_strategy_for(record: _JobRecord) -> str:
         return "revoke"
     if record.task_name == SCAN_TASK_NAME and record.state == "running":
         return "scan_cancel"
+    if record.state == "running":
+        return "force_terminate"
     if (
         record.state in {"stale", "stuck"}
         and _queue_family(record.queue) == "data_fetch"
@@ -900,6 +902,17 @@ class OperationsJobService:
             status, message = self._cancel_scan(db, scan_id)
             self._record_cancel_action(db, task_id=task_id, strategy=strategy, outcome=status, message=message)
             return {"status": status, "cancel_strategy": strategy, "message": message}
+
+        if strategy == "force_terminate":
+            try:
+                celery_app.control.revoke(task_id, terminate=True, signal='SIGTERM')
+                message = f"Force-terminated running task {task_id}."
+                self._record_cancel_action(db, task_id=task_id, strategy=strategy, outcome="accepted", message=message)
+                return {"status": "accepted", "cancel_strategy": strategy, "message": message}
+            except Exception as exc:
+                message = f"Failed to force terminate task {task_id}: {exc}"
+                self._record_cancel_action(db, task_id=task_id, strategy=strategy, outcome="blocked", message=message)
+                return {"status": "blocked", "cancel_strategy": strategy, "message": message}
 
         if strategy == "force_cancel_refresh":
             lock = get_data_fetch_lock()

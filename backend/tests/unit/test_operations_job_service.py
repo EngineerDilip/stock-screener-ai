@@ -585,6 +585,31 @@ def test_cancel_job_uses_scan_cancel_strategy_for_running_scan():
     assert result["message"] == "cancelled:scan-001"
 
 
+def test_cancel_job_force_terminates_running_task():
+    service = OperationsJobService()
+    service._record_cancel_action = lambda *args, **kwargs: None
+    service._find_scan_record = lambda _db, _task_id: _JobRecord(
+        task_id="task-running-1",
+        task_name="app.tasks.cache_tasks.smart_refresh_cache",
+        queue="data_fetch_us",
+        market="US",
+        state="running",
+        worker="general@host",
+        age_seconds=120.0,
+        wait_reason=None,
+        heartbeat_lag_seconds=60.0,
+        cancel_strategy="force_terminate",
+    )
+
+    with patch("app.services.operations_job_service.celery_app.control.revoke") as mock_revoke:
+        result = service.cancel_job(MagicMock(), "task-running-1")
+
+    assert result["status"] == "accepted"
+    assert result["cancel_strategy"] == "force_terminate"
+    assert "Force-terminated running task" in result["message"]
+    mock_revoke.assert_called_once_with("task-running-1", terminate=True, signal='SIGTERM')
+
+
 def test_cancel_job_force_releases_market_lease_for_stale_market_job():
     service = OperationsJobService()
     service._record_cancel_action = lambda *args, **kwargs: None

@@ -200,6 +200,41 @@ describe('OperationsPage', () => {
     expect(cancelOperationsJob.mock.calls[0][0]).toBe('task-fetch-hk');
   });
 
+  it('renders force stop button for force_terminate jobs', async () => {
+    fetchOperationsJobs.mockResolvedValueOnce({
+      ...OPERATIONS_PAYLOAD,
+      jobs: [
+        {
+          task_id: 'task-run-1',
+          task_name: 'app.tasks.cache_tasks.smart_refresh_cache',
+          queue: 'data_fetch_us',
+          market: 'US',
+          state: 'running',
+          worker: 'general@host',
+          age_seconds: 120,
+          wait_reason: null,
+          heartbeat_lag_seconds: 60,
+          cancel_strategy: 'force_terminate',
+          progress_mode: 'indeterminate',
+          percent: null,
+          current: null,
+          total: null,
+          message: 'Running refresh',
+        },
+      ],
+    });
+
+    renderWithProviders(<OperationsPage />);
+
+    const forceStopButton = await screen.findByRole('button', { name: /force stop/i });
+    expect(forceStopButton).toBeInTheDocument();
+    fireEvent.click(forceStopButton);
+
+    await waitFor(() => {
+      expect(cancelOperationsJob).toHaveBeenCalledWith('task-run-1');
+    });
+  });
+
   it('clears the Working state after a cancel mutation settles', async () => {
     let resolveCancel;
     cancelOperationsJob.mockImplementation(
