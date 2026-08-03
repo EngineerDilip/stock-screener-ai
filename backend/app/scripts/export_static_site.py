@@ -660,6 +660,13 @@ def _ensure_breadth_history(
 
 
 def _static_breadth_backfill_error(stats: Mapping[str, Any]) -> str | None:
+    calculation_errors = int(stats.get("error_stocks") or 0)
+    if calculation_errors > 0:
+        return (
+            "Cache-only breadth backfill has calculation errors "
+            f"(error_stocks={calculation_errors})"
+        )
+
     errors = int(stats.get("errors") or 0)
     if errors > 0:
         return f"Cache-only breadth backfill has errors (errors={errors})"
@@ -693,6 +700,8 @@ def _static_breadth_ready_for_exposure(result: Any) -> bool:
     if not isinstance(result, Mapping):
         return False
     if result.get("error"):
+        return False
+    if int(result.get("error_stocks") or 0) > 0:
         return False
     if int(result.get("errors") or 0) > 0:
         return False

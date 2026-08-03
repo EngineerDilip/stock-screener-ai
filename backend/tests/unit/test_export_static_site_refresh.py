@@ -253,3 +253,53 @@ def test_ensure_breadth_history_marks_backfill_errors_not_completed(monkeypatch)
     assert result["status"] == "errored"
     assert result["errors"] == 1
     assert result["error_dates"] == ["2026-07-31"]
+
+
+def test_ensure_breadth_history_marks_calculation_errors_not_completed(monkeypatch):
+    as_of_date = date(2026, 7, 31)
+
+    class _FakeQuery:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def all(self):
+            return []
+
+    class _FakeDb(_FakeSession):
+        def query(self, *args, **kwargs):
+            return _FakeQuery()
+
+    class _FakeBreadthCalculator:
+        def __init__(self, db, price_cache, *, market):
+            self.market = market
+
+        def backfill_range(self, **kwargs):
+            return {
+                "total_dates": 1,
+                "processed": 1,
+                "errors": 0,
+                "error_dates": [],
+                "target_symbols": 2,
+                "symbols_with_cached_history": 2,
+                "cache_miss_stocks": 0,
+                "error_stocks": 1,
+                "cache_coverage_ratio": 1.0,
+            }
+
+    monkeypatch.setattr(export_static_site, "SessionLocal", lambda: _FakeDb())
+    monkeypatch.setattr(export_static_site, "_generate_trading_dates", lambda *args, **kwargs: [as_of_date])
+    monkeypatch.setattr(export_static_site, "get_price_cache", lambda: object())
+    monkeypatch.setattr(export_static_site, "BreadthCalculatorService", _FakeBreadthCalculator)
+
+    result = export_static_site._ensure_breadth_history(
+        as_of_date=as_of_date,
+        market="HK",
+        min_trading_days=0,
+    )
+
+    assert result["status"] == "errored"
+    assert result["error_stocks"] == 1
+    assert result["error"] == (
+        "Cache-only breadth backfill has calculation errors "
+        "(error_stocks=1)"
+    )

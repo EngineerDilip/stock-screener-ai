@@ -559,11 +559,64 @@ def test_backfill_range_cache_only_reports_gaps_without_provider_fallback():
         "target_symbols": 3,
         "symbols_with_cached_history": 2,
         "cache_miss_stocks": 1,
+        "error_stocks": 0,
         "cache_miss_symbols_sample": ["BBB"],
         "cache_coverage_ratio": pytest.approx(2 / 3),
         "insufficient_history_observations": 1,
     }
     price_cache.get_historical_data.assert_not_called()
+
+
+def test_backfill_range_cache_only_reports_calculation_errors(monkeypatch):
+    db = _make_db_session()
+    db.add_all([
+        StockUniverse(symbol="AAA", is_active=True, status=UNIVERSE_STATUS_ACTIVE),
+        StockUniverse(symbol="BAD", is_active=True, status=UNIVERSE_STATUS_ACTIVE),
+    ])
+    db.commit()
+
+    trading_date = date(2026, 3, 20)
+    aaa_df = _make_price_df(trading_date)
+    bad_df = _make_price_df(trading_date, 200.0)
+    service = BreadthCalculatorService(db, MagicMock())
+    monkeypatch.setattr(
+        service,
+        "_load_price_data_for_batch",
+        MagicMock(return_value=({"AAA": aaa_df, "BAD": bad_df}, set())),
+    )
+
+    def calculate_metrics(prices_df, calculation_dates):
+        if prices_df is bad_df:
+            raise RuntimeError("bad cached prices")
+        return {
+            calculation_dates[0]: {
+                "pct_change_1d": 5.0,
+                "pct_change_21d": 0.0,
+                "pct_change_34d": 0.0,
+                "pct_change_63d": 0.0,
+            }
+        }
+
+    monkeypatch.setattr(
+        service,
+        "_calculate_stock_metrics_by_date_from_prices",
+        calculate_metrics,
+    )
+    monkeypatch.setattr(service, "_store_breadth_records", MagicMock())
+
+    result = service.backfill_range(
+        trading_date,
+        trading_date,
+        trading_dates=[trading_date],
+        policy=_policy("refresh_guarded", trading_date),
+    )
+
+    assert result["processed"] == 1
+    assert result["errors"] == 0
+    assert result["target_symbols"] == 2
+    assert result["cache_miss_stocks"] == 0
+    assert result["error_stocks"] == 1
+    assert result["insufficient_history_observations"] == 0
 
 
 def test_vectorized_stock_metrics_preserve_invalid_close_semantics():
@@ -629,6 +682,7 @@ def test_fill_gaps_propagates_cache_only_to_backfill_range(monkeypatch):
         "target_symbols": 2,
         "symbols_with_cached_history": 1,
         "cache_miss_stocks": 1,
+        "error_stocks": 0,
         "cache_miss_symbols_sample": ["BBB"],
         "cache_coverage_ratio": 0.5,
         "insufficient_history_observations": 0,
