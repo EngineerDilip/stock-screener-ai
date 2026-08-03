@@ -575,15 +575,18 @@ def _ensure_group_rank_history(
 def _ensure_breadth_history(
     *,
     as_of_date: date,
+    market: str = STATIC_DEFAULT_MARKET,
     min_trading_days: int = STATIC_BREADTH_HISTORY_MIN_TRADING_DAYS,
 ) -> dict[str, Any]:
     """Backfill recent breadth history so static snapshots include multi-day context."""
+    normalized_market = (market or STATIC_DEFAULT_MARKET).upper()
     start_date = as_of_date - timedelta(days=STATIC_BREADTH_HISTORY_LOOKBACK_DAYS)
-    desired_dates = _generate_trading_dates(start_date, as_of_date)
+    desired_dates = _generate_trading_dates(start_date, as_of_date, market=normalized_market)
     target_dates = desired_dates[-min_trading_days:] if min_trading_days > 0 else desired_dates
     if not target_dates:
         return {
             "status": "skipped",
+            "market": normalized_market,
             "as_of_date": as_of_date.isoformat(),
             "lookback_start_date": start_date.isoformat(),
             "target_trading_days": 0,
@@ -597,7 +600,7 @@ def _ensure_breadth_history(
             .filter(
                 MarketBreadth.date >= target_dates[0],
                 MarketBreadth.date <= as_of_date,
-                MarketBreadth.market == "US",
+                MarketBreadth.market == normalized_market,
             )
             .all()
         }
@@ -612,6 +615,7 @@ def _ensure_breadth_history(
             )
             return {
                 "status": "skipped",
+                "market": normalized_market,
                 "as_of_date": as_of_date.isoformat(),
                 "lookback_start_date": start_date.isoformat(),
                 "target_trading_days": len(target_dates),
@@ -625,7 +629,11 @@ def _ensure_breadth_history(
             f"through {as_of_date}.",
             flush=True,
         )
-        stats = BreadthCalculatorService(db, get_price_cache()).backfill_range(
+        stats = BreadthCalculatorService(
+            db,
+            get_price_cache(),
+            market=normalized_market,
+        ).backfill_range(
             start_date=recompute_dates[0],
             end_date=recompute_dates[-1],
             trading_dates=recompute_dates,
@@ -634,6 +642,7 @@ def _ensure_breadth_history(
         stats.update(
             {
                 "status": "completed",
+                "market": normalized_market,
                 "as_of_date": as_of_date.isoformat(),
                 "lookback_start_date": start_date.isoformat(),
                 "target_trading_days": len(target_dates),
@@ -763,6 +772,25 @@ def _run_daily_refresh(
             is StaticMarketRsArtifactState.NO_CURRENT_ARTIFACT
         }
         warnings.extend(market_rs_no_current_artifact_warnings.values())
+
+        breadth_history: dict[str, Any] = {}
+        for selected_market in selected_markets:
+            if (
+                market_rs_artifact_states[selected_market]
+                is StaticMarketRsArtifactState.NO_CURRENT_ARTIFACT
+            ):
+                breadth_history[selected_market] = {
+                    "status": "skipped",
+                    "reason": "market_rs_not_ready",
+                    "market": selected_market,
+                    "as_of_date": as_of_by_market[selected_market].isoformat(),
+                }
+                continue
+            breadth_history[selected_market] = _ensure_breadth_history(
+                as_of_date=as_of_by_market[selected_market],
+                market=selected_market,
+            )
+        results["breadth_history"] = breadth_history
 
         market_exposure: dict[str, Any] = {}
         for selected_market in selected_markets:
