@@ -53,6 +53,10 @@ celery_app = Celery(
         'app.tasks.runtime_bootstrap_tasks',  # Local-default first-run bootstrap orchestration
         'app.tasks.static_export_tasks',  # Scheduled static-data bundle export
         'app.interfaces.tasks.feature_store_tasks',  # Daily feature snapshot
+        'app.tasks.max_pain_tasks',  # Max pain options analysis tasks
+        'app.tasks.gex_tasks',  # Gamma exposure options analysis tasks
+        'app.tasks.options_tasks',  # Options metrics precompute
+        'app.tasks.options_analysis_tasks',  # Batch options structural analysis
     ]
 )
 celery_app.loader.override_backends = {
@@ -525,6 +529,36 @@ def _build_cache_warmup_beat_schedule(enabled_markets: list[str]) -> dict:
                 minute=0,
                 day_of_week=0,  # Sunday
             ),
+        },
+
+        # Daily max pain options analysis update.
+        # Runs at 4:30 PM ET, approximately 30 minutes after US market close.
+        'daily-max-pain-update': {
+            'task': 'app.tasks.max_pain_tasks.schedule_daily_update',
+            'schedule': crontab(hour=16, minute=30),
+        },
+
+        # Daily gamma exposure update.
+        # Runs at 4:40 PM ET to avoid overlap with max pain scheduling.
+        'daily-gex-update': {
+            'task': 'app.tasks.gex_tasks.schedule_daily_update',
+            'schedule': crontab(hour=16, minute=40),
+        },
+
+        # Daily options metrics precompute (nearest-expiry cache warm).
+        # Runs at 4:50 PM ET after the primary options reads have completed.
+        'daily-options-update': {
+            'task': 'app.tasks.options_tasks.schedule_daily_update',
+            'schedule': crontab(hour=16, minute=50),
+        },
+
+        # Batch options structural analysis (Call Wall, Put Wall, Flip Level)
+        # for all active US stocks. Queues per-symbol analysis tasks to the
+        # data_fetch queue with rate limiting.
+        'daily-batch-options-analysis': {
+            'task': 'app.tasks.options_analysis_tasks.batch_analyze_options_exposure',
+            'schedule': crontab(hour=23, minute=0),
+            'kwargs': {'market': 'US', 'limit': 2000},
         },
     }
 

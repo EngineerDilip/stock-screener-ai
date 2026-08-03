@@ -40,6 +40,7 @@ const GroupRankingsPage = lazy(() => import('./pages/GroupRankingsPage'));
 const ValidationPage = lazy(() => import('./pages/ValidationPage'));
 const ThemesPage = lazy(() => import('./pages/ThemesPage'));
 const ChatbotPage = lazy(() => import('./pages/ChatbotPage'));
+const OptionsAnalyticsDashboardPage = lazy(() => import('./pages/OptionsAnalyticsDashboardPage'));
 const OperationsPage = lazy(() => import('./pages/OperationsPage'));
 const StaticAppShell = lazy(() => import('./static/StaticAppShell'));
 
@@ -396,6 +397,7 @@ function AppShell() {
               <Route path="/validation" element={<ValidationPage />} />
               {features.themes && <Route path="/themes" element={<ThemesPage />} />}
               {features.chatbot && <Route path="/chatbot" element={<ChatbotPage />} />}
+              <Route path="/options-analytics" element={<OptionsAnalyticsDashboardPage />} />
               <Route path="/stocks/:ticker" element={<StockDetails />} />
               <Route path="/operations" element={<OperationsPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />

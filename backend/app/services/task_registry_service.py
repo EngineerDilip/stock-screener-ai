@@ -87,6 +87,30 @@ SCHEDULED_TASKS = {
     },
     # ===== WEEKDAYS (After Market Close) =====
     **_daily_market_pipeline_task_definitions(),
+    'daily-max-pain-update': {
+        'task_function': 'app.tasks.max_pain_tasks.schedule_daily_update',
+        'display_name': 'Daily Max Pain Update',
+        'description': 'Fetches options data and computes max pain levels',
+        'schedule_description': '4:30 PM ET daily',
+    },
+    'daily-gex-update': {
+        'task_function': 'app.tasks.gex_tasks.schedule_daily_update',
+        'display_name': 'Daily GEX Update',
+        'description': 'Fetches options data and computes gamma exposure',
+        'schedule_description': '4:40 PM ET daily',
+    },
+    'daily-options-update': {
+        'task_function': 'app.tasks.options_tasks.schedule_daily_update',
+        'display_name': 'Daily Options Metrics Update',
+        'description': 'Fetches SP500 nearest-expiry options and caches metrics',
+        'schedule_description': '4:50 PM ET daily',
+    },
+    'daily-batch-options-analysis': {
+        'task_function': 'app.tasks.options_analysis_tasks.batch_analyze_options_exposure',
+        'display_name': 'Daily Batch Options Analysis',
+        'description': 'Runs batch structural options analysis for active US stocks',
+        'schedule_description': '5:00 PM ET daily',
+    },
 
     # ===== FRIDAY =====
     'weekly-fundamental-refresh': {

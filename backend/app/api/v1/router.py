@@ -52,6 +52,9 @@ _include("fundamentals", tags=["fundamentals"])
 _include("data_fetch_status", tags=["data-fetch"])
 _include("telemetry", tags=["telemetry"])
 _include("operations", tags=["operations"])
+_include("max_pain", prefix="/max-pain", tags=["max-pain"], protected=False)
+_include("gex", prefix="/gex", tags=["gex"], protected=False)
+_include("options", prefix="/options", tags=["options"], protected=False)
 
 if settings.feature_themes:
     _include("themes", prefix="/themes", tags=["themes"])
