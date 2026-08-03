@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
@@ -618,13 +619,20 @@ def _ensure_breadth_history(
         if supported_symbol_count <= 0:
             incomplete_existing_dates = list(target_dates)
         else:
+            minimum_validated_stocks = (
+                _static_breadth_minimum_validated_scan_count(
+                    supported_symbol_count
+                )
+            )
             incomplete_existing_dates = [
                 calc_date
                 for calc_date in target_dates
                 if (
                     calc_date in existing_by_date
-                    and int(existing_by_date[calc_date].total_stocks_scanned or 0)
-                    < supported_symbol_count
+                    and not _static_breadth_row_has_accepted_coverage(
+                        existing_by_date[calc_date],
+                        minimum_validated_stocks=minimum_validated_stocks,
+                    )
                 )
             ]
         recompute_dates = sorted(set(missing_dates + incomplete_existing_dates + [as_of_date]))
@@ -699,6 +707,27 @@ def _static_breadth_supported_symbol_count(db, *, market: str) -> int:
     ]
     supported_symbols, _unsupported_symbols = split_supported_price_symbols(symbols)
     return len(supported_symbols)
+
+
+def _static_breadth_minimum_validated_scan_count(
+    supported_symbol_count: int,
+) -> int:
+    if supported_symbol_count <= 0:
+        return 0
+    return max(
+        1,
+        math.ceil(
+            supported_symbol_count * (1.0 - CACHE_MISS_TOLERANCE_RATIO)
+        ),
+    )
+
+
+def _static_breadth_row_has_accepted_coverage(
+    row: MarketBreadth,
+    *,
+    minimum_validated_stocks: int,
+) -> bool:
+    return int(row.total_stocks_scanned or 0) >= minimum_validated_stocks
 
 
 def _static_breadth_backfill_error(stats: Mapping[str, Any]) -> str | None:

@@ -453,6 +453,67 @@ def test_ensure_breadth_history_skips_validated_existing_rows(monkeypatch):
     assert result["target_symbols"] == 2
 
 
+def test_ensure_breadth_history_skips_existing_rows_with_tolerated_historical_gaps(
+    monkeypatch,
+):
+    previous_date = date(2026, 7, 30)
+    as_of_date = date(2026, 7, 31)
+
+    class _FakeQuery:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def filter(self, *args, **kwargs):
+            return self
+
+        def all(self):
+            return self.rows
+
+    class _FakeDb(_FakeSession):
+        def query(self, entity, *args):
+            if entity is MarketBreadth:
+                return _FakeQuery([
+                    SimpleNamespace(
+                        date=previous_date,
+                        total_stocks_scanned=9,
+                    ),
+                    SimpleNamespace(
+                        date=as_of_date,
+                        total_stocks_scanned=10,
+                    ),
+                ])
+            if entity is StockUniverse.symbol:
+                return _FakeQuery([
+                    (f"AAA{i}",)
+                    for i in range(10)
+                ])
+            return _FakeQuery([])
+
+    monkeypatch.setattr(export_static_site, "SessionLocal", lambda: _FakeDb())
+    monkeypatch.setattr(
+        export_static_site,
+        "_generate_trading_dates",
+        lambda *args, **kwargs: [previous_date, as_of_date],
+    )
+    monkeypatch.setattr(
+        export_static_site,
+        "BreadthCalculatorService",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("accepted historical coverage should not recompute")
+        ),
+    )
+
+    result = export_static_site._ensure_breadth_history(
+        as_of_date=as_of_date,
+        market="HK",
+        min_trading_days=0,
+    )
+
+    assert result["status"] == "skipped"
+    assert result["validated_existing_dates"] == 2
+    assert result["target_symbols"] == 10
+
+
 def test_ensure_breadth_history_marks_calculation_errors_not_completed(monkeypatch):
     as_of_date = date(2026, 7, 31)
 
