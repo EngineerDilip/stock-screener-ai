@@ -610,6 +610,43 @@ def test_cancel_job_force_terminates_running_task():
     mock_revoke.assert_called_once_with("task-running-1", terminate=True, signal='SIGTERM')
 
 
+def test_list_jobs_marks_running_non_scan_tasks_as_force_terminate():
+    service = OperationsJobService()
+    service._broker = lambda: _FakeBroker({})
+    service._inspect = lambda: _FakeInspect()
+    service._runtime_activity_records = lambda _db: []
+    service._job_backend.get_status = MagicMock(return_value=None)
+
+    def _inspect():
+        inspect = _FakeInspect()
+        inspect.active = lambda: {
+            "general@host": [
+                {
+                    "id": "task-running-2",
+                    "name": "app.tasks.cache_tasks.smart_refresh_cache",
+                    "args": [],
+                    "kwargs": {"market": "US"},
+                    "time_start": datetime.now(timezone.utc).timestamp(),
+                    "delivery_info": {"routing_key": "data_fetch_us"},
+                }
+            ]
+        }
+        inspect.reserved = lambda: {}
+        inspect.scheduled = lambda: {}
+        inspect.active_queues = lambda: {"general@host": [{"name": "data_fetch_us"}]}
+        inspect.stats = lambda: {"general@host": {}}
+        return inspect
+
+    service._inspect = _inspect
+
+    payload = service.list_jobs(MagicMock())
+    job = next(job for job in payload["jobs"] if job["task_id"] == "task-running-2")
+
+    assert job["state"] == "running"
+    assert job["cancel_strategy"] == "force_terminate"
+    assert job["queue"] == "data_fetch_us"
+
+
 def test_cancel_job_force_releases_market_lease_for_stale_market_job():
     service = OperationsJobService()
     service._record_cancel_action = lambda *args, **kwargs: None
