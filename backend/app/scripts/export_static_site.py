@@ -883,12 +883,26 @@ def _run_daily_refresh(
                     "as_of_date": as_of_by_market[selected_market].isoformat(),
                 }
                 continue
-            breadth_history[selected_market] = _ensure_breadth_history(
-                as_of_date=as_of_by_market[selected_market],
-                market=selected_market,
-                min_trading_days=0,
-                lookback_days=EXPOSURE_BACKFILL_DAYS,
-            )
+            market_as_of = as_of_by_market[selected_market]
+            try:
+                breadth_history[selected_market] = _ensure_breadth_history(
+                    as_of_date=market_as_of,
+                    market=selected_market,
+                    min_trading_days=0,
+                    lookback_days=EXPOSURE_BACKFILL_DAYS,
+                )
+            except Exception as exc:
+                breadth_history[selected_market] = {
+                    "status": "errored",
+                    "market": selected_market,
+                    "as_of_date": market_as_of.isoformat(),
+                    "error": str(exc),
+                    "exception_type": exc.__class__.__name__,
+                }
+                warnings.append(
+                    f"Static export market {selected_market} breadth history "
+                    f"failed for {market_as_of.isoformat()}: {exc}"
+                )
         results["breadth_history"] = breadth_history
 
         market_exposure: dict[str, Any] = {}
