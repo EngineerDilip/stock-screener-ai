@@ -912,6 +912,48 @@ def test_backfill_range_sparse_dates_include_existing_intervening_counts_in_rati
     assert rows[date(2026, 3, 16)].ratio_5day == 2.8
 
 
+def test_backfill_range_requires_exact_bar_for_each_requested_date():
+    db = _make_db_session()
+    db.add_all([
+        StockUniverse(symbol="AAA", is_active=True, status=UNIVERSE_STATUS_ACTIVE),
+        StockUniverse(symbol="GAP", is_active=True, status=UNIVERSE_STATUS_ACTIVE),
+    ])
+    db.commit()
+
+    first_date = date(2026, 3, 12)
+    latest_date = date(2026, 3, 16)
+    aaa_df = _flat_price_df(latest_date)
+    gap_df = _flat_price_df(latest_date)
+    gap_df = gap_df.drop(index=pd.Timestamp(first_date))
+    gap_df.loc[pd.Timestamp(date(2026, 3, 11)), "Close"] = 95.0
+    gap_df.loc[pd.Timestamp(latest_date), "Close"] = 105.0
+
+    price_cache = MagicMock()
+    price_cache.get_many_cached_only_fresh.return_value = {
+        "AAA": aaa_df,
+        "GAP": gap_df,
+    }
+    service = BreadthCalculatorService(db, price_cache)
+
+    result = service.backfill_range(
+        first_date,
+        latest_date,
+        trading_dates=[first_date, latest_date],
+        policy=_policy("refresh_guarded", latest_date),
+    )
+
+    rows = {
+        row.date: row
+        for row in db.query(MarketBreadth)
+        .filter(MarketBreadth.date.in_([first_date, latest_date]))
+        .all()
+    }
+    assert result["processed"] == 2
+    assert result["insufficient_history_observations"] == 1
+    assert rows[first_date].total_stocks_scanned == 1
+    assert rows[latest_date].total_stocks_scanned == 2
+
+
 def test_backfill_range_vectorized_changes_preserve_rounded_thresholds():
     db = _make_db_session()
     symbols = ["UP4", "UP13", "UP25", "UP50"]

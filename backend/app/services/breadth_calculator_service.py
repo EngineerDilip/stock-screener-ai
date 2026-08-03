@@ -413,9 +413,12 @@ class BreadthCalculatorService:
         }
 
         metrics_by_date: Dict[date, Dict] = {}
+        index_by_date = self._latest_index_by_date(prices_df.index)
         for calc_date in calculation_dates:
-            end_ts = self._timestamp_for_index(calc_date, prices_df.index)
-            latest_idx = prices_df.index.searchsorted(end_ts, side='right') - 1
+            latest_idx = index_by_date.get(calc_date)
+            if latest_idx is None:
+                logger.debug("No exact cached bar for %s", calc_date)
+                continue
             if latest_idx < 69:
                 logger.debug(f"Insufficient cached data through {calc_date}: {latest_idx + 1} days")
                 continue
@@ -428,6 +431,16 @@ class BreadthCalculatorService:
             }
 
         return metrics_by_date
+
+    @staticmethod
+    def _latest_index_by_date(index) -> dict[date, int]:
+        positions: dict[date, int] = {}
+        for position, index_value in enumerate(index):
+            try:
+                positions[pd.Timestamp(index_value).date()] = position
+            except (TypeError, ValueError):
+                continue
+        return positions
 
     @staticmethod
     def _timestamp_for_index(item_date: date, index) -> pd.Timestamp:
