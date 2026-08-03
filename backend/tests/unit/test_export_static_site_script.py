@@ -88,12 +88,18 @@ def _stub_static_breadth_history(monkeypatch):
     monkeypatch.setattr(
         export_script,
         "_ensure_breadth_history",
-        lambda *, as_of_date, market: {
+        lambda *, as_of_date, market=export_script.STATIC_DEFAULT_MARKET, **_kwargs: {
             "status": "completed",
             "market": market,
             "as_of_date": as_of_date.isoformat(),
         },
     )
+
+
+def test_static_breadth_history_stub_preserves_default_market():
+    result = export_script._ensure_breadth_history(as_of_date=date(2026, 7, 31))
+
+    assert result["market"] == export_script.STATIC_DEFAULT_MARKET
 
 
 def test_ensure_group_rank_history_uses_static_bootstrap_coordinator(

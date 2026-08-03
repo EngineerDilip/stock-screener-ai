@@ -30,6 +30,8 @@ from app.services.group_rank_history_backfill_service import (
 )
 from app.services.benchmark_cache_service import BenchmarkFallbackPolicy
 from app.services.benchmark_resolution import BenchmarkResolution
+from app.services.daily_breadth_runner import CACHE_MISS_TOLERANCE_RATIO
+from app.services.market_exposure_service import EXPOSURE_BACKFILL_DAYS
 from app.services.static_daily_price_refresh_service import (
     StaticDailyPriceRefreshService,
     static_daily_price_refresh_batch_size as _static_daily_price_refresh_batch_size,
@@ -577,10 +579,11 @@ def _ensure_breadth_history(
     as_of_date: date,
     market: str = STATIC_DEFAULT_MARKET,
     min_trading_days: int = STATIC_BREADTH_HISTORY_MIN_TRADING_DAYS,
+    lookback_days: int = STATIC_BREADTH_HISTORY_LOOKBACK_DAYS,
 ) -> dict[str, Any]:
     """Backfill recent breadth history so static snapshots include multi-day context."""
     normalized_market = (market or STATIC_DEFAULT_MARKET).upper()
-    start_date = as_of_date - timedelta(days=STATIC_BREADTH_HISTORY_LOOKBACK_DAYS)
+    start_date = as_of_date - timedelta(days=lookback_days)
     desired_dates = _generate_trading_dates(start_date, as_of_date, market=normalized_market)
     target_dates = desired_dates[-min_trading_days:] if min_trading_days > 0 else desired_dates
     if not target_dates:
@@ -639,9 +642,10 @@ def _ensure_breadth_history(
             trading_dates=recompute_dates,
             cache_only=True,
         )
+        error = _static_breadth_backfill_error(stats)
         stats.update(
             {
-                "status": "completed",
+                "status": "errored" if error else "completed",
                 "market": normalized_market,
                 "as_of_date": as_of_date.isoformat(),
                 "lookback_start_date": start_date.isoformat(),
@@ -650,7 +654,49 @@ def _ensure_breadth_history(
                 "recomputed_dates": len(recompute_dates),
             }
         )
+        if error:
+            stats["error"] = error
         return stats
+
+
+def _static_breadth_backfill_error(stats: Mapping[str, Any]) -> str | None:
+    errors = int(stats.get("errors") or 0)
+    if errors > 0:
+        return f"Cache-only breadth backfill has errors (errors={errors})"
+
+    total_dates = int(stats.get("total_dates") or 0)
+    processed = int(stats.get("processed") or 0)
+    if total_dates > 0 and processed == 0:
+        return "Cache-only breadth backfill processed no dates"
+
+    target_symbols = stats.get("target_symbols")
+    if target_symbols is None:
+        return None
+
+    total_symbols = int(target_symbols or 0)
+    if total_symbols == 0:
+        return "Cache-only breadth backfill processed no stocks"
+
+    cache_misses = int(stats.get("cache_miss_stocks") or 0)
+    miss_ratio = cache_misses / total_symbols
+    if miss_ratio > CACHE_MISS_TOLERANCE_RATIO:
+        return (
+            "Cache-only breadth backfill exceeds miss tolerance "
+            f"(cache_misses={cache_misses}, total={total_symbols}, "
+            f"ratio={miss_ratio:.1%}, "
+            f"limit={CACHE_MISS_TOLERANCE_RATIO:.0%})"
+        )
+    return None
+
+
+def _static_breadth_ready_for_exposure(result: Any) -> bool:
+    if not isinstance(result, Mapping):
+        return False
+    if result.get("error"):
+        return False
+    if int(result.get("errors") or 0) > 0:
+        return False
+    return result.get("status") in {"completed", "skipped"}
 
 
 def _run_daily_refresh(
@@ -789,6 +835,8 @@ def _run_daily_refresh(
             breadth_history[selected_market] = _ensure_breadth_history(
                 as_of_date=as_of_by_market[selected_market],
                 market=selected_market,
+                min_trading_days=0,
+                lookback_days=EXPOSURE_BACKFILL_DAYS,
             )
         results["breadth_history"] = breadth_history
 
@@ -805,6 +853,20 @@ def _run_daily_refresh(
                     "market": selected_market,
                     "date": market_as_of.isoformat(),
                 }
+                continue
+            if not _static_breadth_ready_for_exposure(breadth_history.get(selected_market)):
+                market_exposure[selected_market] = {
+                    "status": "skipped",
+                    "reason": "market_breadth_not_ready",
+                    "error": "market_breadth_not_ready",
+                    "market": selected_market,
+                    "date": market_as_of.isoformat(),
+                    "breadth_history": breadth_history.get(selected_market),
+                }
+                warnings.append(
+                    f"Static export market {selected_market} exposure not stored "
+                    f"for {market_as_of.isoformat()}: market_breadth_not_ready."
+                )
                 continue
             try:
                 exposure_result = _compute_static_market_exposure(
