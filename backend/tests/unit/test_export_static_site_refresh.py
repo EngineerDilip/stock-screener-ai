@@ -409,6 +409,91 @@ def test_ensure_breadth_history_recomputes_incomplete_existing_rows(monkeypatch)
     assert backfill_kwargs["trading_dates"] == [as_of_date]
 
 
+def test_ensure_breadth_history_recomputes_ratio_window_after_historical_repair(
+    monkeypatch,
+):
+    target_dates = [
+        date(2026, 7, 16),
+        date(2026, 7, 17),
+        date(2026, 7, 20),
+        date(2026, 7, 21),
+        date(2026, 7, 22),
+        date(2026, 7, 23),
+        date(2026, 7, 24),
+        date(2026, 7, 27),
+        date(2026, 7, 28),
+        date(2026, 7, 29),
+        date(2026, 7, 30),
+        date(2026, 7, 31),
+    ]
+    repair_date = target_dates[1]
+    as_of_date = target_dates[-1]
+    backfill_kwargs: dict[str, object] = {}
+
+    class _FakeQuery:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def filter(self, *args, **kwargs):
+            return self
+
+        def all(self):
+            return self.rows
+
+    class _FakeDb(_FakeSession):
+        def query(self, entity, *args):
+            if entity is MarketBreadth:
+                return _FakeQuery([
+                    SimpleNamespace(date=calc_date, total_stocks_scanned=1)
+                    for calc_date in target_dates
+                    if calc_date != repair_date
+                ])
+            if entity is StockUniverse.symbol:
+                return _FakeQuery([("AAA",)])
+            return _FakeQuery([])
+
+    class _FakeBreadthCalculator:
+        def __init__(self, db, price_cache, *, market):
+            self.market = market
+
+        def backfill_range(self, **kwargs):
+            backfill_kwargs.update(kwargs)
+            return {
+                "total_dates": len(kwargs["trading_dates"]),
+                "processed": len(kwargs["trading_dates"]),
+                "errors": 0,
+                "error_dates": [],
+                "target_symbols": 1,
+                "symbols_with_cached_history": 1,
+                "cache_miss_stocks": 0,
+                "error_stocks": 0,
+                "cache_coverage_ratio": 1.0,
+            }
+
+    monkeypatch.setattr(export_static_site, "SessionLocal", lambda: _FakeDb())
+    monkeypatch.setattr(
+        export_static_site,
+        "_generate_trading_dates",
+        lambda *args, **kwargs: target_dates,
+    )
+    monkeypatch.setattr(export_static_site, "get_price_cache", lambda: object())
+    monkeypatch.setattr(
+        export_static_site,
+        "BreadthCalculatorService",
+        _FakeBreadthCalculator,
+    )
+
+    result = export_static_site._ensure_breadth_history(
+        as_of_date=as_of_date,
+        market="HK",
+        min_trading_days=0,
+    )
+
+    assert result["status"] == "completed"
+    assert result["recomputed_dates"] == 11
+    assert backfill_kwargs["trading_dates"] == target_dates[1:]
+
+
 def test_ensure_breadth_history_skips_validated_existing_rows(monkeypatch):
     as_of_date = date(2026, 7, 31)
 

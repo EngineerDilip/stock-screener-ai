@@ -73,6 +73,7 @@ from app.wiring.bootstrap import (
 
 STATIC_BREADTH_HISTORY_MIN_TRADING_DAYS = 20
 STATIC_BREADTH_HISTORY_LOOKBACK_DAYS = 90
+STATIC_BREADTH_RATIO_RECOMPUTE_TRADING_DAYS = 10
 STATIC_BUILD_MODE_PRICE_DELTA = "price_delta"
 STATIC_BUILD_MODE_FULL = "full"
 STATIC_EXPORT_MARKETS = market_registry.supported_market_codes()
@@ -635,7 +636,12 @@ def _ensure_breadth_history(
                     )
                 )
             ]
-        recompute_dates = sorted(set(missing_dates + incomplete_existing_dates + [as_of_date]))
+        repair_dates = sorted(set(missing_dates + incomplete_existing_dates))
+        recompute_dates = _static_breadth_recompute_dates(
+            target_dates=target_dates,
+            repair_dates=repair_dates,
+            as_of_date=as_of_date,
+        )
 
         if (
             len(recompute_dates) == 1
@@ -707,6 +713,31 @@ def _static_breadth_supported_symbol_count(db, *, market: str) -> int:
     ]
     supported_symbols, _unsupported_symbols = split_supported_price_symbols(symbols)
     return len(supported_symbols)
+
+
+def _static_breadth_recompute_dates(
+    *,
+    target_dates: Sequence[date],
+    repair_dates: Sequence[date],
+    as_of_date: date,
+) -> list[date]:
+    recompute_dates = set(repair_dates)
+    index_by_date = {
+        calc_date: index
+        for index, calc_date in enumerate(target_dates)
+    }
+    for repair_date in repair_dates:
+        repair_index = index_by_date.get(repair_date)
+        if repair_index is None:
+            continue
+        affected_end_index = min(
+            len(target_dates),
+            repair_index + STATIC_BREADTH_RATIO_RECOMPUTE_TRADING_DAYS + 1,
+        )
+        recompute_dates.update(target_dates[repair_index:affected_end_index])
+
+    recompute_dates.add(as_of_date)
+    return sorted(recompute_dates)
 
 
 def _static_breadth_minimum_validated_scan_count(
