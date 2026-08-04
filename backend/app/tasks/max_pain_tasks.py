@@ -365,6 +365,16 @@ def update_max_pain(self, config_path: str | None = None, wait_until: str | None
                     batch.closest_to_max_pain = closest_ticker
                     db.commit()
 
+                    self.update_state(
+                        state='PROGRESS',
+                        meta={
+                            'current': chunk_index * chunk_size,
+                            'total': len(tickers),
+                            'percent': round(min(chunk_index * chunk_size, len(tickers)) / len(tickers) * 100, 1),
+                            'message': f"Processed chunk {chunk_index}: {total_ok} ok, {total_failed} failed",
+                        },
+                    )
+
                 finally:
                     try:
                         if chunk_output_path:
@@ -374,17 +384,29 @@ def update_max_pain(self, config_path: str | None = None, wait_until: str | None
                     except Exception:
                         pass
 
-            batch.status = "completed"
+            # A run where every chunk's subprocess failed used to still be
+            # marked "completed" (each per-chunk failure only incremented
+            # total_failed, never the overall batch.status), so operators saw
+            # a green "Completed" status even though zero real data was
+            # produced. Reflect that as a failure instead.
+            if total_ok == 0 and total_failed > 0:
+                batch.status = "failed"
+                batch.error_message = (
+                    f"All {total_failed} symbols failed across {chunk_index} chunk(s); "
+                    "see worker logs for per-chunk errors."
+                )
+            else:
+                batch.status = "completed"
             batch.completed_at = datetime.utcnow()
             db.commit()
 
             logger.info(
-                f"[{batch_id}] Full-universe batch completed: {batch.tickers_ok} OK, {batch.tickers_failed} failed"
+                f"[{batch_id}] Full-universe batch {batch.status}: {batch.tickers_ok} OK, {batch.tickers_failed} failed"
             )
 
             return {
                 "batch_id": batch_id,
-                "status": "success",
+                "status": "success" if batch.status == "completed" else "failed",
                 "summary": {
                     "tickers_ok": batch.tickers_ok,
                     "tickers_failed": batch.tickers_failed,

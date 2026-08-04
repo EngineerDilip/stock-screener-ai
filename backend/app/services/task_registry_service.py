@@ -16,6 +16,7 @@ from ..config import settings
 from ..tasks.market_queues import (
     SHARED_DATA_FETCH_QUEUE,
     SUPPORTED_MARKETS,
+    data_fetch_queue_for_market,
     market_jobs_queue_for_market,
 )
 
@@ -92,24 +93,29 @@ SCHEDULED_TASKS = {
         'display_name': 'Daily Max Pain Update',
         'description': 'Fetches options data and computes max pain levels',
         'schedule_description': '4:30 PM ET daily',
+        'manual_dispatch_options': {'queue': data_fetch_queue_for_market('US')},
     },
     'daily-gex-update': {
         'task_function': 'app.tasks.gex_tasks.schedule_daily_update',
         'display_name': 'Daily GEX Update',
         'description': 'Fetches options data and computes gamma exposure',
         'schedule_description': '4:40 PM ET daily',
+        'manual_dispatch_options': {'queue': data_fetch_queue_for_market('US')},
     },
     'daily-options-update': {
         'task_function': 'app.tasks.options_tasks.schedule_daily_update',
         'display_name': 'Daily Options Metrics Update',
-        'description': 'Fetches SP500 nearest-expiry options and caches metrics',
+        'description': 'Triggers the batch options analysis below and caches SummaryCards metrics from the same fetch',
         'schedule_description': '4:50 PM ET daily',
+        'manual_dispatch_options': {'queue': data_fetch_queue_for_market('US')},
     },
     'daily-batch-options-analysis': {
         'task_function': 'app.tasks.options_analysis_tasks.batch_analyze_options_exposure',
         'display_name': 'Daily Batch Options Analysis',
-        'description': 'Runs batch structural options analysis for active US stocks',
-        'schedule_description': '5:00 PM ET daily',
+        'description': 'Runs batch structural options analysis (Call Wall, Put Wall, Flip Level) for active US stocks',
+        'schedule_description': 'Runs via Daily Options Metrics Update (4:50 PM ET); trigger here to run manually',
+        'manual_dispatch_kwargs': {'market': 'US', 'limit': 2000},
+        'manual_dispatch_options': {'queue': data_fetch_queue_for_market('US')},
     },
 
     # ===== FRIDAY =====
@@ -302,8 +308,16 @@ class TaskRegistryService:
             response['total'] = result.info.get('total', 0)
         elif celery_state == 'SUCCESS':
             response['result'] = result.result
-            # Update database record
-            self._update_execution_completed(db, task_id, 'completed', result.result)
+            # Some tasks (e.g. max_pain/gex chunked batches) can complete
+            # without raising even when every chunk failed; honor an inner
+            # {"status": "failed", ...} in the return value instead of always
+            # recording "completed" just because Celery's own state is SUCCESS.
+            inner_status = (
+                result.result.get('status') if isinstance(result.result, dict) else None
+            )
+            final_status = 'failed' if inner_status == 'failed' else 'completed'
+            self._update_execution_completed(db, task_id, final_status, result.result)
+
         elif celery_state == 'FAILURE':
             response['error'] = str(result.result) if result.result else 'Unknown error'
             # Update database record

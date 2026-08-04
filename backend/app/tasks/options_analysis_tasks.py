@@ -15,10 +15,16 @@ from celery import shared_task
 
 from ..services.yfinance_service import YFinanceService
 from ..services.rate_budget_policy import RateBudgetPolicy
-from ..services.options_metrics import compute_key_gamma_levels
+from ..services.options_metrics import (
+    compute_key_gamma_levels,
+    compute_options_metrics,
+    _bs_gamma_delta,
+    _time_to_expiry_years,
+)
 from ..wiring.bootstrap import get_redis_client
 from ..models import StockUniverse
 from ..database import SessionLocal
+from .market_queues import data_fetch_queue_for_market
 
 logger = logging.getLogger(__name__)
 
@@ -53,24 +59,41 @@ def batch_analyze_options_exposure(self, market: str = "US", limit: int = 2000) 
             )
             
             symbols = [s[0] for s in active_symbols]
-            logger.info(f"Starting batch analysis for {len(symbols)} {market} stocks")
+            total = len(symbols)
+            logger.info(f"Starting batch analysis for {total} {market} stocks")
             
             # Get batch size from rate budget policy
             batch_size = RateBudgetPolicy.get_batch_size("yfinance", market)
             logger.info(f"Using batch size: {batch_size}")
-            
+
+            # Route to the per-market data_fetch queue (a real, consumed queue) —
+            # the previous hardcoded 'data_fetch' queue name has no worker
+            # subscribed to it, so subtasks silently never ran.
+            queue_name = data_fetch_queue_for_market(market)
+
             # Process in batches with rate limiting between batches
-            for i in range(0, len(symbols), batch_size):
+            for i in range(0, total, batch_size):
                 batch = symbols[i : i + batch_size]
                 
                 for symbol in batch:
                     try:
                         # Run analysis for this symbol
-                        analyze_options_exposure.apply_async(args=[symbol], queue='data_fetch')
+                        analyze_options_exposure.apply_async(args=[symbol], queue=queue_name)
                         analyzed += 1
                     except Exception as e:
                         logger.error(f"Error queuing analysis for {symbol}: {e}")
                         errors += 1
+
+                self.update_state(
+                    state='PROGRESS',
+                    meta={
+                        'current': analyzed,
+                        'total': total,
+                        'percent': round((analyzed / total) * 100, 1) if total else 100.0,
+                        'message': f"Queued {analyzed}/{total} symbols for options analysis",
+                        'errors': errors,
+                    },
+                )
                 
                 # Wait between batches to respect rate limits
                 try:
@@ -143,26 +166,56 @@ def analyze_options_exposure(self, symbol: str) -> Dict[str, Any]:
             raise ValueError(f"No market data found for {symbol}")
         spot_price = float(hist["Close"].iloc[-1])
         
-        # Fetch next 3 expirations
+        # Fetch next 3 expirations. yfinance option chains don't reliably include
+        # a `gamma` column, so it's derived via Black-Scholes from strike + IV +
+        # time-to-expiry (see services/options_metrics.py::_bs_gamma_delta) instead
+        # of trusting a column that's usually absent and silently fills with 0.
+        # Vanna/charm remain provider-supplied (usually 0) — out of scope here.
         all_options = []
-        for exp_date in expirations[:3]:
+        nearest_chain: List[Dict[str, Any]] = []
+        for exp_index, exp_date in enumerate(expirations[:3]):
             try:
                 oc = ticker.option_chain(exp_date)
+                time_years = _time_to_expiry_years(exp_date)
                 for df_source, option_type in ((oc.calls, 'call'), (oc.puts, 'put')):
                     if df_source is None or df_source.empty:
                         continue
 
                     df_source = df_source.copy()
                     df_source['openInterest'] = pd.to_numeric(df_source.get('openInterest', 0), errors='coerce').fillna(0).astype(int)
-                    df_source = df_source[df_source['openInterest'] > 0]
-                    if df_source.empty:
-                        continue
-
                     df_source['strike'] = pd.to_numeric(df_source.get('strike', 0.0), errors='coerce').fillna(0.0)
-                    df_source['gamma'] = pd.to_numeric(df_source.get('gamma', 0.0), errors='coerce').fillna(0.0)
+                    df_source['impliedVolatility'] = pd.to_numeric(df_source.get('impliedVolatility', 0.0), errors='coerce').fillna(0.0)
+
+                    greeks = [
+                        _bs_gamma_delta(spot_price, strike, time_years, iv, option_type)
+                        for strike, iv in zip(df_source['strike'], df_source['impliedVolatility'])
+                    ]
+                    df_source['gamma'] = [g for g, _ in greeks]
+                    df_source['delta'] = [d for _, d in greeks]
                     df_source['vanna'] = pd.to_numeric(df_source.get('vanna', 0.0), errors='coerce').fillna(0.0)
                     df_source['charm'] = pd.to_numeric(df_source.get('charm', 0.0), errors='coerce').fillna(0.0)
                     df_source['type'] = option_type
+
+                    if exp_index == 0:
+                        # Reused below to derive options_metrics:{symbol} (GEX walls,
+                        # skew, IVR-ready payload) from this same fetched chain —
+                        # options_tasks.schedule_daily_update used to re-fetch this
+                        # independently, doubling yfinance calls for every symbol.
+                        for _, row in df_source.iterrows():
+                            nearest_chain.append({
+                                "strike": float(row["strike"]),
+                                "type": option_type,
+                                "delta": float(row["delta"]),
+                                "gamma": float(row["gamma"]),
+                                "vanna": float(row["vanna"]),
+                                "charm": float(row["charm"]),
+                                "open_interest": int(row["openInterest"]),
+                                "iv": float(row["impliedVolatility"]) if row["impliedVolatility"] > 0 else None,
+                            })
+
+                    df_source = df_source[df_source['openInterest'] > 0]
+                    if df_source.empty:
+                        continue
 
                     all_options.append(df_source[['strike', 'type', 'gamma', 'vanna', 'charm', 'openInterest']])
             except Exception:
@@ -256,7 +309,18 @@ def analyze_options_exposure(self, symbol: str) -> Dict[str, Any]:
             redis_client.setex(cache_key, 86400, json.dumps(result))
         except Exception:
             pass  # Cache error, but result is still returned
-        
+
+        # Derive the simpler options-metrics payload (GEX walls, skew) used by
+        # the Options Analytics Dashboard SummaryCards from the SAME nearest-
+        # expiry chain fetched above, instead of a second independent sweep.
+        if nearest_chain:
+            try:
+                metrics = compute_options_metrics(nearest_chain)
+                redis_client = get_redis_client()
+                redis_client.set(f"options_metrics:{symbol}", json.dumps(metrics), ex=7 * 24 * 3600)
+            except Exception:
+                logger.debug("Failed to derive/cache options_metrics for %s", symbol)
+
         return result
     
     except Exception as exc:

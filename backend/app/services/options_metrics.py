@@ -15,6 +15,7 @@ gamma levels, IVR and skew.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 import math
 
@@ -287,6 +288,98 @@ def _compute_historical_volatility(history: pd.DataFrame) -> Optional[float]:
     return float(returns.std(ddof=0) * math.sqrt(252))
 
 
+def _norm_pdf(x: float) -> float:
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+
+def _norm_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _bs_gamma_delta(spot: float, strike: float, time_years: float, vol: float, option_type: str) -> Tuple[float, float]:
+    """Black-Scholes gamma and delta.
+
+    yfinance option chains do not reliably include gamma/delta columns, so
+    walls/skew must be derived from strike + implied volatility instead of a
+    (usually absent or stale) provider-supplied greek.
+    """
+    if spot <= 0 or strike <= 0 or time_years <= 0 or vol <= 0:
+        return 0.0, 0.0
+    denominator = vol * math.sqrt(time_years)
+    if denominator <= 0:
+        return 0.0, 0.0
+    d1 = (math.log(spot / strike) + 0.5 * vol * vol * time_years) / denominator
+    gamma = _norm_pdf(d1) / (spot * denominator)
+    delta = _norm_cdf(d1) if option_type == "call" else _norm_cdf(d1) - 1.0
+    return gamma, delta
+
+
+def _time_to_expiry_years(expiration: str) -> float:
+    try:
+        expiry_dt = datetime.strptime(expiration, "%Y-%m-%d").date()
+        days_to_expiry = max((expiry_dt - datetime.utcnow().date()).days, 1)
+    except (TypeError, ValueError):
+        days_to_expiry = 1
+    return max(days_to_expiry / 365.0, 1.0 / 365.0)
+
+
+def _find_valid_atm_option(df: pd.DataFrame, underlying_price: float, min_iv: float = 0.01) -> Optional[pd.Series]:
+    """Find the strike closest to the money that has a usable (non-degenerate) IV.
+
+    yfinance sometimes reports impliedVolatility as 0 (or near-zero) for a
+    stale/illiquid contract even when its strike is otherwise ATM. Using that
+    value directly collapses VRP to roughly `-historical_volatility`. Walk
+    outward from the nearest strike until a contract with a real IV is found.
+    """
+    if df is None or df.empty or "strike" not in df.columns or "impliedVolatility" not in df.columns:
+        return None
+    ordered = df.assign(_dist=(df["strike"] - underlying_price).abs()).sort_values("_dist")
+    for _, row in ordered.iterrows():
+        iv = row.get("impliedVolatility")
+        if iv is not None and iv >= min_iv:
+            return row
+    return None
+
+
+def _update_iv_history_and_get_range(ticker: str, current_iv: Optional[float]) -> Tuple[Optional[float], Optional[float]]:
+    """Persist today's ATM IV in a rolling ~252-session Redis history per ticker
+    and return the observed (low, high) so IV Rank can be computed.
+
+    No dedicated historical-IV table exists in this codebase, so the range is
+    bootstrapped incrementally from live metric calculations rather than
+    mixing in stock-price 52-week highs/lows (a different quantity).
+    """
+    if current_iv is None or current_iv <= 0:
+        return None, None
+    try:
+        from .redis_pool import get_redis_client
+        redis_client = get_redis_client()
+        if redis_client is None:
+            return None, None
+        key = f"iv_history:{ticker.upper()}"
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        redis_client.hset(key, today, str(current_iv))
+        redis_client.expire(key, 400 * 24 * 3600)
+        raw = redis_client.hgetall(key)
+    except Exception:
+        return None, None
+
+    if not raw:
+        return None, None
+
+    entries = sorted(raw.items())[-252:]
+    values: List[float] = []
+    for _, v in entries:
+        try:
+            values.append(float(v))
+        except (TypeError, ValueError):
+            continue
+
+    if len(values) < 2:
+        return None, None
+    return min(values), max(values)
+
+
 def calculate_options_metrics(ticker: str, expiration: str) -> Dict[str, Any]:
     """Fetch an options chain from yfinance and compute institutional options metrics.
 
@@ -330,23 +423,32 @@ def calculate_options_metrics(ticker: str, expiration: str) -> Dict[str, Any]:
     calls = calls.copy() if not calls.empty else pd.DataFrame(columns=["strike", "openInterest", "volume", "lastPrice", "impliedVolatility", "gamma"])
     puts = puts.copy() if not puts.empty else pd.DataFrame(columns=["strike", "openInterest", "volume", "lastPrice", "impliedVolatility", "gamma"])
 
-    for df in (calls, puts):
+    time_years = _time_to_expiry_years(expiration)
+
+    for df, option_type in ((calls, "call"), (puts, "put")):
         if "volume" not in df.columns:
             df["volume"] = 0
         if "lastPrice" not in df.columns:
             df["lastPrice"] = 0.0
         if "impliedVolatility" not in df.columns:
             df["impliedVolatility"] = df.get("impliedVol", 0.0)
-        if "gamma" not in df.columns:
-            df["gamma"] = 0.0
         if "strike" not in df.columns:
             df["strike"] = 0.0
         df["volume"] = df["volume"].fillna(0).apply(_safe_float)
         df["lastPrice"] = df["lastPrice"].fillna(0).apply(_safe_float)
         df["openInterest"] = df["openInterest"].fillna(0).apply(_safe_int)
-        df["gamma"] = df["gamma"].fillna(0).apply(_safe_float)
         df["impliedVolatility"] = df["impliedVolatility"].fillna(0).apply(_safe_float)
         df["strike"] = df["strike"].fillna(0).apply(_safe_float)
+
+        # yfinance option chains do not reliably supply gamma/delta, so derive
+        # both via Black-Scholes from strike + implied volatility rather than
+        # trusting a (usually absent) provider-supplied greek column.
+        greeks = [
+            _bs_gamma_delta(underlying_price, strike, time_years, iv, option_type)
+            for strike, iv in zip(df["strike"], df["impliedVolatility"])
+        ]
+        df["gamma"] = [g for g, _ in greeks]
+        df["delta"] = [d for _, d in greeks]
 
     calls["call_gex"] = calls["gamma"] * calls["openInterest"] * 100 * underlying_price * 0.01
     puts["put_gex"] = puts["gamma"] * puts["openInterest"] * 100 * underlying_price * 0.01 * -1
@@ -414,8 +516,14 @@ def calculate_options_metrics(ticker: str, expiration: str) -> Dict[str, Any]:
 
     atm_call_last_price = float(atm_call["lastPrice"]) if atm_call is not None else None
     atm_put_last_price = float(atm_put["lastPrice"]) if atm_put is not None else None
-    atm_call_iv = float(atm_call["impliedVolatility"]) if atm_call is not None and atm_call["impliedVolatility"] > 0 else None
-    atm_put_iv = float(atm_put["impliedVolatility"]) if atm_put is not None and atm_put["impliedVolatility"] > 0 else None
+
+    # A strictly-nearest-strike contract can report a stale/near-zero IV for
+    # illiquid names (e.g. ACN), which collapses VRP to ~ -historical_volatility.
+    # Walk outward to the nearest strike with a usable IV instead.
+    atm_call_iv_row = _find_valid_atm_option(calls, underlying_price)
+    atm_put_iv_row = _find_valid_atm_option(puts, underlying_price)
+    atm_call_iv = float(atm_call_iv_row["impliedVolatility"]) if atm_call_iv_row is not None else None
+    atm_put_iv = float(atm_put_iv_row["impliedVolatility"]) if atm_put_iv_row is not None else None
     current_atm_iv = atm_call_iv if atm_call_iv is not None else atm_put_iv
 
     expected_move = None
@@ -426,7 +534,9 @@ def calculate_options_metrics(ticker: str, expiration: str) -> Dict[str, Any]:
     if current_atm_iv is not None and historical_volatility is not None:
         volatility_risk_premium = current_atm_iv - historical_volatility
 
-    result = compute_options_metrics(options_chain, current_iv=current_atm_iv)
+    iv_52w_low, iv_52w_high = _update_iv_history_and_get_range(ticker, current_atm_iv)
+    result = compute_options_metrics(options_chain, current_iv=current_atm_iv,
+                                      iv_52w_low=iv_52w_low, iv_52w_high=iv_52w_high)
     result.update({
         "ticker": ticker,
         "expiration": expiration,

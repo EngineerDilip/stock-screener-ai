@@ -533,9 +533,13 @@ def _build_cache_warmup_beat_schedule(enabled_markets: list[str]) -> dict:
 
         # Daily max pain options analysis update.
         # Runs at 4:30 PM ET, approximately 30 minutes after US market close.
+        # Routed to the US data_fetch queue (previously unrouted, which meant
+        # this long, rate-limited yfinance sweep ran on the shared general
+        # 'celery' queue and tied up a general-compute worker for its duration).
         'daily-max-pain-update': {
             'task': 'app.tasks.max_pain_tasks.schedule_daily_update',
             'schedule': crontab(hour=16, minute=30),
+            'options': {'queue': data_fetch_queue_for_market('US')},
         },
 
         # Daily gamma exposure update.
@@ -543,22 +547,25 @@ def _build_cache_warmup_beat_schedule(enabled_markets: list[str]) -> dict:
         'daily-gex-update': {
             'task': 'app.tasks.gex_tasks.schedule_daily_update',
             'schedule': crontab(hour=16, minute=40),
+            'options': {'queue': data_fetch_queue_for_market('US')},
         },
 
         # Daily options metrics precompute (nearest-expiry cache warm).
         # Runs at 4:50 PM ET after the primary options reads have completed.
+        # This now delegates straight to the batch options-analysis task below
+        # (options_tasks.schedule_daily_update no longer does its own separate
+        # yfinance sweep — see that module for details), so the two jobs no
+        # longer duplicate the same per-symbol fetch. The standalone
+        # 'daily-batch-options-analysis' beat entry was removed to avoid
+        # running that same batch twice a day (it previously fired again at
+        # 11:00 PM ET / hour=23, despite its registry description claiming
+        # "5:00 PM ET" — a pre-existing schedule/description mismatch).
+        # It remains available for manual triggering from the Scheduled Tasks
+        # dashboard.
         'daily-options-update': {
             'task': 'app.tasks.options_tasks.schedule_daily_update',
             'schedule': crontab(hour=16, minute=50),
-        },
-
-        # Batch options structural analysis (Call Wall, Put Wall, Flip Level)
-        # for all active US stocks. Queues per-symbol analysis tasks to the
-        # data_fetch queue with rate limiting.
-        'daily-batch-options-analysis': {
-            'task': 'app.tasks.options_analysis_tasks.batch_analyze_options_exposure',
-            'schedule': crontab(hour=23, minute=0),
-            'kwargs': {'market': 'US', 'limit': 2000},
+            'options': {'queue': data_fetch_queue_for_market('US')},
         },
     }
 

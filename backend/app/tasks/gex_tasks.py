@@ -267,6 +267,16 @@ def update_gex(self, strike_range_pct: float = 20.0, max_strikes: int | None = N
                     batch.avg_total_gex = (gex_sum / gex_count) if gex_count else None
                     batch.closest_to_flip = closest_to_flip
                     db.commit()
+
+                self.update_state(
+                    state='PROGRESS',
+                    meta={
+                        'current': min(chunk_index * chunk_size, len(tickers)),
+                        'total': len(tickers),
+                        'percent': round(min(chunk_index * chunk_size, len(tickers)) / len(tickers) * 100, 1),
+                        'message': f"Processed chunk {chunk_index}: {total_ok} ok, {total_failed} failed",
+                    },
+                )
             finally:
                 try:
                     if chunk_config_path:
@@ -279,7 +289,18 @@ def update_gex(self, strike_range_pct: float = 20.0, max_strikes: int | None = N
                 except Exception:
                     pass
 
-        batch.status = "completed"
+        # A run where every chunk's subprocess failed used to still be marked
+        # "completed" (per-chunk failures only incremented total_failed, never
+        # the overall batch.status), so operators saw a green "Completed"
+        # status even though zero real data was produced.
+        if total_ok == 0 and total_failed > 0:
+            batch.status = "failed"
+            batch.error_message = (
+                f"All {total_failed} symbols failed across chunked GEX run; "
+                "see worker logs for per-chunk errors."
+            )
+        else:
+            batch.status = "completed"
         batch.completed_at = datetime.utcnow()
         batch.tickers_total = len(tickers)
         batch.tickers_ok = total_ok
@@ -290,7 +311,7 @@ def update_gex(self, strike_range_pct: float = 20.0, max_strikes: int | None = N
 
         return {
             "batch_id": batch_id,
-            "status": "success",
+            "status": "success" if batch.status == "completed" else "failed",
             "summary": {
                 "tickers_total": len(tickers),
                 "tickers_ok": total_ok,
