@@ -198,6 +198,11 @@ def _cancel_strategy_for(record: _JobRecord) -> str:
         return "scan_cancel"
     if record.state == "running":
         return "force_terminate"
+    if record.state == "failed":
+        if _queue_family(record.queue) == "data_fetch":
+            return "force_cancel_refresh"
+        if _queue_family(record.queue) in {"market_jobs", "user_scans"}:
+            return "force_release_market_lease"
     if (
         record.state in {"stale", "stuck"}
         and _queue_family(record.queue) == "data_fetch"
@@ -933,6 +938,10 @@ class OperationsJobService:
             coordination = get_workload_coordination()
             coordination.release_market_workload(task_id, market=market)
             coordination.release_external_fetch(task_id)
+            try:
+                celery_app.control.revoke(task_id, terminate=True, signal='SIGTERM')
+            except Exception:
+                logger.exception("Failed to revoke task %s during force_cancel_refresh", task_id)
             from app.wiring.bootstrap import get_price_cache
 
             get_price_cache().clear_warmup_heartbeat(market=market)
@@ -951,6 +960,10 @@ class OperationsJobService:
                 message = f"Market workload lease for task {task_id} is no longer held."
                 self._record_cancel_action(db, task_id=task_id, strategy=strategy, outcome="blocked", message=message)
                 return {"status": "blocked", "cancel_strategy": strategy, "message": message}
+            try:
+                celery_app.control.revoke(task_id, terminate=True, signal='SIGTERM')
+            except Exception:
+                logger.exception("Failed to revoke task %s during force_release_market_lease", task_id)
             message = f"Released stale market workload lease for task {task_id} ({record.market})."
             self._record_cancel_action(db, task_id=task_id, strategy=strategy, outcome="accepted", message=message)
             return {"status": "accepted", "cancel_strategy": strategy, "message": message}

@@ -663,7 +663,9 @@ def test_cancel_job_force_releases_market_lease_for_stale_market_job():
         cancel_strategy="force_release_market_lease",
     )
 
-    with patch("app.services.operations_job_service.get_workload_coordination") as mock_get_coordination:
+    with patch("app.services.operations_job_service.get_workload_coordination") as mock_get_coordination, patch(
+        "app.services.operations_job_service.celery_app.control.revoke"
+    ) as mock_revoke:
         mock_get_coordination.return_value.release_market_workload.return_value = True
 
         result = service.cancel_job(MagicMock(), "market-job-1")
@@ -671,6 +673,52 @@ def test_cancel_job_force_releases_market_lease_for_stale_market_job():
     assert result["status"] == "accepted"
     assert result["cancel_strategy"] == "force_release_market_lease"
     mock_get_coordination.return_value.release_market_workload.assert_called_once_with("market-job-1", market="US")
+    mock_revoke.assert_called_once_with("market-job-1", terminate=True, signal='SIGTERM')
+
+
+def test_cancel_failed_data_fetch_task_is_force_cancel_refresh():
+    service = OperationsJobService()
+    service._broker = lambda: _FakeBroker({})
+    service._inspect = lambda: _FakeInspect()
+    service._runtime_activity_records = lambda _db: [
+        {
+            "market": "US",
+            "lifecycle": "weekly_refresh",
+            "stage_key": "fundamentals",
+            "stage_label": "Fundamentals Refresh",
+            "status": "failed",
+            "progress_mode": "determinate",
+            "percent": 0.0,
+            "current": 0,
+            "total": 0,
+            "message": "Task failed after retry",
+            "task_name": "app.tasks.cache_tasks.smart_refresh_cache",
+            "task_id": "failed-us-fetch",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    ]
+    service._job_backend.get_status = MagicMock(return_value=None)
+
+    lock = MagicMock()
+    lock.get_current_task.return_value = None
+
+    with patch("app.services.operations_job_service.get_workload_coordination") as mock_get_coordination, patch(
+        "app.services.operations_job_service.get_data_fetch_lock",
+        return_value=lock,
+    ):
+        mock_get_coordination.return_value.get_external_fetch_holder.return_value = None
+        mock_get_coordination.return_value.get_market_workload_holders.return_value = {
+            "US": None,
+            "HK": None,
+            "JP": None,
+            "TW": None,
+        }
+
+        payload = service.list_jobs(MagicMock())
+
+    failed_job = next(job for job in payload["jobs"] if job["task_id"] == "failed-us-fetch")
+    assert failed_job["state"] == "failed"
+    assert failed_job["cancel_strategy"] == "force_cancel_refresh"
 
 
 def test_force_cancel_refresh_releases_scoped_lock_and_coordination_leases():
@@ -702,7 +750,9 @@ def test_force_cancel_refresh_releases_scoped_lock_and_coordination_leases():
         "app.services.operations_job_service.get_workload_coordination"
     ) as mock_get_coordination, patch(
         "app.wiring.bootstrap.get_price_cache", return_value=price_cache
-    ):
+    ), patch(
+        "app.services.operations_job_service.celery_app.control.revoke"
+    ) as mock_revoke:
         result = service.cancel_job(MagicMock(), "fetch-us-lock")
 
     assert result["status"] == "accepted"
@@ -710,3 +760,4 @@ def test_force_cancel_refresh_releases_scoped_lock_and_coordination_leases():
     mock_get_coordination.return_value.release_market_workload.assert_called_once_with("fetch-us-lock", market="us")
     mock_get_coordination.return_value.release_external_fetch.assert_called_once_with("fetch-us-lock")
     price_cache.clear_warmup_heartbeat.assert_called_once_with(market="us")
+    mock_revoke.assert_called_once_with("fetch-us-lock", terminate=True, signal='SIGTERM')
