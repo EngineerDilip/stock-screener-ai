@@ -18,8 +18,10 @@ from ..services.rate_budget_policy import RateBudgetPolicy
 from ..services.options_metrics import (
     compute_key_gamma_levels,
     compute_options_metrics,
+    find_current_atm_iv_from_chain,
     _bs_gamma_delta,
     _time_to_expiry_years,
+    _update_iv_history_and_get_range,
 )
 from ..wiring.bootstrap import get_redis_client
 from ..models import StockUniverse
@@ -315,7 +317,19 @@ def analyze_options_exposure(self, symbol: str) -> Dict[str, Any]:
         # expiry chain fetched above, instead of a second independent sweep.
         if nearest_chain:
             try:
-                metrics = compute_options_metrics(nearest_chain)
+                # IVR requires a current ATM IV + a 52w range derived from the
+                # same self-bootstrapped history the live /metrics endpoint
+                # uses. Without this, the cached payload always has ivr=null,
+                # which is what the dashboard was showing for every symbol
+                # served from cache (i.e. almost all page loads).
+                current_atm_iv = find_current_atm_iv_from_chain(nearest_chain, spot_price)
+                iv_52w_low, iv_52w_high = _update_iv_history_and_get_range(symbol, current_atm_iv)
+                metrics = compute_options_metrics(
+                    nearest_chain,
+                    current_iv=current_atm_iv,
+                    iv_52w_low=iv_52w_low,
+                    iv_52w_high=iv_52w_high,
+                )
                 redis_client = get_redis_client()
                 redis_client.set(f"options_metrics:{symbol}", json.dumps(metrics), ex=7 * 24 * 3600)
             except Exception:

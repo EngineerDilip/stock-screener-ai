@@ -263,20 +263,15 @@ export default function OptionsAnalyticsDashboardPage() {
       }
     }
 
-    let advice = 'Keep position.';
-    if (totalGex > 0 && skew < 0) {
-      advice = 'Buy.';
-    } else if (totalGex < 0 && skew > 0) {
-      advice = 'Sell.';
-    } else if (totalGex > 0 || skew < 0) {
-      advice = 'Keep with bullish bias.';
-    } else if (totalGex < 0 || skew > 0) {
-      advice = 'Keep with cautious bias.';
-    }
+    const { advice } = getMarketSignal();
 
     return `${sentences.join(' ')} ${advice}`;
   };
 
+  // Total GEX reflects the dominant dealer-hedging-flow risk (short gamma
+  // amplifies moves, long gamma dampens them) and takes priority over skew.
+  // Skew is only used as a secondary confirming/tie-breaking signal — it must
+  // never flip a negative-GEX (short-gamma) regime into a "Bullish" badge.
   const getMarketSignal = () => {
     const totalGex = gexRow?.total_gex != null ? Number(gexRow.total_gex) : null;
     const skew = optionsMetrics?.skew != null ? Number(optionsMetrics.skew) : null;
@@ -291,6 +286,7 @@ export default function OptionsAnalyticsDashboardPage() {
         label: 'Buy',
         chipColor: 'success',
         textColor: 'success.main',
+        advice: 'Buy.',
       };
     }
     if (totalGex < 0 && skew > 0) {
@@ -298,20 +294,43 @@ export default function OptionsAnalyticsDashboardPage() {
         label: 'Sell',
         chipColor: 'error',
         textColor: 'error.main',
+        advice: 'Sell.',
       };
     }
-    if (totalGex > 0 || skew < 0) {
+    if (totalGex < 0) {
+      // Short gamma alone is a downside-risk signal — never label it Bullish,
+      // even when skew leans bullish (e.g. ACN: negative total GEX with
+      // negative/call skew previously showed an incorrect "Bullish" badge).
+      return {
+        label: 'Bearish',
+        chipColor: 'error',
+        textColor: 'error.main',
+        advice: 'Keep with bearish/cautious bias.',
+      };
+    }
+    if (totalGex > 0) {
       return {
         label: 'Bullish',
         chipColor: 'success',
         textColor: 'success.main',
+        advice: 'Keep with bullish bias.',
       };
     }
-    if (totalGex < 0 || skew > 0) {
+    // totalGex is zero/unavailable — fall back to skew alone as a secondary signal.
+    if (skew > 0) {
       return {
         label: 'Cautious',
         chipColor: 'warning',
         textColor: 'warning.main',
+        advice: 'Keep with cautious bias.',
+      };
+    }
+    if (skew < 0) {
+      return {
+        label: 'Bullish',
+        chipColor: 'success',
+        textColor: 'success.main',
+        advice: 'Keep with bullish bias.',
       };
     }
 
@@ -319,6 +338,7 @@ export default function OptionsAnalyticsDashboardPage() {
       label: 'Neutral',
       chipColor: 'default',
       textColor: 'text.secondary',
+      advice: 'Keep position.',
     };
   };
 

@@ -341,6 +341,29 @@ def _find_valid_atm_option(df: pd.DataFrame, underlying_price: float, min_iv: fl
     return None
 
 
+def find_current_atm_iv_from_chain(
+    options_chain: List[Dict[str, Any]], underlying_price: float, min_iv: float = 0.01
+) -> Optional[float]:
+    """List-of-dicts equivalent of `_find_valid_atm_option` for callers (like the
+    nightly batch task) that build a plain `options_chain` instead of a
+    yfinance DataFrame. Walks outward from the nearest strike per side (calls
+    preferred, then puts) to avoid a stale/near-zero IV on an illiquid ATM
+    contract.
+    """
+    for option_type in ("call", "put"):
+        candidates = sorted(
+            (
+                opt for opt in options_chain
+                if opt.get("type") == option_type and opt.get("iv") is not None
+            ),
+            key=lambda opt: abs(opt["strike"] - underlying_price),
+        )
+        for opt in candidates:
+            if opt["iv"] >= min_iv:
+                return float(opt["iv"])
+    return None
+
+
 def _update_iv_history_and_get_range(ticker: str, current_iv: Optional[float]) -> Tuple[Optional[float], Optional[float]]:
     """Persist today's ATM IV in a rolling ~252-session Redis history per ticker
     and return the observed (low, high) so IV Rank can be computed.

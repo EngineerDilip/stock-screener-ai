@@ -4,7 +4,9 @@ from app.services.options_metrics import (
     aggregate_by_strike,
     compute_key_gamma_levels,
     compute_ivr,
+    compute_options_metrics,
     compute_skew,
+    find_current_atm_iv_from_chain,
 )
 
 
@@ -26,6 +28,52 @@ def test_compute_ivr_returns_none_when_historical_data_missing_or_invalid():
     assert compute_ivr(0.35, None, None) is None
     assert compute_ivr(0.35, 0.20, None) is None
     assert compute_ivr(0.35, 0.30, 0.25) is None
+
+
+def test_find_current_atm_iv_from_chain_skips_stale_near_zero_iv():
+    options_chain = [
+        {"strike": 100.0, "type": "call", "iv": 0.0},
+        {"strike": 105.0, "type": "call", "iv": 0.28},
+        {"strike": 100.0, "type": "put", "iv": 0.30},
+    ]
+
+    # Nearest call strike (100) has a degenerate 0 IV, so it should walk
+    # outward to the next usable call strike (105) rather than falling
+    # through to puts.
+    assert find_current_atm_iv_from_chain(options_chain, underlying_price=100.0) == pytest.approx(0.28)
+
+
+def test_find_current_atm_iv_from_chain_falls_back_to_puts_when_no_valid_calls():
+    options_chain = [
+        {"strike": 100.0, "type": "call", "iv": 0.0},
+        {"strike": 100.0, "type": "put", "iv": 0.32},
+    ]
+
+    assert find_current_atm_iv_from_chain(options_chain, underlying_price=100.0) == pytest.approx(0.32)
+
+
+def test_find_current_atm_iv_from_chain_returns_none_when_no_usable_iv():
+    options_chain = [
+        {"strike": 100.0, "type": "call", "iv": 0.0},
+        {"strike": 100.0, "type": "put", "iv": None},
+    ]
+
+    assert find_current_atm_iv_from_chain(options_chain, underlying_price=100.0) is None
+
+
+def test_compute_options_metrics_populates_ivr_when_current_iv_and_range_provided():
+    # Regression test: the nightly batch cache path previously called
+    # compute_options_metrics() without current_iv/iv_52w_low/iv_52w_high,
+    # so the cached payload always had ivr=None regardless of accumulated
+    # IV history. Confirm ivr is populated end-to-end when they ARE passed.
+    options_chain = [
+        {"strike": 100.0, "type": "call", "gamma": 0.05, "open_interest": 10, "delta": 0.4, "iv": 0.30},
+        {"strike": 100.0, "type": "put", "gamma": 0.05, "open_interest": 5, "delta": -0.4, "iv": 0.32},
+    ]
+
+    result = compute_options_metrics(options_chain, current_iv=0.30, iv_52w_low=0.20, iv_52w_high=0.40)
+
+    assert result["ivr"] == pytest.approx(50.0)
 
 
 def test_compute_aggregate_skew_skips_invalid_ivs():
