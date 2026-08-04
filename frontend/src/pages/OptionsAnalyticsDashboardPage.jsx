@@ -78,12 +78,18 @@ export default function OptionsAnalyticsDashboardPage() {
       setMaxPainData(null);
       setOptionsMetrics(null);
       setAnalysisData(null);
+      setError(null);
       return;
     }
 
     (async () => {
       setLoadingData(true);
       setError(null);
+      setGexData(null);
+      setMaxPainData(null);
+      setOptionsMetrics(null);
+      setAnalysisData(null);
+
       try {
         const [gexResp, maxPainResp, optionsResp, analysisResp] = await Promise.all([
           apiClient.get('/v1/gex/dashboard', { params: { symbol: selectedTicker.symbol } }).catch(() => null),
@@ -92,10 +98,10 @@ export default function OptionsAnalyticsDashboardPage() {
           apiClient.get(`/v1/options/analysis/${selectedTicker.symbol}`).catch(() => null),
         ]);
 
-        if (gexResp) setGexData(gexResp.data);
-        if (maxPainResp) setMaxPainData(maxPainResp.data);
-        if (optionsResp) setOptionsMetrics(optionsResp.data);
-        if (analysisResp) setAnalysisData(analysisResp.data);
+        setGexData(gexResp?.data ?? null);
+        setMaxPainData(maxPainResp?.data ?? null);
+        setOptionsMetrics(optionsResp?.data ?? null);
+        setAnalysisData(analysisResp?.data ?? null);
 
         if (!gexResp && !maxPainResp && !optionsResp && !analysisResp) {
           setError('No data available for this ticker');

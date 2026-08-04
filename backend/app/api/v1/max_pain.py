@@ -198,6 +198,11 @@ async def get_max_pain_dashboard(
             )
         
         if not rows:
+            if normalized_symbol:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No max pain data available for symbol {normalized_symbol}",
+                )
             logger.warning(f"No max pain data in database (within {hours_back}h), returning mock data")
             return get_mock_dashboard()
         
@@ -263,9 +268,16 @@ async def get_max_pain_dashboard(
             ],
         }
     
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Error fetching max pain dashboard")
-        # Return mock data on error
+        if normalized_symbol:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to fetch max pain dashboard for the requested symbol.",
+            )
+        # Return mock data on generic error for the full dashboard endpoint
         return get_mock_dashboard()
 
 
