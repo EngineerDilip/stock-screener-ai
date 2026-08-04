@@ -176,25 +176,27 @@ def analyze_options_exposure(self, symbol: str) -> Dict[str, Any]:
         S = spot_price
         df['sign'] = 1
         df.loc[df['type'] == 'put', 'sign'] = -1
-        df['GEX'] = -df['sign'] * df['gamma'] * df['openInterest'] * 100 * S
+        df['raw_gex'] = df['gamma'] * df['openInterest'] * 100 * S
+        df['call_gex'] = df['raw_gex'].where(df['type'] == 'call', 0.0)
+        df['put_gex'] = -df['raw_gex'].where(df['type'] == 'put', 0.0)
+        df['total_gex'] = df['call_gex'] + df['put_gex']
         df['VEX'] = -df['sign'] * df['vanna'] * df['openInterest'] * 100 * S
         df['CEX'] = -df['sign'] * df['charm'] * df['openInterest'] * 100 * S
-        df['Total_GEX'] = df['GEX']
 
-        exp_df = df[['strike', 'type', 'GEX', 'VEX', 'CEX', 'Total_GEX']].copy()
+        exp_df = df[['strike', 'call_gex', 'put_gex', 'total_gex', 'VEX', 'CEX']].copy()
         
         # Aggregate by strike
         agg_df = exp_df.groupby("strike").agg({
-            "GEX": "sum",
-            "Total_GEX": "sum",
+            "call_gex": "sum",
+            "put_gex": "sum",
+            "total_gex": "sum",
             "VEX": "sum",
             "CEX": "sum",
         }).reset_index()
         
-        agg_df.columns = ["strike", "Call_GEX", "Total_GEX", "Total_VEX", "Total_CEX"]
+        agg_df.columns = ["strike", "Call_GEX", "Put_GEX", "Total_GEX", "Total_VEX", "Total_CEX"]
         agg_df = agg_df.sort_values("strike").reset_index(drop=True)
         
-        agg_df["Put_GEX"] = agg_df["Total_GEX"] - agg_df["Call_GEX"]
         strike_agg = {
             float(row["strike"]): {
                 "call_gex": float(row["Call_GEX"]),
@@ -204,10 +206,10 @@ def analyze_options_exposure(self, symbol: str) -> Dict[str, Any]:
             for _, row in agg_df.iterrows()
         }
         key_levels = compute_key_gamma_levels(strike_agg)
-        call_wall = float(key_levels["call_wall"])
-        call_wall_gex = float(strike_agg[call_wall]["call_gex"])
-        put_wall = float(key_levels["put_wall"])
-        put_wall_gex = float(strike_agg[put_wall]["put_gex"])
+        call_wall = key_levels["call_wall"]
+        call_wall_gex = float(strike_agg[call_wall]["call_gex"]) if call_wall is not None else None
+        put_wall = key_levels["put_wall"]
+        put_wall_gex = float(strike_agg[put_wall]["put_gex"]) if put_wall is not None else None
 
         flip_level = None
         flip_cumgex = None

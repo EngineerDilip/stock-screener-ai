@@ -278,15 +278,48 @@ export default function OptionsAnalyticsDashboardPage() {
   };
 
   const getMarketSignal = () => {
-    const conclusion = getOverallConclusion();
-    if (!conclusion) return null;
-    if (conclusion.includes('Buy.')) {
-      return { label: 'Buy', color: 'success.main' };
+    const totalGex = gexRow?.total_gex != null ? Number(gexRow.total_gex) : null;
+    const skew = optionsMetrics?.skew != null ? Number(optionsMetrics.skew) : null;
+    const maxPain = maxPainRow?.distance_pct != null ? Number(maxPainRow.distance_pct) : null;
+
+    if (totalGex == null && skew == null && maxPain == null) {
+      return null;
     }
-    if (conclusion.includes('Sell.')) {
-      return { label: 'Sell', color: 'error.main' };
+
+    if (totalGex > 0 && skew < 0) {
+      return {
+        label: 'Buy',
+        chipColor: 'success',
+        textColor: 'success.main',
+      };
     }
-    return { label: 'Neutral', color: 'text.secondary' };
+    if (totalGex < 0 && skew > 0) {
+      return {
+        label: 'Sell',
+        chipColor: 'error',
+        textColor: 'error.main',
+      };
+    }
+    if (totalGex > 0 || skew < 0) {
+      return {
+        label: 'Bullish',
+        chipColor: 'success',
+        textColor: 'success.main',
+      };
+    }
+    if (totalGex < 0 || skew > 0) {
+      return {
+        label: 'Cautious',
+        chipColor: 'warning',
+        textColor: 'warning.main',
+      };
+    }
+
+    return {
+      label: 'Neutral',
+      chipColor: 'default',
+      textColor: 'text.secondary',
+    };
   };
 
   const marketSignal = getMarketSignal();
@@ -644,15 +677,14 @@ export default function OptionsAnalyticsDashboardPage() {
                         width: 12,
                         height: 12,
                         borderRadius: '50%',
-                        bg: marketSignal.color,
-                        bgcolor: marketSignal.color,
+                        bgcolor: marketSignal.textColor,
                         border: '1px solid',
-                        borderColor: marketSignal.color,
+                        borderColor: marketSignal.textColor,
                       }}
                     />
                   )}
                   {marketSignal && (
-                    <Typography variant="subtitle2" sx={{ ml: 1, color: marketSignal.color }}>
+                    <Typography variant="subtitle2" sx={{ ml: 1, color: marketSignal.textColor }}>
                       {marketSignal.label}
                     </Typography>
                   )}

@@ -4,6 +4,7 @@ from app.services.options_metrics import (
     aggregate_by_strike,
     compute_key_gamma_levels,
     compute_ivr,
+    compute_skew,
 )
 
 
@@ -21,9 +22,20 @@ def test_compute_key_gamma_levels_uses_call_put_walls_and_zero_gamma_crossing():
     assert levels["zero_gamma"] == pytest.approx(44.0)
 
 
-def test_compute_ivr_returns_placeholder_when_historical_data_missing():
-    assert compute_ivr(0.35, None, None) == pytest.approx(50.0)
-    assert compute_ivr(0.35, 0.20, None) == pytest.approx(50.0)
+def test_compute_ivr_returns_none_when_historical_data_missing_or_invalid():
+    assert compute_ivr(0.35, None, None) is None
+    assert compute_ivr(0.35, 0.20, None) is None
+    assert compute_ivr(0.35, 0.30, 0.25) is None
+
+
+def test_compute_aggregate_skew_skips_invalid_ivs():
+    options_chain = [
+        {"strike": 100.0, "type": "call", "iv": 0.30, "delta": 0.25},
+        {"strike": 100.0, "type": "put", "iv": 0.0, "delta": -0.25},
+        {"strike": 105.0, "type": "put", "iv": 0.35, "delta": -0.25},
+    ]
+
+    assert compute_skew(options_chain, target_delta=0.25) == pytest.approx(0.05)
 
 
 def test_aggregate_by_strike_assigns_negative_put_gex():
@@ -47,5 +59,18 @@ def test_compute_key_gamma_levels_returns_none_zero_gamma_when_cumulative_starts
     levels = compute_key_gamma_levels(strike_agg)
 
     assert levels["call_wall"] == 65.0
+    assert levels["put_wall"] is None
+    assert levels["zero_gamma"] is None
+
+
+def test_compute_key_gamma_levels_skips_zero_exposure_walls():
+    strike_agg = {
+        65.0: {"call_gex": 0.0, "put_gex": 0.0, "total_gex": 0.0},
+        70.0: {"call_gex": 0.0, "put_gex": 0.0, "total_gex": 0.0},
+    }
+
+    levels = compute_key_gamma_levels(strike_agg)
+
+    assert levels["call_wall"] is None
     assert levels["put_wall"] is None
     assert levels["zero_gamma"] is None

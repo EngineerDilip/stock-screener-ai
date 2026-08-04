@@ -30,7 +30,18 @@ def _coerce_float(value: Any, default: Optional[float] = None) -> Optional[float
         return default
 
 
+def _is_valid_iv(value: Any) -> bool:
+    if value is None:
+        return False
+    try:
+        iv = float(value)
+    except (TypeError, ValueError):
+        return False
+    return iv > 0.0
+
+
 def _interpolate_zero_crossing(prev_strike: float, prev_cum: float, cur_strike: float, cur_cum: float) -> float:
+
     if cur_cum == prev_cum:
         return cur_strike
     if prev_cum == 0:
@@ -141,11 +152,11 @@ def compute_key_gamma_levels(strike_agg: Dict[float, Dict[str, Any]]) -> Dict[st
         put_gex = float(entry.get("put_gex", 0.0) or 0.0)
         total = float(entry.get("total_gex", 0.0) or 0.0)
 
-        if call_gex >= 0.0 and call_gex > max_call_gex:
+        if call_gex > 0.0 and call_gex > max_call_gex:
             max_call_gex = call_gex
             call_wall = k
 
-        if put_gex <= 0.0 and put_gex < min_put_gex:
+        if put_gex < 0.0 and put_gex < min_put_gex:
             min_put_gex = put_gex
             put_wall = k
 
@@ -179,22 +190,22 @@ def compute_net_exposures(strike_agg: Dict[float, Dict[str, Any]]) -> Dict[str, 
 def compute_ivr(current_iv: Optional[float], iv_52w_low: Optional[float], iv_52w_high: Optional[float]) -> Optional[float]:
     if current_iv is None:
         return None
-
-    # TODO: replace this placeholder with a real 52-week IV history fetch once
-    # that data is available in this pipeline.
     if iv_52w_low is None or iv_52w_high is None:
-        return 50.0
+        return None
 
     try:
-        denom = (iv_52w_high - iv_52w_low)
-        if denom == 0:
-            return 50.0
-        return (current_iv - iv_52w_low) / denom * 100.0
+        iv_low = float(iv_52w_low)
+        iv_high = float(iv_52w_high)
+        denom = iv_high - iv_low
+        if denom <= 0:
+            return None
+        return (float(current_iv) - iv_low) / denom * 100.0
     except Exception:
-        return 50.0
+        return None
 
 
 def find_nearest_iv_for_delta(options_chain: List[Dict[str, Any]], target_delta: float, typ: str) -> Optional[float]:
+
     """Find IV of option with delta closest to target_delta for given side ('call' or 'put').
     target_delta should be a positive number representing absolute delta (eg 0.25).
     For puts, delta values are typically negative; we compare absolute values.
@@ -203,6 +214,8 @@ def find_nearest_iv_for_delta(options_chain: List[Dict[str, Any]], target_delta:
     best_diff = None
     for opt in options_chain:
         if opt.get("type", "call").lower() != typ:
+            continue
+        if not _is_valid_iv(opt.get("iv")):
             continue
         d = float(opt.get("delta") or 0.0)
         absd = abs(d)
@@ -217,6 +230,7 @@ def find_nearest_iv_for_delta(options_chain: List[Dict[str, Any]], target_delta:
 
 
 def compute_skew(options_chain: List[Dict[str, Any]], target_delta: float = 0.25) -> Optional[float]:
+
     """Skew = IV(25-delta put) - IV(25-delta call) for same expiration approximation."""
     iv_put = find_nearest_iv_for_delta(options_chain, target_delta, "put")
     iv_call = find_nearest_iv_for_delta(options_chain, target_delta, "call")
@@ -375,7 +389,7 @@ def calculate_options_metrics(ticker: str, expiration: str) -> Dict[str, Any]:
             "vanna": float(row.get("vanna", 0.0) or 0.0),
             "charm": float(row.get("charm", 0.0) or 0.0),
             "open_interest": int(row["openInterest"]),
-            "iv": float(row["impliedVolatility"]),
+            "iv": float(row["impliedVolatility"]) if row["impliedVolatility"] > 0 else None,
         })
     for _, row in puts.iterrows():
         options_chain.append({
@@ -386,7 +400,7 @@ def calculate_options_metrics(ticker: str, expiration: str) -> Dict[str, Any]:
             "vanna": float(row.get("vanna", 0.0) or 0.0),
             "charm": float(row.get("charm", 0.0) or 0.0),
             "open_interest": int(row["openInterest"]),
-            "iv": float(row["impliedVolatility"]),
+            "iv": float(row["impliedVolatility"]) if row["impliedVolatility"] > 0 else None,
         })
 
     atm_call = _nearest_option_row(calls, underlying_price)
@@ -400,8 +414,8 @@ def calculate_options_metrics(ticker: str, expiration: str) -> Dict[str, Any]:
 
     atm_call_last_price = float(atm_call["lastPrice"]) if atm_call is not None else None
     atm_put_last_price = float(atm_put["lastPrice"]) if atm_put is not None else None
-    atm_call_iv = float(atm_call["impliedVolatility"]) if atm_call is not None else None
-    atm_put_iv = float(atm_put["impliedVolatility"]) if atm_put is not None else None
+    atm_call_iv = float(atm_call["impliedVolatility"]) if atm_call is not None and atm_call["impliedVolatility"] > 0 else None
+    atm_put_iv = float(atm_put["impliedVolatility"]) if atm_put is not None and atm_put["impliedVolatility"] > 0 else None
     current_atm_iv = atm_call_iv if atm_call_iv is not None else atm_put_iv
 
     expected_move = None

@@ -37,6 +37,9 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
     put_premium_notional,
   } = data;
 
+  const historicalVolatilityPct = historical_volatility != null ? historical_volatility * 100 : null;
+  const volatilityRiskPremiumPct = volatility_risk_premium != null ? volatility_risk_premium * 100 : null;
+
   const invalidSameStrikeLevels = Boolean(
     key_levels?.call_wall != null &&
     key_levels?.put_wall != null &&
@@ -267,17 +270,17 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
       <Grid item xs={12} sm={6} md={4} lg={3}>
         <MetricCard
           title="Historical Volatility"
-          value={historical_volatility != null ? `${historical_volatility.toFixed(1)}%` : '—'}
+          value={historicalVolatilityPct != null ? `${historicalVolatilityPct.toFixed(1)}%` : '—'}
           subtitle="20-day realized volatility"
-          status={getMetricStatus('historical_volatility', historical_volatility)}
+          status={getMetricStatus('historical_volatility', historicalVolatilityPct)}
         />
       </Grid>
       <Grid item xs={12} sm={6} md={4} lg={3}>
         <MetricCard
           title="Volatility Risk Premium"
-          value={volatility_risk_premium != null ? `${volatility_risk_premium.toFixed(1)}%` : '—'}
+          value={volatilityRiskPremiumPct != null ? `${volatilityRiskPremiumPct.toFixed(1)}%` : '—'}
           subtitle="ATM IV - HV"
-          status={getMetricStatus('volatility_risk_premium', volatility_risk_premium)}
+          status={getMetricStatus('volatility_risk_premium', volatilityRiskPremiumPct)}
         />
       </Grid>
       <Grid item xs={12} sm={6} md={4} lg={3}>
