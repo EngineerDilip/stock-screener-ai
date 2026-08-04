@@ -24,6 +24,7 @@ from app.services.job_backend import CeleryJobBackend
 from app.services.market_activity_service import (
     MARKET_ACTIVITY_KEY_PREFIX,
     RUNTIME_ACTIVITY_CATEGORY,
+    clear_market_activity_for_task,
 )
 from app.services.runtime_activity_contract import progress_mode
 from app.services.ui_snapshot_service import safe_publish_scan_bootstrap
@@ -934,7 +935,32 @@ class OperationsJobService:
         if strategy == "force_cancel_refresh":
             lock = get_data_fetch_lock()
             current = lock.get_any_current_task()
-            if not current or current.get("task_id") != task_id:
+            is_current_holder = bool(current and current.get("task_id") == task_id)
+
+            if record.state == "failed":
+                # A failed task already released its lock in a `finally` block,
+                # so requiring live lock ownership here would block cleanup
+                # forever. Release any dangling leases defensively and drop the
+                # orphaned runtime-activity record instead.
+                if is_current_holder:
+                    lock_key = current.get("lock_key", "")
+                    suffix = lock_key.rsplit(":", 1)[-1] if ":" in lock_key else ""
+                    lock_market = None if suffix in {"", "shared"} else suffix
+                    lock.force_release(market=lock_market)
+                coordination = get_workload_coordination()
+                coordination.release_market_workload(task_id, market=record.market)
+                coordination.release_external_fetch(task_id)
+                if record.market:
+                    clear_market_activity_for_task(db, market=record.market, task_id=task_id)
+                try:
+                    celery_app.control.revoke(task_id, terminate=True, signal='SIGTERM')
+                except Exception:
+                    logger.exception("Failed to revoke task %s during force_cancel_refresh cleanup", task_id)
+                message = f"Cleared failed task {task_id} from the job console."
+                self._record_cancel_action(db, task_id=task_id, strategy=strategy, outcome="accepted", message=message)
+                return {"status": "accepted", "cancel_strategy": strategy, "message": message}
+
+            if not is_current_holder:
                 message = f"Task {task_id} is not the current external fetch holder."
                 self._record_cancel_action(db, task_id=task_id, strategy=strategy, outcome="blocked", message=message)
                 return {"status": "blocked", "cancel_strategy": strategy, "message": message}
