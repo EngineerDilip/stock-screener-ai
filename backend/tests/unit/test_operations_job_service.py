@@ -811,3 +811,49 @@ def test_force_cancel_refresh_releases_scoped_lock_and_coordination_leases():
     mock_get_coordination.return_value.release_external_fetch.assert_called_once_with("fetch-us-lock")
     price_cache.clear_warmup_heartbeat.assert_called_once_with(market="us")
     mock_revoke.assert_called_once_with("fetch-us-lock", terminate=True, signal='SIGTERM')
+
+
+def test_force_cancel_refresh_clears_orphaned_failed_task_without_requiring_lock_ownership():
+    """A failed task's `finally` already released its lock, so cleanup must
+    not require this task to still be the current holder — otherwise the
+    Operations "Clean up" action stays permanently blocked."""
+    service = OperationsJobService()
+    service._record_cancel_action = lambda *args, **kwargs: None
+    service._find_scan_record = lambda _db, _task_id: _JobRecord(
+        task_id="failed-us-fetch",
+        task_name="app.tasks.fundamentals_tasks.refresh_all_fundamentals",
+        queue="data_fetch_us",
+        market="US",
+        state="failed",
+        worker=None,
+        age_seconds=36000,
+        wait_reason=None,
+        heartbeat_lag_seconds=None,
+        cancel_strategy="force_cancel_refresh",
+    )
+
+    lock = MagicMock()
+    # No task currently holds the lock — it already released on failure.
+    lock.get_any_current_task.return_value = None
+
+    with patch("app.services.operations_job_service.get_data_fetch_lock", return_value=lock), patch(
+        "app.services.operations_job_service.get_workload_coordination"
+    ) as mock_get_coordination, patch(
+        "app.services.operations_job_service.clear_market_activity_for_task"
+    ) as mock_clear_activity, patch(
+        "app.services.operations_job_service.celery_app.control.revoke"
+    ) as mock_revoke:
+        result = service.cancel_job(MagicMock(), "failed-us-fetch")
+
+    assert result["status"] == "accepted"
+    assert result["cancel_strategy"] == "force_cancel_refresh"
+    lock.force_release.assert_not_called()
+    mock_get_coordination.return_value.release_market_workload.assert_called_once_with(
+        "failed-us-fetch", market="US"
+    )
+    mock_get_coordination.return_value.release_external_fetch.assert_called_once_with("failed-us-fetch")
+    mock_clear_activity.assert_called_once()
+    assert mock_clear_activity.call_args.kwargs["market"] == "US"
+    assert mock_clear_activity.call_args.kwargs["task_id"] == "failed-us-fetch"
+    mock_revoke.assert_called_once_with("failed-us-fetch", terminate=True, signal='SIGTERM')
+

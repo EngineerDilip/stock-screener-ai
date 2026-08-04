@@ -942,7 +942,7 @@ class OperationsJobService:
                 # so requiring live lock ownership here would block cleanup
                 # forever. Release any dangling leases defensively and drop the
                 # orphaned runtime-activity record instead.
-                if is_current_holder:
+                if current is not None and is_current_holder:
                     lock_key = current.get("lock_key", "")
                     suffix = lock_key.rsplit(":", 1)[-1] if ":" in lock_key else ""
                     lock_market = None if suffix in {"", "shared"} else suffix
@@ -960,7 +960,7 @@ class OperationsJobService:
                 self._record_cancel_action(db, task_id=task_id, strategy=strategy, outcome="accepted", message=message)
                 return {"status": "accepted", "cancel_strategy": strategy, "message": message}
 
-            if not is_current_holder:
+            if not current or current.get("task_id") != task_id:
                 message = f"Task {task_id} is not the current external fetch holder."
                 self._record_cancel_action(db, task_id=task_id, strategy=strategy, outcome="blocked", message=message)
                 return {"status": "blocked", "cancel_strategy": strategy, "message": message}
