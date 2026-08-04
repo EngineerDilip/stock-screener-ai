@@ -386,7 +386,12 @@ class OperationsJobService:
         return records
 
     def _inspect(self) -> Any:
-        return celery_app.control.inspect(timeout=1.0)
+        # With 5+ worker containers now registered (general/datafetch/marketjobs/
+        # userscans-shared/userscans-<market>), a 1s RPC timeout can come back
+        # empty right after a deploy/restart while workers finish their broker
+        # handshake, making the Job console look empty even though tasks are
+        # actively running (confirmed via direct list_jobs() call in prod).
+        return celery_app.control.inspect(timeout=3.0)
 
     def _worker_queue_map(self, active_queues: dict[str, Any]) -> dict[str, list[str]]:
         mapped: dict[str, list[str]] = {}
