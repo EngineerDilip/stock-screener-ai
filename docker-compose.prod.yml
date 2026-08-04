@@ -113,6 +113,30 @@ services:
         max-size: "20m"
         max-file: "3"
 
+  celery-marketjobs:
+    env_file:
+      - .env.docker
+    mem_limit: ${CELERY_MARKETJOBS_MEM_LIMIT:-1G}
+    mem_reservation: ${CELERY_MARKETJOBS_MEM_RESERVATION:-256M}
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 1G
+        reservations:
+          memory: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.celery_app inspect ping -d marketjobs-default@$$HOSTNAME"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
   celery-marketjobs-us:
     env_file:
       - .env.docker

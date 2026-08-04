@@ -175,6 +175,18 @@ services:
       exec celery -A app.celery_app worker --pool=prefork --loglevel=info --concurrency=1
       --without-mingle --without-gossip -Q "$$QUEUES" -n datafetch-global@%h'
 
+  # Always-on fallback covering every enabled market's market_jobs queue, so
+  # breadth/group-ranking/feature-snapshot jobs are never orphaned when the
+  # per-market "market-<mkt>" Compose profiles below aren't activated. The
+  # profiled celery-marketjobs-<mkt> services remain available as optional
+  # additional workers for scaling a specific market's throughput.
+  celery-marketjobs:
+    <<: *worker-common
+    command: >
+      sh -c 'QUEUES="$$(python scripts/compose_enabled_markets.py queues --queue-set marketjobs --markets "$${ENABLED_MARKETS:-US}")" &&
+      exec celery -A app.celery_app worker --pool=prefork --loglevel=info --concurrency=1
+      --without-mingle --without-gossip -Q "$$QUEUES" -n marketjobs-default@%h'
+
   celery-marketjobs-us:
     <<: *worker-common
     profiles: ["market-us"]
@@ -235,9 +247,17 @@ services:
     profiles: ["market-my"]
     command: celery -A app.celery_app worker --pool=prefork --loglevel=info --concurrency=1 --without-mingle --without-gossip -Q market_jobs_my -n marketjobs-my@%h
 
+  # Always-on fallback covering user_scans_shared plus every enabled market's
+  # user_scans_<mkt> queue, so manual scans are never orphaned when the
+  # per-market "market-<mkt>" Compose profiles below aren't activated. The
+  # profiled celery-userscans-<mkt> services remain available as optional
+  # additional workers for scaling a specific market's scan throughput.
   celery-userscans:
     <<: *worker-common
-    command: celery -A app.celery_app worker --pool=prefork --loglevel=info --concurrency=1 --without-mingle --without-gossip -Q user_scans_shared -n userscans-shared@%h
+    command: >
+      sh -c 'QUEUES="$$(python scripts/compose_enabled_markets.py queues --queue-set userscans --markets "$${ENABLED_MARKETS:-US}")" &&
+      exec celery -A app.celery_app worker --pool=prefork --loglevel=info --concurrency=1
+      --without-mingle --without-gossip -Q "$$QUEUES" -n userscans-shared@%h'
 
   celery-userscans-us:
     <<: *worker-common
