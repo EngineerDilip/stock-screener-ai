@@ -721,6 +721,56 @@ def test_cancel_failed_data_fetch_task_is_force_cancel_refresh():
     assert failed_job["cancel_strategy"] == "force_cancel_refresh"
 
 
+def test_failed_data_fetch_task_not_current_holder_is_not_cleanup_candidate():
+    service = OperationsJobService()
+    service._broker = lambda: _FakeBroker({})
+    service._inspect = lambda: _FakeInspect()
+    service._runtime_activity_records = lambda _db: [
+        {
+            "market": "US",
+            "lifecycle": "weekly_refresh",
+            "stage_key": "fundamentals",
+            "stage_label": "Fundamentals Refresh",
+            "status": "failed",
+            "progress_mode": "determinate",
+            "percent": 0.0,
+            "current": 0,
+            "total": 0,
+            "message": "Task failed after retry",
+            "task_name": "app.tasks.cache_tasks.smart_refresh_cache",
+            "task_id": "failed-us-fetch",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    ]
+    service._job_backend.get_status = MagicMock(return_value=None)
+
+    lock = MagicMock()
+    lock.get_current_holder.return_value = {
+        "task_id": "other-us-task",
+        "task_name": "app.tasks.cache_tasks.smart_refresh_cache",
+        "started_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),
+        "ttl_seconds": 600,
+    }
+
+    with patch("app.services.operations_job_service.get_workload_coordination") as mock_get_coordination, patch(
+        "app.services.operations_job_service.get_data_fetch_lock",
+        return_value=lock,
+    ):
+        mock_get_coordination.return_value.get_external_fetch_holder.return_value = None
+        mock_get_coordination.return_value.get_market_workload_holders.return_value = {
+            "US": None,
+            "HK": None,
+            "JP": None,
+            "TW": None,
+        }
+
+        payload = service.list_jobs(MagicMock())
+
+    failed_job = next(job for job in payload["jobs"] if job["task_id"] == "failed-us-fetch")
+    assert failed_job["state"] == "failed"
+    assert failed_job["cancel_strategy"] == "unsupported"
+
+
 def test_force_cancel_refresh_releases_scoped_lock_and_coordination_leases():
     service = OperationsJobService()
     service._record_cancel_action = lambda *args, **kwargs: None

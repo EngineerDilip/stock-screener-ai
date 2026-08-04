@@ -178,6 +178,17 @@ def _queue_family(queue_name: str | None) -> str:
     return "general"
 
 
+def _is_current_external_fetch_holder(record: _JobRecord, lock: Any | None) -> bool:
+    if lock is None or _queue_family(record.queue) != "data_fetch":
+        return False
+
+    if record.market:
+        current = lock.get_current_holder(market=record.market)
+    else:
+        current = lock.get_any_current_holder()
+    return bool(current and current.get("task_id") == record.task_id)
+
+
 def _extract_scan_id(task_name: str, args: list[Any], kwargs: dict[str, Any]) -> str | None:
     if task_name != SCAN_TASK_NAME:
         return None
@@ -206,6 +217,7 @@ def _cancel_strategy_for(record: _JobRecord) -> str:
     if (
         record.state in {"stale", "stuck"}
         and _queue_family(record.queue) == "data_fetch"
+        and _is_current_external_fetch_holder(record, get_data_fetch_lock())
     ):
         return "force_cancel_refresh"
     if (
