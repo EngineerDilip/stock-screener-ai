@@ -45,6 +45,24 @@ const MARKET_FACTOR_LABELS = {
   putWallBreak: { label: 'Put Wall Break', why: 'Support no longer holding' },
 };
 
+/**
+ * Divider + title + one-line "Goal" strapline, reused for each of the
+ * dashboard's five metric groupings so a reader always knows what question
+ * the cards below it are trying to answer, not just what the numbers are.
+ */
+function SectionHeader({ icon, title, goal }) {
+  return (
+    <Box sx={{ mt: 5, mb: 2, pt: 2, borderTop: '2px solid', borderColor: 'divider' }}>
+      <Typography variant="h5" sx={{ fontWeight: 600 }}>
+        {icon} {title}
+      </Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+        Goal: {goal}
+      </Typography>
+    </Box>
+  );
+}
+
 export default function OptionsAnalyticsDashboardPage() {
   const queryClient = useQueryClient();
 
@@ -614,9 +632,14 @@ export default function OptionsAnalyticsDashboardPage() {
             termStructureData={termStructureData}
           />
 
-          {/* History trend charts (separate from the point-in-time cards below --
+          <SectionHeader
+            icon="🎯"
+            title="Structural & Dealer Positioning Overview"
+            goal="Identify market maker hedging levels, price ceilings/floors, and key volatility acceleration zones."
+          />
+
+          {/* History trend chart (separate from the point-in-time cards below --
               see MetricHistoryChart's doc comment for why these are never averaged) */}
-          <MetricHistoryChart symbol={selectedTicker.symbol} metric="maxPain" expiration={selectedExpiration} />
           <MetricHistoryChart symbol={selectedTicker.symbol} metric="gex" expiration={selectedExpiration} />
 
           {/* GEX Summary */}
@@ -699,96 +722,6 @@ export default function OptionsAnalyticsDashboardPage() {
                       <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
                         The price where dealer hedging flips character. Above it, dealers tend to smooth out
                         price swings; below it, their hedging can amplify moves instead.
-                      </Typography>
-                    </CardContent>
-                  </Card>
-                </Grid>
-              </Grid>
-            </Paper>
-          )}
-
-          {/* Max Pain Summary */}
-          {maxPainRow && (
-            <Paper sx={{ p: 2, mb: 3 }}>
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-                <Typography variant="h6">
-                  Max Pain Analysis {selectedExpiration ? `(Live: ${selectedExpiration})` : ''}
-                </Typography>
-                <LastUpdated timestamp={maxPainRow.fetched_at} />
-              </Box>
-              <Grid container spacing={2}>
-                <Grid item xs={12} sm={6} md={3}>
-                  <Card>
-                    <CardContent>
-                      <Typography color="textSecondary">Max Pain Level</Typography>
-                      <Typography variant="h6">
-                        ${maxPainRow.max_pain?.toFixed(2) || 'N/A'}
-                      </Typography>
-                      <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
-                        The strike where option buyers collectively lose the most at expiration. Some traders
-                        watch it as a possible price magnet into expiry, but it's not a reliable predictor on its own.
-                      </Typography>
-                    </CardContent>
-                  </Card>
-                </Grid>
-                <Grid item xs={12} sm={6} md={3}>
-                  <Card>
-                    <CardContent>
-                      <Typography color="textSecondary">Distance %</Typography>
-                      <Typography variant="h6">
-                        {maxPainRow.distance_pct?.toFixed(2) || 'N/A'}%
-                      </Typography>
-                      {maxPainRow.distance_pct != null && (
-                        <Box sx={{ mt: 1 }}>
-                          <Chip label={maxPainStatus?.label} color={maxPainStatus?.color} size="small" />
-                          {maxPainStatus?.description && (
-                            <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: 'text.secondary' }}>
-                              {maxPainStatus.description}
-                            </Typography>
-                          )}
-                        </Box>
-                      )}
-                    </CardContent>
-                  </Card>
-                </Grid>
-                <Grid item xs={12} sm={6} md={3}>
-                  <Card>
-                    <CardContent>
-                      <Typography color="textSecondary">Call OI</Typography>
-                      <Typography variant="h6">
-                        {maxPainRow.call_oi?.toLocaleString() || 'N/A'}
-                      </Typography>
-                      {callOiStatus && (
-                        <Box sx={{ mt: 1 }}>
-                          <Chip label={callOiStatus.label} size="small" color={callOiStatus.color} />
-                          <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: 'text.secondary' }}>
-                            {callOiStatus.description}
-                          </Typography>
-                        </Box>
-                      )}
-                      <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
-                        Call open interest shows the amount of bullish/options resistance flow at strikes above the market.
-                      </Typography>
-                    </CardContent>
-                  </Card>
-                </Grid>
-                <Grid item xs={12} sm={6} md={3}>
-                  <Card>
-                    <CardContent>
-                      <Typography color="textSecondary">Put OI</Typography>
-                      <Typography variant="h6">
-                        {maxPainRow.put_oi?.toLocaleString() || 'N/A'}
-                      </Typography>
-                      {putOiStatus && (
-                        <Box sx={{ mt: 1 }}>
-                          <Chip label={putOiStatus.label} size="small" color={putOiStatus.color} />
-                          <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: 'text.secondary' }}>
-                            {putOiStatus.description}
-                          </Typography>
-                        </Box>
-                      )}
-                      <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
-                        Put open interest shows the amount of downside protection/support flow at strikes below the market.
                       </Typography>
                     </CardContent>
                   </Card>
@@ -973,16 +906,11 @@ export default function OptionsAnalyticsDashboardPage() {
             </Paper>
           )}
 
-          {/* Options Metrics (Key Gamma, DEX/VEX/CEX, IVR, Skew) */}
+          {/* Strike-level dealer positioning -- shares the live payload with
+              every other section below, so it's fetched once here. */}
           {displayOptionsMetrics && (
             <>
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
-                <Typography variant="h6">
-                  Options Metrics {selectedExpiration ? `(Live: ${selectedExpiration})` : ''}
-                </Typography>
-                <LastUpdated timestamp={displayOptionsMetrics.computed_at} />
-              </Box>
-              <SummaryCards data={displayOptionsMetrics} showGreekExposures />
+              <SummaryCards data={displayOptionsMetrics} sections={['walls']} />
               <StrikeExposureChart
                 strikes={displayOptionsMetrics.strikes}
                 spot={displayOptionsMetrics.underlying_price}
@@ -990,13 +918,151 @@ export default function OptionsAnalyticsDashboardPage() {
                 putWall={displayOptionsMetrics.key_levels?.put_wall}
                 zeroGamma={displayOptionsMetrics.key_levels?.zero_gamma}
               />
+            </>
+          )}
+
+          <SectionHeader
+            icon="📈"
+            title="Volatility & Skew Overview"
+            goal="Determine if options are overpriced or underpriced, and detect structural directional skew across the option chain."
+          />
+
+          {displayOptionsMetrics && (
+            <>
+              <LastUpdated timestamp={displayOptionsMetrics.computed_at} sx={{ display: 'block', mb: 1 }} />
+              <SummaryCards data={displayOptionsMetrics} sections={['volatility']} />
               <IVSmileChart
                 ivSmile={displayOptionsMetrics.iv_smile}
                 spot={displayOptionsMetrics.underlying_price}
               />
               <IVTermStructureChart symbol={selectedTicker.symbol} />
+            </>
+          )}
+
+          <SectionHeader
+            icon="🔥"
+            title="Options Flow & Positioning Heatmap Overview"
+            goal="Spot institutional positioning, contract accumulation, and unusual activity without needing live tick data."
+          />
+
+          <MetricHistoryChart symbol={selectedTicker.symbol} metric="maxPain" expiration={selectedExpiration} />
+
+          {/* Max Pain Summary */}
+          {maxPainRow && (
+            <Paper sx={{ p: 2, mb: 3 }}>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                <Typography variant="h6">
+                  Max Pain Analysis {selectedExpiration ? `(Live: ${selectedExpiration})` : ''}
+                </Typography>
+                <LastUpdated timestamp={maxPainRow.fetched_at} />
+              </Box>
+              <Grid container spacing={2}>
+                <Grid item xs={12} sm={6} md={3}>
+                  <Card>
+                    <CardContent>
+                      <Typography color="textSecondary">Max Pain Level</Typography>
+                      <Typography variant="h6">
+                        ${maxPainRow.max_pain?.toFixed(2) || 'N/A'}
+                      </Typography>
+                      <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
+                        The strike where option buyers collectively lose the most at expiration. Some traders
+                        watch it as a possible price magnet into expiry, but it's not a reliable predictor on its own.
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={12} sm={6} md={3}>
+                  <Card>
+                    <CardContent>
+                      <Typography color="textSecondary">Distance %</Typography>
+                      <Typography variant="h6">
+                        {maxPainRow.distance_pct?.toFixed(2) || 'N/A'}%
+                      </Typography>
+                      {maxPainRow.distance_pct != null && (
+                        <Box sx={{ mt: 1 }}>
+                          <Chip label={maxPainStatus?.label} color={maxPainStatus?.color} size="small" />
+                          {maxPainStatus?.description && (
+                            <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: 'text.secondary' }}>
+                              {maxPainStatus.description}
+                            </Typography>
+                          )}
+                        </Box>
+                      )}
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={12} sm={6} md={3}>
+                  <Card>
+                    <CardContent>
+                      <Typography color="textSecondary">Call OI</Typography>
+                      <Typography variant="h6">
+                        {maxPainRow.call_oi?.toLocaleString() || 'N/A'}
+                      </Typography>
+                      {callOiStatus && (
+                        <Box sx={{ mt: 1 }}>
+                          <Chip label={callOiStatus.label} size="small" color={callOiStatus.color} />
+                          <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: 'text.secondary' }}>
+                            {callOiStatus.description}
+                          </Typography>
+                        </Box>
+                      )}
+                      <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
+                        Call open interest shows the amount of bullish/options resistance flow at strikes above the market.
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={12} sm={6} md={3}>
+                  <Card>
+                    <CardContent>
+                      <Typography color="textSecondary">Put OI</Typography>
+                      <Typography variant="h6">
+                        {maxPainRow.put_oi?.toLocaleString() || 'N/A'}
+                      </Typography>
+                      {putOiStatus && (
+                        <Box sx={{ mt: 1 }}>
+                          <Chip label={putOiStatus.label} size="small" color={putOiStatus.color} />
+                          <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: 'text.secondary' }}>
+                            {putOiStatus.description}
+                          </Typography>
+                        </Box>
+                      )}
+                      <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
+                        Put open interest shows the amount of downside protection/support flow at strikes below the market.
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+              </Grid>
+            </Paper>
+          )}
+
+          {displayOptionsMetrics && (
+            <>
+              <SummaryCards data={displayOptionsMetrics} sections={['flow']} />
               <UnusualVolumeTable contracts={displayOptionsMetrics.unusual_volume} />
-              <Paper sx={{ p: 2, mt: 3 }}>
+            </>
+          )}
+
+          <SectionHeader
+            icon="⏱️"
+            title="Time Drift & Second-Order Greeks Overview"
+            goal="Understand how time decay and volatility shifts will change market maker positioning over time."
+          />
+
+          {displayOptionsMetrics && (
+            <SummaryCards data={displayOptionsMetrics} sections={['greeks']} />
+          )}
+
+          <SectionHeader
+            icon="🧭"
+            title="Executive Signal & Strategy Overview"
+            goal="Combine all underlying metrics into an automated, actionable market conclusion and strategy recommendation."
+          />
+
+          {displayOptionsMetrics && (
+            <>
+              <Paper sx={{ p: 2, mt: 1 }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
                   <Typography variant="h6" sx={{ mr: 1 }}>
                     Market Conclusion

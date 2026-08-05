@@ -33,7 +33,18 @@ function MetricCard({ title, value, subtitle, color, status, description }) {
   );
 }
 
-export default function SummaryCards({ data, showGreekExposures = true }) {
+const ALL_SECTIONS = ['walls', 'greeks', 'volatility', 'flow'];
+
+/**
+ * @param {Object} props
+ * @param {Object} props.data
+ * @param {Array<'walls'|'greeks'|'volatility'|'flow'>} [props.sections] - which
+ *   card groups to render, for splitting this data across separate page
+ *   sections (Structural/Gamma, Greeks, Vol Surface, Flow) without
+ *   duplicating any of the derived-value/status logic below. Defaults to
+ *   all four (the original single-block layout).
+ */
+export default function SummaryCards({ data, sections = ALL_SECTIONS }) {
   const {
     key_levels,
     net,
@@ -293,6 +304,8 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
   return (
     <Grid container spacing={2} sx={{ mb: 2 }}>
       {/* Key Gamma Levels */}
+      {sections.includes('walls') && (
+      <>
       <Grid item xs={12} sm={6} md={4} lg={3}>
         <MetricCard
           title="Call Wall"
@@ -309,8 +322,10 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
           status={getWallStatus(underlying_price, key_levels?.put_wall, 'put')}
         />
       </Grid>
+      </>
+      )}
 
-      {showGreekExposures && (
+      {sections.includes('greeks') && (
         <>
           <Grid item xs={12} sm={6} md={4} lg={3}>
             <MetricCard
@@ -344,7 +359,7 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
           </Grid>
         </>
       )}
-      {showGreekExposures && isModelDerivedGreeks && (
+      {sections.includes('greeks') && isModelDerivedGreeks && (
         <Grid item xs={12}>
           <Typography variant="caption" color="text.secondary">
             VEX/CEX are Black-Scholes estimates (strike + IV + time-to-expiry) — Yahoo's options data doesn't report vanna/charm directly.
@@ -353,6 +368,8 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
       )}
 
       {/* Volatility Metrics */}
+      {sections.includes('volatility') && (
+      <>
       <Grid item xs={12} sm={6} md={4} lg={3}>
         <MetricCard
           title="IV Rank (IVR)"
@@ -399,6 +416,9 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
           description="A rough one-standard-deviation price range for this expiration, priced in by at-the-money options. Roughly a 2-in-3 chance the stock stays within +/- this amount by expiry."
         />
       </Grid>
+      </>
+      )}
+      {sections.includes('flow') && (
       <Grid item xs={12} sm={6} md={4} lg={3}>
         <MetricCard
           title="Premium Put/Call Ratio"
@@ -410,6 +430,7 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
           description="Compares dollars traded in put premium vs call premium today (weighted by volume, not just contract count). Above 1: more money flowing into puts. Below 1: more into calls."
         />
       </Grid>
+      )}
     </Grid>
   );
 }
