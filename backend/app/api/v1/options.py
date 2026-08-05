@@ -1,9 +1,19 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
 
+from ...database import get_db
+from ...models.max_pain import MaxPainSnapshot
+from ...models.gex import GexSnapshot
 from ...services.options_metrics import calculate_options_metrics, compute_options_metrics, compute_key_gamma_levels
+from ...services.options_snapshot_upsert import upsert_snapshot, trading_date_for
+from ...services.symbol_format import normalize_symbol
 from ...schemas.options_metrics import OptionsMetricsResponse
 
 from ...services.yfinance_service import YFinanceService
@@ -11,7 +21,201 @@ import yfinance as yf
 from ...wiring.bootstrap import get_redis_client
 import json
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
+
+_ET = ZoneInfo("America/New_York")
+
+# Bucket boundaries in calendar days from today (ET). An expiration falls
+# into the first bucket whose upper bound it's <= to.
+_EXPIRATION_BUCKETS = [
+    ("this_week", 7),
+    ("this_month", 35),
+    ("this_quarter", 100),
+    ("later", None),
+]
+
+
+def _bucket_expirations(expirations: List[str], today_et) -> Dict[str, List[str]]:
+    buckets: Dict[str, List[str]] = {name: [] for name, _ in _EXPIRATION_BUCKETS}
+    for exp in expirations:
+        try:
+            exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        days = (exp_date - today_et).days
+        for name, upper_bound in _EXPIRATION_BUCKETS:
+            if upper_bound is None or days <= upper_bound:
+                buckets[name].append(exp)
+                break
+    return buckets
+
+
+@router.get("/expirations/{symbol}")
+async def get_options_expirations(symbol: str) -> dict:
+    """List available expirations for a symbol, bucketed into This Week /
+    This Month / This Quarter / Later (by calendar days from today, ET).
+
+    Cheap relative to the analysis endpoints -- yfinance's `ticker.options`
+    is just the expiration date list, no chain data. Used to populate an
+    expiration selector before the caller fetches the (expensive) chain for
+    whichever specific date they pick.
+    """
+    symbol = symbol.upper()
+    cache_key = f"options_expirations:{symbol}"
+
+    try:
+        redis_client = get_redis_client()
+        cached = redis_client.get(cache_key)
+        if cached:
+            return json.loads(cached)
+    except Exception:
+        pass
+
+    try:
+        svc = YFinanceService()
+        try:
+            svc._wait_for_yfinance_rate_limit()
+        except Exception:
+            pass
+
+        try:
+            from ...services.yf_session import get_session
+            session = get_session()
+        except Exception:
+            session = None
+
+        ticker = yf.Ticker(symbol, session=session) if session is not None else yf.Ticker(symbol)
+        expirations = list(getattr(ticker, "options", []) or [])
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    if not expirations:
+        raise HTTPException(status_code=404, detail=f"No options data found for {symbol}")
+
+    today_et = datetime.now(_ET).date()
+    result = {
+        "symbol": symbol,
+        "as_of": datetime.utcnow().isoformat(),
+        "all_expirations": expirations,
+        "buckets": _bucket_expirations(expirations, today_et),
+    }
+
+    try:
+        redis_client = get_redis_client()
+        redis_client.setex(cache_key, 3600, json.dumps(result))
+    except Exception:
+        pass
+
+    return result
+
+
+@router.get("/term-structure/{symbol}")
+async def get_options_term_structure(
+    symbol: str,
+    expiration: str = Query(..., description="Expiration date, YYYY-MM-DD, from /expirations/{symbol}"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Max Pain + GEX for one specific expiration, computed live from today's
+    chain (not the daily batch's nearest-expiration snapshot).
+
+    This is the "term structure" building block: call it once per expiration
+    a user selects (This Week / This Month / This Quarter / a specific date)
+    to compare positioning across expirations, all computed from today's
+    data -- see calculate_options_metrics() for why this is a cross-section,
+    not a forecast.
+
+    Every call persists its result to max_pain_snapshots/gex_snapshots
+    (upserted on ticker+trading_date+expiration), so /v1/max-pain/history and
+    /v1/gex/history filtered to this expiration accumulate real history for
+    whichever ticker+expiration combinations get viewed -- there's no
+    universe-wide daily batch fetching every expiration for every ticker,
+    which would multiply yfinance load by however many expirations are
+    tracked. History for an expiration only starts from the first time it's
+    viewed here.
+    """
+    normalized_symbol = normalize_symbol(symbol)
+    if normalized_symbol is None:
+        raise HTTPException(status_code=422, detail=f"Invalid symbol format: {symbol!r}")
+
+    try:
+        expiration_date = datetime.strptime(expiration, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid expiration format: {expiration!r}, expected YYYY-MM-DD")
+
+    try:
+        metrics = calculate_options_metrics(normalized_symbol, expiration)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    fetched_at = datetime.utcnow()
+    trading_date = trading_date_for(fetched_at)
+    spot = metrics.get("underlying_price")
+
+    try:
+        upsert_snapshot(
+            db,
+            MaxPainSnapshot,
+            ticker=normalized_symbol,
+            trading_date=trading_date,
+            expiration=expiration_date,
+            values={
+                "company_name": None,
+                "status": "OK",
+                "error": None,
+                "max_pain_strike": metrics.get("max_pain_strike"),
+                "call_oi": metrics.get("total_call_oi"),
+                "put_oi": metrics.get("total_put_oi"),
+                "put_call_ratio": metrics.get("open_interest_put_call_ratio"),
+                "last_price": spot,
+                "distance_pct": metrics.get("max_pain_distance_pct"),
+                "batch_id": None,
+                "fetched_at": fetched_at,
+            },
+        )
+        flip_level = metrics.get("key_levels", {}).get("zero_gamma")
+        distance_to_flip_pct = (
+            ((spot - flip_level) / flip_level) * 100.0
+            if spot is not None and flip_level not in (None, 0)
+            else None
+        )
+        upsert_snapshot(
+            db,
+            GexSnapshot,
+            ticker=normalized_symbol,
+            trading_date=trading_date,
+            expiration=expiration_date,
+            values={
+                "company_name": None,
+                "status": "OK",
+                "error": None,
+                "spot_price": spot,
+                "call_oi": metrics.get("total_call_oi"),
+                "put_oi": metrics.get("total_put_oi"),
+                "call_gex": metrics.get("total_call_gex"),
+                "put_gex": metrics.get("total_put_gex"),
+                "total_gex": metrics.get("total_gex"),
+                "flip_level": flip_level,
+                "distance_to_flip_pct": distance_to_flip_pct,
+                "batch_id": None,
+                "fetched_at": fetched_at,
+            },
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "Failed to persist term-structure snapshot for %s %s", normalized_symbol, expiration
+        )
+
+    return {
+        "symbol": normalized_symbol,
+        "expiration": expiration,
+        "trading_date": trading_date.isoformat(),
+        **metrics,
+    }
 
 
 @router.post("/metrics", response_model=OptionsMetricsResponse)
@@ -22,6 +226,11 @@ async def post_options_metrics(payload: Dict[str, Any]):
   options from yfinance (nearest expiry). Optional `current_iv`,
   `iv_52w_low`, `iv_52w_high` may be provided; when missing and `symbol`
   is present, the endpoint will attempt to infer them from yfinance.
+
+  When supplying `options_chain` directly (no `symbol`), also supply
+  `underlying_price` -- GEX/DEX/VEX/CEX are dollar exposures and require the
+  spot price to compute; there's no other way to derive it from a
+  caller-supplied chain.
   """
   try:
     options_chain: Optional[List[Dict[str, Any]]] = payload.get("options_chain")
@@ -86,7 +295,14 @@ async def post_options_metrics(payload: Dict[str, Any]):
       except Exception:
         pass
 
-    result = compute_options_metrics(options_chain, current_iv=current_iv,
+    underlying_price = payload.get("underlying_price")
+    if underlying_price is None:
+      raise HTTPException(
+        status_code=422,
+        detail="underlying_price is required when supplying options_chain directly",
+      )
+
+    result = compute_options_metrics(options_chain, spot=float(underlying_price), current_iv=current_iv,
                      iv_52w_low=iv_52w_low, iv_52w_high=iv_52w_high)
     # pydantic model will validate/serialize
     return result

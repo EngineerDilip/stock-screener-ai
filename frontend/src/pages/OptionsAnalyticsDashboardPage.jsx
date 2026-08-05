@@ -16,6 +16,7 @@ import {
 import apiClient from '../api/client';
 import SummaryCards from '../components/OptionsMetrics/SummaryCards';
 import MetricHistoryChart from '../components/OptionsMetrics/MetricHistoryChart';
+import ExpirationSelector from '../components/OptionsMetrics/ExpirationSelector';
 
 export default function OptionsAnalyticsDashboardPage() {
   const [tickerList, setTickerList] = useState([]);
@@ -26,6 +27,7 @@ export default function OptionsAnalyticsDashboardPage() {
   const [defaultTickersLoaded, setDefaultTickersLoaded] = useState(false);
   const [loadingTickers, setLoadingTickers] = useState(false);
   const [loadingData, setLoadingData] = useState(false);
+  const [selectedExpiration, setSelectedExpiration] = useState(null);
 
   const [gexData, setGexData] = useState(null);
   const [maxPainData, setMaxPainData] = useState(null);
@@ -74,6 +76,8 @@ export default function OptionsAnalyticsDashboardPage() {
 
   // Fetch all three data sources when ticker changes
   useEffect(() => {
+    setSelectedExpiration(null); // expiration selection doesn't carry over between tickers
+
     if (!selectedTicker) {
       setGexData(null);
       setMaxPainData(null);
@@ -412,10 +416,20 @@ export default function OptionsAnalyticsDashboardPage() {
             {selectedTicker.symbol} {selectedTicker.name && `- ${selectedTicker.name}`}
           </Typography>
 
+          {/* Term structure: compare positioning across expirations using today's
+              data (a cross-section, not a forecast -- see ExpirationSelector's
+              doc comment). Selecting one also filters the history charts below
+              to that expiration's own series. */}
+          <ExpirationSelector
+            symbol={selectedTicker.symbol}
+            expiration={selectedExpiration}
+            onExpirationChange={setSelectedExpiration}
+          />
+
           {/* History trend charts (separate from the point-in-time cards below --
               see MetricHistoryChart's doc comment for why these are never averaged) */}
-          <MetricHistoryChart symbol={selectedTicker.symbol} metric="maxPain" />
-          <MetricHistoryChart symbol={selectedTicker.symbol} metric="gex" />
+          <MetricHistoryChart symbol={selectedTicker.symbol} metric="maxPain" expiration={selectedExpiration} />
+          <MetricHistoryChart symbol={selectedTicker.symbol} metric="gex" expiration={selectedExpiration} />
 
           {/* GEX Summary */}
           {gexRow && (

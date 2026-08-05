@@ -17,6 +17,7 @@ from ..celery_app import celery_app as app
 from ..database import SessionLocal
 from ..models.max_pain import MaxPainSnapshot, MaxPainBatch
 from ..models.stock_universe import StockUniverse
+from ..services.options_snapshot_upsert import upsert_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -219,23 +220,27 @@ def parse_max_pain_output(xlsx_path: str, batch_id: str, db: Session) -> dict:
                 expiration_date = None
 
             fetched_at = datetime.utcnow()
-            snapshot = MaxPainSnapshot(
+            trading_date_val = _trading_date_for(fetched_at)
+            upsert_snapshot(
+                db,
+                MaxPainSnapshot,
                 ticker=ticker,
-                company_name=company_name,
-                status=status,
-                error=note if status == "FAILED" else None,
-                max_pain_strike=max_pain_val,
+                trading_date=trading_date_val,
                 expiration=expiration_date,
-                call_oi=call_oi_val or 0,
-                put_oi=put_oi_val or 0,
-                put_call_ratio=ratio,
-                last_price=price,
-                distance_pct=distance,
-                batch_id=batch_id,
-                fetched_at=fetched_at,
-                trading_date=_trading_date_for(fetched_at),
+                values={
+                    "company_name": company_name,
+                    "status": status,
+                    "error": note if status == "FAILED" else None,
+                    "max_pain_strike": max_pain_val,
+                    "call_oi": call_oi_val or 0,
+                    "put_oi": put_oi_val or 0,
+                    "put_call_ratio": ratio,
+                    "last_price": price,
+                    "distance_pct": distance,
+                    "batch_id": batch_id,
+                    "fetched_at": fetched_at,
+                },
             )
-            db.add(snapshot)
 
             rows_data.append({
                 'symbol': ticker,

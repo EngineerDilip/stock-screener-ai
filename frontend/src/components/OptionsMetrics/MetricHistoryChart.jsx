@@ -97,16 +97,18 @@ const CustomTooltip = ({ active, payload, label, metric }) => {
  * @param {'maxPain'|'gex'} props.metric - Which metric's history to show
  * @param {number} [props.height=320]
  */
-export default function MetricHistoryChart({ symbol, metric, height = 320 }) {
+export default function MetricHistoryChart({ symbol, metric, expiration = null, height = 320 }) {
   const [timeframe, setTimeframe] = useState('monthly');
 
   const endpoint = metric === 'gex' ? '/v1/gex/history' : '/v1/max-pain/history';
   const title = metric === 'gex' ? 'GEX History' : 'Max Pain History';
 
   const { data, isLoading, isError, error } = useQuery({
-    queryKey: ['metric-history', metric, symbol, timeframe],
+    queryKey: ['metric-history', metric, symbol, timeframe, expiration],
     queryFn: async () => {
-      const resp = await apiClient.get(endpoint, { params: { symbol, timeframe } });
+      const params = { symbol, timeframe };
+      if (expiration) params.expiration = expiration;
+      const resp = await apiClient.get(endpoint, { params });
       return resp.data;
     },
     enabled: Boolean(symbol),
@@ -123,6 +125,11 @@ export default function MetricHistoryChart({ symbol, metric, height = 320 }) {
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 0.5 }}>
           <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
             {title}
+            {expiration && (
+              <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+                (exp {expiration})
+              </Typography>
+            )}
           </Typography>
           <ToggleButtonGroup
             value={timeframe}

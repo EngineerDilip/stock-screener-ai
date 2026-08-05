@@ -14,6 +14,9 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+_ET = ZoneInfo("America/New_York")
 
 
 class PermanentFetchError(Exception):
@@ -170,8 +173,14 @@ def fetch_one(symbol_cfg: dict, strike_range_pct: float, max_strikes: int | None
     if "impliedVolatility" not in calls.columns or "impliedVolatility" not in puts.columns:
         raise PermanentFetchError("implied volatility not available in options chain")
 
+    # Options expire based on US market hours, not UTC midnight -- using
+    # datetime.utcnow().date() as "today" under-counts days-to-expiry by one
+    # for near-dated contracts once it's past ~8pm ET (already the next UTC
+    # calendar date), distorting gamma for 0-1 DTE options. Same class of fix
+    # as trading_date (migration 20260805_0028).
     expiry_dt = datetime.strptime(expiration, "%Y-%m-%d")
-    days_to_expiry = max((expiry_dt.date() - datetime.utcnow().date()).days, 1)
+    today_et = datetime.now(_ET).date()
+    days_to_expiry = max((expiry_dt.date() - today_et).days, 1)
     time_years = max(days_to_expiry / 365.0, 1.0 / 365.0)
 
     lo = spot * (1 - strike_range_pct / 100.0)

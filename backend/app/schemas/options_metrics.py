@@ -36,6 +36,8 @@ class OptionsMetricsResponse(BaseModel):
     strikes: List[StrikeExposure]
     volume_put_call_ratio: Optional[float] = None
     open_interest_put_call_ratio: Optional[float] = None
+    total_call_oi: Optional[int] = None
+    total_put_oi: Optional[int] = None
     call_premium_notional: Optional[float] = None
     put_premium_notional: Optional[float] = None
     underlying_price: Optional[float] = None
@@ -49,4 +51,6 @@ class OptionsMetricsResponse(BaseModel):
     total_gex: Optional[float] = None
     call_wall: Optional[float] = None
     put_wall: Optional[float] = None
+    max_pain_strike: Optional[float] = None
+    max_pain_distance_pct: Optional[float] = None
     greeks_methodology: Optional[str] = None

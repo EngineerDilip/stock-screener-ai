@@ -71,7 +71,7 @@ def test_compute_options_metrics_populates_ivr_when_current_iv_and_range_provide
         {"strike": 100.0, "type": "put", "gamma": 0.05, "open_interest": 5, "delta": -0.4, "iv": 0.32},
     ]
 
-    result = compute_options_metrics(options_chain, current_iv=0.30, iv_52w_low=0.20, iv_52w_high=0.40)
+    result = compute_options_metrics(options_chain, spot=100.0, current_iv=0.30, iv_52w_low=0.20, iv_52w_high=0.40)
 
     assert result["ivr"] == pytest.approx(50.0)
 
@@ -92,10 +92,15 @@ def test_aggregate_by_strike_assigns_negative_put_gex():
         {"strike": 100.0, "type": "put", "gamma": 0.05, "open_interest": 5, "delta": -0.4, "iv": 0.32},
     ]
 
-    strike_agg = aggregate_by_strike(options_chain)
-    assert strike_agg[100.0]["call_gex"] == pytest.approx(0.05 * 10 * 100)
-    assert strike_agg[100.0]["put_gex"] == pytest.approx(-(0.05 * 5 * 100))
-    assert strike_agg[100.0]["total_gex"] == pytest.approx((0.05 * 10 * 100) - (0.05 * 5 * 100))
+    spot = 100.0
+    strike_agg = aggregate_by_strike(options_chain, spot)
+    # Dollar gamma exposure per 1% underlying move: gamma * oi * 100 * spot^2 * 0.01
+    # -- matches gex_batch.py's convention (see options_metrics.py::aggregate_by_strike).
+    call_gex = 0.05 * 10 * 100 * spot * spot * 0.01
+    put_gex = 0.05 * 5 * 100 * spot * spot * 0.01
+    assert strike_agg[100.0]["call_gex"] == pytest.approx(call_gex)
+    assert strike_agg[100.0]["put_gex"] == pytest.approx(-put_gex)
+    assert strike_agg[100.0]["total_gex"] == pytest.approx(call_gex - put_gex)
 
 
 def test_compute_key_gamma_levels_returns_none_zero_gamma_when_cumulative_starts_at_zero():

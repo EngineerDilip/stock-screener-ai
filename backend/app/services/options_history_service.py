@@ -65,8 +65,29 @@ def _fetch_rows(
     start: date,
     end: date,
     period: Optional[str],
+    expiration: Optional[date],
 ) -> list[dict]:
+    """Fetch history rows for one ticker.
+
+    Since the on-demand term-structure endpoint (options.py::get_options_term_structure)
+    can now write additional rows for the SAME (ticker, trading_date) under a
+    DIFFERENT expiration than the daily batch's nearest-expiration row, a
+    plain "one row per trading_date" query is no longer guaranteed without
+    disambiguating which expiration series is wanted:
+
+    - `expiration` given: pin to that specific expiration's series (works
+      whether the rows came from the daily batch or an on-demand view).
+    - `expiration` omitted (the default/backward-compatible call, used by
+      every existing caller of these history endpoints): restrict to
+      `batch_id IS NOT NULL`, i.e. daily-batch-authored rows only. The
+      term-structure endpoint always writes with batch_id=None, so this
+      keeps the default series exactly what it was before expiration-based
+      snapshots existed -- the nearest-expiration daily series -- rather
+      than silently jumping between expirations on days a user happened to
+      also view a different one.
+    """
     col_list = ", ".join(columns)
+    expiration_clause = "AND expiration = :expiration" if expiration is not None else "AND batch_id IS NOT NULL"
 
     if period is None:
         query = text(
@@ -76,6 +97,7 @@ def _fetch_rows(
             WHERE ticker = :ticker
               AND status = 'OK'
               AND trading_date BETWEEN :start AND :end
+              {expiration_clause}
             ORDER BY trading_date ASC
             """
         )
@@ -92,6 +114,7 @@ def _fetch_rows(
             WHERE ticker = :ticker
               AND status = 'OK'
               AND trading_date BETWEEN :start AND :end
+              {expiration_clause}
             ORDER BY date_trunc(:period, trading_date), trading_date DESC
             """
         )
@@ -99,6 +122,8 @@ def _fetch_rows(
     params = {"ticker": ticker, "start": start, "end": end}
     if period is not None:
         params["period"] = period
+    if expiration is not None:
+        params["expiration"] = expiration
 
     rows = db.execute(query, params).mappings().all()
     if period is not None:
@@ -115,6 +140,7 @@ def fetch_max_pain_history(
     timeframe: Timeframe,
     start: Optional[date] = None,
     end: Optional[date] = None,
+    expiration: Optional[date] = None,
 ) -> dict:
     resolved_start, resolved_end, period = resolve_window(timeframe, start, end)
     rows = _fetch_rows(
@@ -132,10 +158,12 @@ def fetch_max_pain_history(
         start=resolved_start,
         end=resolved_end,
         period=period,
+        expiration=expiration,
     )
     return {
         "symbol": symbol,
         "timeframe": timeframe.value,
+        "expiration": expiration.isoformat() if expiration else None,
         "sampling": "point_in_time_eod" if period is None else "last_of_period",
         "period": period,
         "start": resolved_start.isoformat(),
@@ -163,6 +191,7 @@ def fetch_gex_history(
     timeframe: Timeframe,
     start: Optional[date] = None,
     end: Optional[date] = None,
+    expiration: Optional[date] = None,
 ) -> dict:
     resolved_start, resolved_end, period = resolve_window(timeframe, start, end)
     rows = _fetch_rows(
@@ -182,10 +211,12 @@ def fetch_gex_history(
         start=resolved_start,
         end=resolved_end,
         period=period,
+        expiration=expiration,
     )
     return {
         "symbol": symbol,
         "timeframe": timeframe.value,
+        "expiration": expiration.isoformat() if expiration else None,
         "sampling": "point_in_time_eod" if period is None else "last_of_period",
         "period": period,
         "start": resolved_start.isoformat(),

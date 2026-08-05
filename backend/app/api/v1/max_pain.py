@@ -289,6 +289,13 @@ async def get_max_pain_history(
     timeframe: Timeframe = Query(default=Timeframe.MONTHLY),
     start: date | None = Query(default=None),
     end: date | None = Query(default=None),
+    expiration: date | None = Query(
+        default=None,
+        description=(
+            "Pin history to a specific expiration's series (from /v1/options/expirations/{symbol}). "
+            "Omit for the default nearest-expiration daily-batch series."
+        ),
+    ),
     db: Session = Depends(get_db),
 ) -> dict:
     """Max Pain time series for one ticker over a timeframe window.
@@ -298,6 +305,11 @@ async def get_max_pain_history(
     Yearly downsample to the last snapshot of each week/month respectively
     (still a real dated value, not a computed mean) to keep point counts
     chart-friendly. See `sampling`/`period` in the response.
+
+    Without `expiration`, this is the daily batch's nearest-expiration
+    series (unchanged behavior). With `expiration`, it's that specific
+    expiration's series, built from /v1/options/term-structure calls --
+    history only exists from whenever that expiration was first viewed.
     """
     normalized_symbol = normalize_symbol(symbol)
     if normalized_symbol is None:
@@ -308,7 +320,8 @@ async def get_max_pain_history(
 
     try:
         return fetch_max_pain_history(
-            db, symbol=normalized_symbol, timeframe=timeframe, start=start, end=end
+            db, symbol=normalized_symbol, timeframe=timeframe, start=start, end=end,
+            expiration=expiration,
         )
     except Exception:
         logger.exception("Error fetching max pain history for %s", normalized_symbol)

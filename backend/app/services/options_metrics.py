@@ -17,7 +17,10 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
+from zoneinfo import ZoneInfo
 import math
+
+_ET = ZoneInfo("America/New_York")
 
 import pandas as pd
 
@@ -53,11 +56,21 @@ def _interpolate_zero_crossing(prev_strike: float, prev_cum: float, cur_strike: 
     return prev_strike + fraction * (cur_strike - prev_strike)
 
 
-def aggregate_by_strike(options_chain: List[Dict[str, Any]]) -> Dict[float, Dict[str, Any]]:
-    """Aggregate exposures by strike.
+def aggregate_by_strike(options_chain: List[Dict[str, Any]], spot: float) -> Dict[float, Dict[str, Any]]:
+    """Aggregate dollar exposures by strike.
 
     Returns a dict keyed by strike with aggregated fields:
       call_gex, put_gex, total_gex, dex, vex, cex, oi, iv_sample_count, iv_avg
+
+    `spot` is required to express these in dollar terms -- a bare
+    `gamma * oi * 100` (no spot factor) is dimensionally a shares-per-$1-move
+    rate, not a dollar exposure, and doesn't match the convention used
+    elsewhere (see gex_batch.py / _bs_gamma_delta's GEX, which is dollar
+    gamma per 1% underlying move: gamma * oi * 100 * spot**2 * 0.01). This
+    function previously omitted spot entirely, so its GEX/DEX/VEX/CEX were
+    off from gex_batch.py's numbers by a factor of the stock price -- the
+    two panels on the Options Analytics dashboard were showing
+    non-comparable magnitudes for the same underlying quantity.
     """
     strikes: Dict[float, Dict[str, Any]] = {}
     for opt in options_chain:
@@ -85,9 +98,10 @@ def aggregate_by_strike(options_chain: List[Dict[str, Any]]) -> Dict[float, Dict
             "has_cex": False,
         })
 
-        # GEX per contract approximated as gamma * oi * 100, with put-side gamma
-        # represented as negative exposure.
-        raw_gex = (gamma or 0.0) * oi * 100
+        # Dollar gamma exposure per 1% move in the underlying, with put-side
+        # gamma represented as negative exposure -- matches gex_batch.py's
+        # convention (the daily GEX batch feeding /v1/gex/history).
+        raw_gex = (gamma or 0.0) * oi * 100 * spot * spot * 0.01
         gex = raw_gex if typ == "call" else -raw_gex
         if typ == "call":
             entry["call_gex"] += max(gex, 0.0)
@@ -96,14 +110,14 @@ def aggregate_by_strike(options_chain: List[Dict[str, Any]]) -> Dict[float, Dict
 
         entry["total_gex"] += gex
 
-        # Exposure greeks per strike
+        # Dollar delta/vanna/charm exposure per strike.
         if delta is not None:
-            entry["dex"] += delta * oi * 100
+            entry["dex"] += delta * oi * 100 * spot
         if vanna is not None:
-            entry["vex"] += vanna * oi * 100
+            entry["vex"] += vanna * oi * 100 * spot
             entry["has_vex"] = True
         if charm is not None:
-            entry["cex"] += charm * oi * 100
+            entry["cex"] += charm * oi * 100 * spot
             entry["has_cex"] = True
         entry["oi"] += oi
 
@@ -126,6 +140,26 @@ def aggregate_by_strike(options_chain: List[Dict[str, Any]]) -> Dict[float, Dict
         s.pop("iv_count", None)
 
     return dict(sorted(strikes.items()))
+
+
+def compute_max_pain(rows: List[Tuple[float, int, int]]) -> Optional[float]:
+    """Max pain strike: the strike where total OI-weighted intrinsic value
+    paid out to option holders is minimized. `rows` is (strike, call_oi,
+    put_oi) tuples -- same algorithm as scripts/max_pain_batch.py's
+    compute_max_pain(), duplicated here (rather than imported) since that
+    module is a standalone subprocess script, not a package this can import.
+    """
+    if not rows:
+        return None
+    best_strike, best_pain = None, None
+    for p, _, _ in rows:
+        total = 0.0
+        for k, c, pu in rows:
+            total += c * max(p - k, 0)
+            total += pu * max(k - p, 0)
+        if best_pain is None or total < best_pain:
+            best_pain, best_strike = total, p
+    return best_strike
 
 
 def compute_key_gamma_levels(strike_agg: Dict[float, Dict[str, Any]]) -> Dict[str, Optional[float]]:
@@ -348,9 +382,19 @@ def _bs_vanna_charm(spot: float, strike: float, time_years: float, vol: float) -
 
 
 def _time_to_expiry_years(expiration: str) -> float:
+    """Time to expiry in years, using the US/Eastern trading day as "today".
+
+    Options expire based on US market hours, not UTC midnight. Using
+    datetime.utcnow().date() as "today" under-counts days-to-expiry by one
+    for any 0-1 DTE contract once it's past ~8pm ET (already the next UTC
+    calendar date), which meaningfully distorts gamma/vanna/charm for
+    near-dated options -- the same class of bug fixed for trading_date in
+    migration 20260805_0028.
+    """
     try:
         expiry_dt = datetime.strptime(expiration, "%Y-%m-%d").date()
-        days_to_expiry = max((expiry_dt - datetime.utcnow().date()).days, 1)
+        today_et = datetime.now(_ET).date()
+        days_to_expiry = max((expiry_dt - today_et).days, 1)
     except (TypeError, ValueError):
         days_to_expiry = 1
     return max(days_to_expiry / 365.0, 1.0 / 365.0)
@@ -447,7 +491,18 @@ def calculate_options_metrics(ticker: str, expiration: str) -> Dict[str, Any]:
     svc = YFinanceService()
     svc._wait_for_yfinance_rate_limit()
 
-    yf_ticker = yf.Ticker(ticker)
+    # Shared curl_cffi session (see yf_session.py) -- Yahoo's bot detection
+    # routinely 429s plain requests-based clients. This is the highest-traffic
+    # live yfinance call path (every /v1/options/metrics cache miss and every
+    # /v1/options/term-structure selection goes through it), so it's the one
+    # most worth this mitigation; YFinanceService itself doesn't apply it
+    # anywhere yet -- a broader gap across that class, out of scope here.
+    try:
+        from .yf_session import get_session
+        session = get_session()
+    except Exception:
+        session = None
+    yf_ticker = yf.Ticker(ticker, session=session) if session is not None else yf.Ticker(ticker)
     try:
         option_chain = yf_ticker.option_chain(expiration)
     except Exception as exc:
@@ -517,8 +572,28 @@ def calculate_options_metrics(ticker: str, expiration: str) -> Dict[str, Any]:
         df["vanna"] = [v for v, _ in vanna_charm]
         df["charm"] = [c for _, c in vanna_charm]
 
-    calls["call_gex"] = calls["gamma"] * calls["openInterest"] * 100 * underlying_price * 0.01
-    puts["put_gex"] = puts["gamma"] * puts["openInterest"] * 100 * underlying_price * 0.01 * -1
+    # Max pain, restricted to +/-20% of spot (same window scripts/max_pain_batch.py
+    # uses) -- keeps the O(n^2) pain calc bounded and the result comparable to
+    # the daily batch's nearest-expiration max_pain_strike.
+    strike_lo, strike_hi = underlying_price * 0.8, underlying_price * 1.2
+    call_oi_by_strike = dict(zip(calls["strike"], calls["openInterest"]))
+    put_oi_by_strike = dict(zip(puts["strike"], puts["openInterest"]))
+    pain_strikes = sorted(
+        k for k in (set(call_oi_by_strike) | set(put_oi_by_strike))
+        if strike_lo <= k <= strike_hi
+    )
+    pain_rows = [
+        (k, int(call_oi_by_strike.get(k, 0)), int(put_oi_by_strike.get(k, 0)))
+        for k in pain_strikes
+    ]
+    max_pain_strike = compute_max_pain(pain_rows)
+
+    # Dollar gamma exposure per 1% move in the underlying -- must match
+    # aggregate_by_strike()'s convention below (and gex_batch.py's), or this
+    # function's own top-level total_gex disagrees with its own per-strike
+    # `strikes` list for the same chain.
+    calls["call_gex"] = calls["gamma"] * calls["openInterest"] * 100 * underlying_price * underlying_price * 0.01
+    puts["put_gex"] = puts["gamma"] * puts["openInterest"] * 100 * underlying_price * underlying_price * 0.01 * -1
 
     total_call_gex = float(calls["call_gex"].sum())
     total_put_gex = float(puts["put_gex"].sum())
@@ -602,7 +677,7 @@ def calculate_options_metrics(ticker: str, expiration: str) -> Dict[str, Any]:
         volatility_risk_premium = current_atm_iv - historical_volatility
 
     iv_52w_low, iv_52w_high = _update_iv_history_and_get_range(ticker, current_atm_iv)
-    result = compute_options_metrics(options_chain, current_iv=current_atm_iv,
+    result = compute_options_metrics(options_chain, spot=underlying_price, current_iv=current_atm_iv,
                                       iv_52w_low=iv_52w_low, iv_52w_high=iv_52w_high)
     result.update({
         "ticker": ticker,
@@ -615,6 +690,8 @@ def calculate_options_metrics(ticker: str, expiration: str) -> Dict[str, Any]:
         "atm_strike": atm_strike,
         "volume_put_call_ratio": volume_pcr,
         "open_interest_put_call_ratio": oi_pcr,
+        "total_call_oi": int(total_call_oi),
+        "total_put_oi": int(total_put_oi),
         "call_premium_notional": call_premium_notional,
         "put_premium_notional": put_premium_notional,
         "total_call_gex": total_call_gex,
@@ -622,6 +699,12 @@ def calculate_options_metrics(ticker: str, expiration: str) -> Dict[str, Any]:
         "total_gex": total_gex,
         "call_wall": call_wall,
         "put_wall": put_wall,
+        "max_pain_strike": max_pain_strike,
+        "max_pain_distance_pct": (
+            ((underlying_price - max_pain_strike) / max_pain_strike) * 100.0
+            if max_pain_strike not in (None, 0)
+            else None
+        ),
         # gamma/delta/vanna/charm are all Black-Scholes estimates from
         # strike + IV + time-to-expiry, not values reported by the options
         # exchange -- Yahoo's public chain doesn't reliably supply any of
@@ -632,10 +715,10 @@ def calculate_options_metrics(ticker: str, expiration: str) -> Dict[str, Any]:
     return result
 
 
-def compute_options_metrics(options_chain: List[Dict[str, Any]], current_iv: Optional[float] = None,
+def compute_options_metrics(options_chain: List[Dict[str, Any]], spot: float, current_iv: Optional[float] = None,
                             iv_52w_low: Optional[float] = None, iv_52w_high: Optional[float] = None) -> Dict[str, Any]:
     """High-level composer that returns aggregated metrics and per-strike exposures."""
-    strike_agg = aggregate_by_strike(options_chain)
+    strike_agg = aggregate_by_strike(options_chain, spot)
     key_levels = compute_key_gamma_levels(strike_agg)
     net = compute_net_exposures(strike_agg)
     ivr = None

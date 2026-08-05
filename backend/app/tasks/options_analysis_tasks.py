@@ -157,8 +157,19 @@ def analyze_options_exposure(self, symbol: str) -> Dict[str, Any]:
             svc._wait_for_yfinance_rate_limit()
         except Exception:
             pass
-        
-        ticker = yf.Ticker(symbol)
+
+        # Shared curl_cffi session (see services/yf_session.py) -- Yahoo's bot
+        # detection routinely 429s plain requests-based clients. This is now
+        # the actual on-demand fallback for GET /v1/options/analysis/{symbol}
+        # (the orphan-queue bug that used to make this dispatch never run at
+        # all is fixed elsewhere -- see api/v1/options.py), so it's worth not
+        # undermining that fix by hitting easily-avoidable 429s here.
+        try:
+            from ..services.yf_session import get_session
+            session = get_session()
+        except Exception:
+            session = None
+        ticker = yf.Ticker(symbol, session=session) if session is not None else yf.Ticker(symbol)
         expirations = getattr(ticker, 'options', []) or []
         if not expirations:
             raise ValueError(f"No options data available for {symbol}")
@@ -238,7 +249,15 @@ def analyze_options_exposure(self, symbol: str) -> Dict[str, Any]:
         S = spot_price
         df['sign'] = 1
         df.loc[df['type'] == 'put', 'sign'] = -1
-        df['raw_gex'] = df['gamma'] * df['openInterest'] * 100 * S
+        # Dollar gamma exposure per 1% move in the underlying -- must match
+        # options_metrics.py's aggregate_by_strike()/calculate_options_metrics()
+        # and gex_batch.py's convention. This previously used a bare `* S`
+        # (missing the second S factor and the 0.01 scale), which put Call
+        # Wall/Put Wall/Flip Level's *magnitude* out of step with every other
+        # GEX number shown elsewhere on the dashboard (wall/flip *selection*
+        # was unaffected, since S is the same constant across every strike of
+        # one ticker's chain -- only the displayed dollar values were wrong).
+        df['raw_gex'] = df['gamma'] * df['openInterest'] * 100 * S * S * 0.01
         df['call_gex'] = df['raw_gex'].where(df['type'] == 'call', 0.0)
         df['put_gex'] = -df['raw_gex'].where(df['type'] == 'put', 0.0)
         df['total_gex'] = df['call_gex'] + df['put_gex']
@@ -338,6 +357,7 @@ def analyze_options_exposure(self, symbol: str) -> Dict[str, Any]:
                 iv_52w_low, iv_52w_high = _update_iv_history_and_get_range(symbol, current_atm_iv)
                 metrics = compute_options_metrics(
                     nearest_chain,
+                    spot=spot_price,
                     current_iv=current_atm_iv,
                     iv_52w_low=iv_52w_low,
                     iv_52w_high=iv_52w_high,

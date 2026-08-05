@@ -16,6 +16,7 @@ from ..celery_app import celery_app as app
 from ..database import SessionLocal
 from ..models.gex import GexBatch, GexSnapshot
 from ..models.stock_universe import StockUniverse
+from ..services.options_snapshot_upsert import upsert_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -114,25 +115,29 @@ def parse_gex_output(json_path: str, batch_id: str, db) -> dict:
         put_gex = _safe_float(row.get("put_gex"))
 
         fetched_at = datetime.utcnow()
-        snapshot = GexSnapshot(
+        trading_date_val = _trading_date_for(fetched_at)
+        upsert_snapshot(
+            db,
+            GexSnapshot,
             ticker=row.get("symbol"),
-            company_name=row.get("company_name"),
-            status=status,
-            error=row.get("error") if status != "OK" else None,
+            trading_date=trading_date_val,
             expiration=_as_date(row.get("expiration")),
-            spot_price=_safe_float(row.get("spot_price")),
-            call_oi=_safe_int(row.get("call_oi")) or 0,
-            put_oi=_safe_int(row.get("put_oi")) or 0,
-            call_gex=call_gex,
-            put_gex=put_gex,
-            total_gex=total_gex,
-            flip_level=_safe_float(row.get("flip_level")),
-            distance_to_flip_pct=distance,
-            fetched_at=fetched_at,
-            trading_date=_trading_date_for(fetched_at),
-            batch_id=batch_id,
+            values={
+                "company_name": row.get("company_name"),
+                "status": status,
+                "error": row.get("error") if status != "OK" else None,
+                "spot_price": _safe_float(row.get("spot_price")),
+                "call_oi": _safe_int(row.get("call_oi")) or 0,
+                "put_oi": _safe_int(row.get("put_oi")) or 0,
+                "call_gex": call_gex,
+                "put_gex": put_gex,
+                "total_gex": total_gex,
+                "flip_level": _safe_float(row.get("flip_level")),
+                "distance_to_flip_pct": distance,
+                "fetched_at": fetched_at,
+                "batch_id": batch_id,
+            },
         )
-        db.add(snapshot)
 
     db.commit()
 
