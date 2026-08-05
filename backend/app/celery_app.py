@@ -412,6 +412,21 @@ def _build_cache_warmup_beat_schedule(enabled_markets: list[str]) -> dict:
             'kwargs': {'market': _market},
         }
 
+        # Daily live-data industry-group classification. Unlike the weekly
+        # GitHub sync above (a no-op in `live_only` mode) or the CSV loader
+        # (never scheduled), this classifies straight from this deployment's
+        # own stock_universe sector/industry via the crosswalk -- no external
+        # bundle or per-symbol CSV row needed, so a brand-new/relisted symbol
+        # gets covered within a day instead of staying unclassified
+        # indefinitely. Cheap (in-process dict lookups, no external calls), so
+        # daily is safe. 7 AM ET, after the weekly universe/IBD-sync jobs.
+        beat_schedule[f'daily-live-ibd-classification-{_m_lower}'] = {
+            'task': 'app.tasks.industry_tasks.classify_live_industry_groups',
+            'schedule': crontab(hour=7, minute=0),
+            'options': {'queue': market_jobs_queue_for_market(_market)},
+            'kwargs': {'market': _market},
+        }
+
     # --- Market-agnostic / shared beat entries below ---
     # These tasks are not market-scoped (theme discovery, cleanup jobs, etc.)
     # so they run on the shared data_fetch queue with shared lock scope.
