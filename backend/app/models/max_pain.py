@@ -52,7 +52,12 @@ class MaxPainBatch(Base):
     status = Column(String(20), default="running", nullable=False)  # running, completed, failed
     started_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     completed_at = Column(DateTime, nullable=True)
-    
+    # Celery task ID of the update_max_pain run that owns this row -- lets
+    # the Operations "Force Stop" cancel path find and fail this row when
+    # the task is revoked, instead of leaving it stuck at status='running'
+    # forever (see migration 20260805_0029).
+    celery_task_id = Column(String(155), nullable=True, index=True)
+
     # Summary stats
     tickers_ok = Column(Integer, default=0)
     tickers_failed = Column(Integer, default=0)

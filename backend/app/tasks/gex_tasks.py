@@ -181,6 +181,7 @@ def update_gex(
             id=batch_id,
             status="running",
             started_at=datetime.utcnow(),
+            celery_task_id=self.request.id,
             tickers_total=len(tickers),
             strike_range_pct=float(strike_range_pct),
             max_strikes=max_strikes,

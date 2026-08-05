@@ -299,6 +299,7 @@ def update_max_pain(self, config_path: str | None = None, wait_until: str | None
             id=batch_id,
             status="running",
             started_at=datetime.utcnow(),
+            celery_task_id=self.request.id,
         )
         db.add(batch)
         db.commit()

@@ -52,6 +52,45 @@ LEASE_STUCK_TTL_SECONDS = 10 * 60
 
 SCAN_TASK_NAME = "app.tasks.scan_tasks.run_bulk_scan"
 
+# Batch-tracking tables whose rows carry a celery_task_id (migration
+# 20260805_0029). A SIGTERM revoke doesn't reliably run the task's own
+# except/finally blocks -- the only place these rows would otherwise get
+# flipped to 'failed'/'completed' -- so without this map, a force-stopped
+# update_max_pain/update_gex run leaves its batch row stuck at
+# status='running' forever ("zombie" rows).
+def _batch_model_by_task_name() -> dict:
+    from app.models.max_pain import MaxPainBatch
+    from app.models.gex import GexBatch
+
+    return {
+        "app.tasks.max_pain_tasks.update_max_pain": MaxPainBatch,
+        "app.tasks.gex_tasks.update_gex": GexBatch,
+    }
+
+
+def _fail_orphaned_batch_row(db: Session, task_name: str, task_id: str, reason: str) -> None:
+    """Best-effort: mark the batch row this Celery task owns as failed.
+
+    Safe to call for any task_name/task_id -- no-ops unless there's a
+    matching model and a row still at status='running' for this exact task.
+    """
+    model = _batch_model_by_task_name().get(task_name)
+    if model is None:
+        return
+    try:
+        batch = (
+            db.query(model)
+            .filter(model.celery_task_id == task_id, model.status == "running")
+            .first()
+        )
+        if batch is not None:
+            batch.status = "failed"
+            batch.completed_at = datetime.utcnow()
+            batch.error_message = reason
+            db.commit()
+    except Exception:
+        logger.exception("Failed to mark batch row failed for task %s (%s)", task_id, task_name)
+
 
 @dataclass
 class _JobRecord:
@@ -929,6 +968,9 @@ class OperationsJobService:
         if strategy == "force_terminate":
             try:
                 celery_app.control.revoke(task_id, terminate=True, signal='SIGTERM')
+                _fail_orphaned_batch_row(
+                    db, record.task_name, task_id, "Force-stopped by operator via Operations dashboard."
+                )
                 message = f"Force-terminated running task {task_id}."
                 self._record_cancel_action(db, task_id=task_id, strategy=strategy, outcome="accepted", message=message)
                 return {"status": "accepted", "cancel_strategy": strategy, "message": message}
@@ -961,6 +1003,9 @@ class OperationsJobService:
                     celery_app.control.revoke(task_id, terminate=True, signal='SIGTERM')
                 except Exception:
                     logger.exception("Failed to revoke task %s during force_cancel_refresh cleanup", task_id)
+                _fail_orphaned_batch_row(
+                    db, record.task_name, task_id, "Force-cleared failed task via Operations dashboard."
+                )
                 message = f"Cleared failed task {task_id} from the job console."
                 self._record_cancel_action(db, task_id=task_id, strategy=strategy, outcome="accepted", message=message)
                 return {"status": "accepted", "cancel_strategy": strategy, "message": message}
@@ -985,6 +1030,9 @@ class OperationsJobService:
                 celery_app.control.revoke(task_id, terminate=True, signal='SIGTERM')
             except Exception:
                 logger.exception("Failed to revoke task %s during force_cancel_refresh", task_id)
+            _fail_orphaned_batch_row(
+                db, record.task_name, task_id, "Force-cancelled as a stale external fetch task via Operations dashboard."
+            )
             from app.wiring.bootstrap import get_price_cache
 
             get_price_cache().clear_warmup_heartbeat(market=market)
