@@ -16,6 +16,7 @@ from ...services.options_metrics import (
     compute_options_metrics,
     compute_key_gamma_levels,
     get_iv_term_structure,
+    OPTIONS_METRICS_SCHEMA_VERSION,
 )
 from ...services.options_snapshot_upsert import upsert_snapshot, trading_date_for
 from ...services.symbol_format import normalize_symbol
@@ -318,15 +319,19 @@ async def post_options_metrics(payload: Dict[str, Any], db: Session = Depends(ge
           # strikes -- never the fuller calculate_options_metrics() below,
           # since it doesn't fetch the 1mo price history or per-strike
           # lastPrice/volume that HV/VRP/expected_move/premium notionals
-          # need. `underlying_price` only ever appears in a
-          # calculate_options_metrics() payload, so its absence means this
-          # is a batch-authored entry -- serving it as-is would permanently
-          # show blank HV/VRP/Expected Move/Premium PCR for up to the 7-day
-          # TTL on every ticker the batch (not a live dashboard view)
-          # touched last. Fall through to a live compute instead; that live
-          # compute re-caches a complete payload below, self-healing this
-          # key for the next 7 days.
-          if "underlying_price" in cached_data:
+          # need. That abbreviated payload has no `schema_version` at all,
+          # so the check below already rejects it same as any outdated one.
+          #
+          # Comparing the whole schema_version (not just checking for one
+          # field's presence, the previous approach) also catches a FULL
+          # payload cached by an older version of calculate_options_metrics
+          # -- e.g. entries cached before iv_smile/unusual_volume existed
+          # had underlying_price and would have passed a presence check,
+          # silently missing those fields for up to their full 7-day TTL.
+          # Fall through to a live compute instead; that live compute
+          # re-caches a current payload below, self-healing this key for
+          # the next 7 days.
+          if cached_data.get("schema_version") == OPTIONS_METRICS_SCHEMA_VERSION:
             return cached_data
       except Exception:
         # cache miss or error — fall back to live fetch

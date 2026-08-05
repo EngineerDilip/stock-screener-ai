@@ -61,7 +61,6 @@ export default function OptionsAnalyticsDashboardPage() {
   const [gexData, setGexData] = useState(null);
   const [maxPainData, setMaxPainData] = useState(null);
   const [optionsMetrics, setOptionsMetrics] = useState(null);
-  const [analysisData, setAnalysisData] = useState(null);
 
   // Live, per-expiration term structure (Max Pain + GEX + options metrics
   // for the specific expiration picked in ExpirationSelector, computed from
@@ -121,7 +120,6 @@ export default function OptionsAnalyticsDashboardPage() {
       setGexData(null);
       setMaxPainData(null);
       setOptionsMetrics(null);
-      setAnalysisData(null);
       setError(null);
       return;
     }
@@ -132,22 +130,19 @@ export default function OptionsAnalyticsDashboardPage() {
       setGexData(null);
       setMaxPainData(null);
       setOptionsMetrics(null);
-      setAnalysisData(null);
 
       try {
-        const [gexResp, maxPainResp, optionsResp, analysisResp] = await Promise.all([
+        const [gexResp, maxPainResp, optionsResp] = await Promise.all([
           apiClient.get('/v1/gex/dashboard', { params: { symbol: selectedTicker.symbol } }).catch(() => null),
           apiClient.get('/v1/max-pain/dashboard', { params: { symbol: selectedTicker.symbol } }).catch(() => null),
           apiClient.post('/v1/options/metrics', { symbol: selectedTicker.symbol }).catch(() => null),
-          apiClient.get(`/v1/options/analysis/${selectedTicker.symbol}`).catch(() => null),
         ]);
 
         setGexData(gexResp?.data ?? null);
         setMaxPainData(maxPainResp?.data ?? null);
         setOptionsMetrics(optionsResp?.data ?? null);
-        setAnalysisData(analysisResp?.data ?? null);
 
-        if (!gexResp && !maxPainResp && !optionsResp && !analysisResp) {
+        if (!gexResp && !maxPainResp && !optionsResp) {
           setError('No data available for this ticker');
         }
       } catch (err) {
@@ -321,23 +316,32 @@ export default function OptionsAnalyticsDashboardPage() {
       })
     : maxPainData?.rows?.[0];
 
-  const displayAnalysisData = selectedExpiration
-    ? (termStructureData && {
-        call_wall: { strike: termStructureData.call_wall, gex: termStructureData.call_wall_gex },
-        put_wall: { strike: termStructureData.put_wall, gex: termStructureData.put_wall_gex },
-        flip_level:
-          termStructureData.key_levels?.zero_gamma != null
-            ? { strike: termStructureData.key_levels.zero_gamma, cumulative_gex: null }
-            : null,
-        spot_price: termStructureData.underlying_price,
-        timestamp: termStructureData.computed_at,
-      })
-    : analysisData;
-
   // The term-structure payload IS the same shape calculate_options_metrics()
   // returns for /v1/options/metrics -- no field mapping needed, it drops
   // straight into SummaryCards.
   const displayOptionsMetrics = selectedExpiration ? termStructureData : optionsMetrics;
+
+  // Structural Levels always derives from this same live payload now, in
+  // both the default and live-expiration cases -- it previously fell back
+  // to a SEPARATE, independently-computed endpoint (/v1/options/analysis,
+  // the nightly batch's own 3-expiration GEX sweep) for the default case,
+  // which could legitimately disagree with (or be null when) this payload's
+  // own key_levels.zero_gamma wasn't -- e.g. Flip Level showing "N/A" here
+  // while the Gamma Exposure card's own (still batch-sourced, untouched by
+  // this) flip_level showed a real number, from two unrelated
+  // computations that had no reason to agree in the first place.
+  const displayAnalysisData = displayOptionsMetrics
+    ? {
+        call_wall: { strike: displayOptionsMetrics.call_wall, gex: displayOptionsMetrics.call_wall_gex },
+        put_wall: { strike: displayOptionsMetrics.put_wall, gex: displayOptionsMetrics.put_wall_gex },
+        flip_level:
+          displayOptionsMetrics.key_levels?.zero_gamma != null
+            ? { strike: displayOptionsMetrics.key_levels.zero_gamma, cumulative_gex: null }
+            : null,
+        spot_price: displayOptionsMetrics.underlying_price,
+        timestamp: displayOptionsMetrics.computed_at,
+      }
+    : null;
 
   const callGexStatus = getGexStatus(gexRow?.call_gex);
   const putGexStatus = getGexStatus(gexRow?.put_gex);
@@ -798,7 +802,7 @@ export default function OptionsAnalyticsDashboardPage() {
             <Paper sx={{ p: 2, mb: 3 }}>
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
                 <Typography variant="h6">
-                  📊 Structural Levels {selectedExpiration ? `(Live: ${selectedExpiration})` : '(Batch Analysis)'}
+                  📊 Structural Levels {selectedExpiration ? `(Live: ${selectedExpiration})` : '(Live: nearest expiration)'}
                 </Typography>
                 <LastUpdated timestamp={displayAnalysisData.timestamp} />
               </Box>
@@ -964,7 +968,7 @@ export default function OptionsAnalyticsDashboardPage() {
               <Typography variant="caption" sx={{ mt: 2, display: 'block', color: 'text.secondary' }}>
                 {selectedExpiration
                   ? `ℹ️ Live term structure computed just now for ${selectedExpiration}`
-                  : 'ℹ️ Updated nightly at 23:00 UTC via batch analysis job'}
+                  : 'ℹ️ Live yfinance option-chain compute for the nearest expiration -- see the timestamp above for exactly when (may be a recent cache hit, not necessarily this instant).'}
               </Typography>
             </Paper>
           )}

@@ -22,6 +22,19 @@ import math
 
 _ET = ZoneInfo("America/New_York")
 
+# Bumped whenever calculate_options_metrics()'s payload shape changes (a
+# field added/removed/renamed). POST /v1/options/metrics' cache-hit check
+# compares this against a cached entry's own "schema_version" to decide
+# whether to trust it -- checking for one specific field's presence (the
+# previous approach) only catches the batch-vs-live distinction, not "this
+# was cached by an OLDER version of this function and is missing whatever
+# field got added most recently." Every past instance of that exact bug
+# (missing iv_smile/unusual_volume in entries cached before this field
+# existed) silently sat in Redis for up to its full 7-day TTL. Bump this
+# any time the payload shape changes so old entries stop being trusted
+# immediately instead of waiting out their TTL.
+OPTIONS_METRICS_SCHEMA_VERSION = 2
+
 import pandas as pd
 
 if TYPE_CHECKING:
@@ -879,6 +892,7 @@ def calculate_options_metrics(
         # cache hit at the API layer). Naive UTC, same convention as
         # fetched_at elsewhere in this codebase.
         "computed_at": datetime.utcnow().isoformat(),
+        "schema_version": OPTIONS_METRICS_SCHEMA_VERSION,
     })
     return result
 

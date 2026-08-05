@@ -77,3 +77,4 @@ class OptionsMetricsResponse(BaseModel):
     max_pain_distance_pct: Optional[float] = None
     greeks_methodology: Optional[str] = None
     computed_at: Optional[str] = None
+    schema_version: Optional[int] = None
