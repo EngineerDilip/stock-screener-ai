@@ -26,6 +26,24 @@ class NetExposures(BaseModel):
     net_cex: float
 
 
+class IvSmilePoint(BaseModel):
+    strike: float
+    iv: float
+
+
+class IvSmile(BaseModel):
+    calls: List[IvSmilePoint]
+    puts: List[IvSmilePoint]
+
+
+class UnusualVolumeContract(BaseModel):
+    strike: float
+    type: str
+    volume: int
+    open_interest: int
+    ratio: float
+
+
 class OptionsMetricsResponse(BaseModel):
     ticker: Optional[str] = None
     expiration: Optional[str] = None
@@ -53,6 +71,8 @@ class OptionsMetricsResponse(BaseModel):
     put_wall: Optional[float] = None
     call_wall_gex: Optional[float] = None
     put_wall_gex: Optional[float] = None
+    iv_smile: Optional[IvSmile] = None
+    unusual_volume: List[UnusualVolumeContract] = []
     max_pain_strike: Optional[float] = None
     max_pain_distance_pct: Optional[float] = None
     greeks_methodology: Optional[str] = None

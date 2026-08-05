@@ -280,6 +280,64 @@ def compute_skew(options_chain: List[Dict[str, Any]], target_delta: float = 0.25
         return None
 
 
+def extract_iv_smile(calls: pd.DataFrame, puts: pd.DataFrame) -> Dict[str, List[Dict[str, float]]]:
+    """Per-strike IV for calls and puts, kept as two separate series.
+
+    Unlike aggregate_by_strike()'s `iv_avg` (which blends call+put IV at each
+    strike into one number for the GEX/DEX aggregation), a smile/skew chart
+    needs the two sides kept apart -- that gap between them *is* the skew.
+
+    Rows with IV <= 0 are dropped: yfinance reports impliedVolatility=0 for
+    stale/no-quote contracts, not a real zero-volatility market, and plotting
+    them would show a fake spike to zero at illiquid strikes.
+    """
+    def _rows(df: pd.DataFrame) -> List[Dict[str, float]]:
+        if df is None or df.empty or "strike" not in df.columns or "impliedVolatility" not in df.columns:
+            return []
+        valid = df[(df["impliedVolatility"] > 0) & df["strike"].notna()]
+        return [
+            {"strike": float(row["strike"]), "iv": float(row["impliedVolatility"])}
+            for _, row in valid.sort_values("strike").iterrows()
+        ]
+
+    return {"calls": _rows(calls), "puts": _rows(puts)}
+
+
+def find_unusual_volume(
+    calls: pd.DataFrame, puts: pd.DataFrame, min_ratio: float = 1.5
+) -> List[Dict[str, Any]]:
+    """Contracts trading at an unusual multiple of their existing open
+    interest today (volume / open_interest > min_ratio) -- a rough "someone
+    is doing something today, not just holding an existing position" flag.
+
+    Requires open_interest > 0: a contract with volume today but zero prior
+    OI has no existing position size to compare against (and would otherwise
+    divide by zero), so it's excluded rather than treated as "infinitely
+    unusual".
+    """
+    rows: List[Dict[str, Any]] = []
+    for df, option_type in ((calls, "call"), (puts, "put")):
+        if df is None or df.empty or "strike" not in df.columns:
+            continue
+        for _, row in df.iterrows():
+            oi = _safe_int(row.get("openInterest"))
+            volume = _safe_float(row.get("volume"))
+            if oi <= 0:
+                continue
+            ratio = volume / oi
+            if ratio > min_ratio:
+                rows.append({
+                    "strike": float(row["strike"]),
+                    "type": option_type,
+                    "volume": int(volume),
+                    "open_interest": oi,
+                    "ratio": round(ratio, 2),
+                })
+
+    rows.sort(key=lambda r: r["ratio"], reverse=True)
+    return rows
+
+
 def _safe_int(value: Any, default: int = 0) -> int:
     if value is None:
         return default
@@ -710,6 +768,9 @@ def calculate_options_metrics(
     call_premium_notional = float((calls["volume"] * calls["lastPrice"] * 100).sum())
     put_premium_notional = float((puts["volume"] * puts["lastPrice"] * 100).sum())
 
+    iv_smile = extract_iv_smile(calls, puts)
+    unusual_volume = find_unusual_volume(calls, puts)
+
     options_chain = []
     for _, row in calls.iterrows():
         options_chain.append({
@@ -799,6 +860,8 @@ def calculate_options_metrics(
         # is for a wall).
         "call_wall_gex": call_wall_gex,
         "put_wall_gex": put_wall_gex,
+        "iv_smile": iv_smile,
+        "unusual_volume": unusual_volume,
         "max_pain_strike": max_pain_strike,
         "max_pain_distance_pct": (
             ((underlying_price - max_pain_strike) / max_pain_strike) * 100.0
@@ -818,6 +881,85 @@ def calculate_options_metrics(
         "computed_at": datetime.utcnow().isoformat(),
     })
     return result
+
+
+def get_iv_term_structure(ticker: str, max_expirations: int = 8) -> List[Dict[str, Any]]:
+    """ATM IV across the nearest `max_expirations` expirations -- a live
+    cross-section of IV vs time-to-expiry (contango/backwardation), not a
+    per-ticker history the way iv_history is. Each expiration needs its own
+    yfinance option_chain() fetch, so this costs up to `max_expirations`
+    live round-trips (rate-limited between each, same as everywhere else in
+    this module) -- meaningfully more expensive than every other function
+    here, which do one fetch. Callers should treat this as an explicitly
+    on-demand chart, not something bundled into the default metrics payload.
+
+    Deliberately does not touch iv_history (see
+    calculate_options_metrics' record_iv_history docstring) -- writing N
+    different expirations' IV into that single per-ticker-per-day series
+    would corrupt it far worse than a single non-default expiration would.
+    """
+    from .yfinance_service import YFinanceService
+    import yfinance as yf
+
+    svc = YFinanceService()
+    try:
+        from .yf_session import get_session
+        session = get_session()
+    except Exception:
+        session = None
+    yf_ticker = yf.Ticker(ticker, session=session) if session is not None else yf.Ticker(ticker)
+
+    expirations = list(getattr(yf_ticker, "options", []) or [])[:max_expirations]
+    if not expirations:
+        return []
+
+    svc._wait_for_yfinance_rate_limit()
+    history = svc.get_historical_data(ticker, period="1mo", interval="1d", use_cache=False)
+    underlying_price = None
+    if history is not None and not history.empty and "Close" in history.columns:
+        closes = history["Close"].dropna()
+        if not closes.empty:
+            underlying_price = _safe_float(closes.iloc[-1])
+    if not underlying_price:
+        info = getattr(yf_ticker, "info", {}) or {}
+        underlying_price = _safe_float(
+            info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
+        )
+    if not underlying_price:
+        raise ValueError(f"Unable to determine underlying price for {ticker}")
+
+    today = datetime.now(_ET).date()
+    curve: List[Dict[str, Any]] = []
+    for expiration in expirations:
+        svc._wait_for_yfinance_rate_limit()
+        try:
+            chain = yf_ticker.option_chain(expiration)
+        except Exception:
+            continue
+
+        calls = chain.calls if hasattr(chain, "calls") else pd.DataFrame()
+        puts = chain.puts if hasattr(chain, "puts") else pd.DataFrame()
+        call_row = _find_valid_atm_option(calls, underlying_price)
+        put_row = _find_valid_atm_option(puts, underlying_price)
+        call_iv = _safe_float(call_row["impliedVolatility"]) if call_row is not None else None
+        put_iv = _safe_float(put_row["impliedVolatility"]) if put_row is not None else None
+        atm_iv = call_iv if call_iv is not None else put_iv
+        if atm_iv is None:
+            continue
+
+        try:
+            exp_date = datetime.strptime(expiration, "%Y-%m-%d").date()
+            days_to_expiry = max(0, (exp_date - today).days)
+        except ValueError:
+            days_to_expiry = None
+
+        curve.append({
+            "expiration": expiration,
+            "atm_iv": atm_iv,
+            "days_to_expiry": days_to_expiry,
+        })
+
+    return curve
 
 
 def compute_options_metrics(options_chain: List[Dict[str, Any]], spot: float, current_iv: Optional[float] = None,

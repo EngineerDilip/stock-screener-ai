@@ -11,7 +11,12 @@ from typing import List, Dict, Any, Optional
 from ...database import get_db
 from ...models.max_pain import MaxPainSnapshot
 from ...models.gex import GexSnapshot
-from ...services.options_metrics import calculate_options_metrics, compute_options_metrics, compute_key_gamma_levels
+from ...services.options_metrics import (
+    calculate_options_metrics,
+    compute_options_metrics,
+    compute_key_gamma_levels,
+    get_iv_term_structure,
+)
 from ...services.options_snapshot_upsert import upsert_snapshot, trading_date_for
 from ...services.symbol_format import normalize_symbol
 from ...schemas.options_metrics import OptionsMetricsResponse
@@ -104,6 +109,55 @@ async def get_options_expirations(symbol: str) -> dict:
     try:
         redis_client = get_redis_client()
         redis_client.setex(cache_key, 3600, json.dumps(result))
+    except Exception:
+        pass
+
+    return result
+
+
+@router.get("/iv-term-structure/{symbol}")
+async def get_iv_term_structure_endpoint(
+    symbol: str,
+    max_expirations: int = Query(8, ge=2, le=12, description="Number of nearest expirations to sample"),
+) -> dict:
+    """ATM IV across the nearest expirations -- a live cross-section
+    (contango/backwardation), not a history. See get_iv_term_structure()'s
+    docstring for why this isn't cheap: it's `max_expirations` live yfinance
+    option-chain fetches, not one.
+
+    Cached in Redis for 30 minutes (short vs. e.g. /expirations' 1h TTL,
+    since this reflects live positioning rather than a static expiration
+    list) so repeat views of the same ticker don't re-pay that cost.
+    """
+    normalized_symbol = normalize_symbol(symbol)
+    if normalized_symbol is None:
+        raise HTTPException(status_code=422, detail=f"Invalid symbol format: {symbol!r}")
+
+    cache_key = f"iv_term_structure:{normalized_symbol}:{max_expirations}"
+    try:
+        redis_client = get_redis_client()
+        cached = redis_client.get(cache_key)
+        if cached:
+            return json.loads(cached)
+    except Exception:
+        pass
+
+    try:
+        curve = get_iv_term_structure(normalized_symbol, max_expirations=max_expirations)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    result = {
+        "symbol": normalized_symbol,
+        "as_of": datetime.utcnow().isoformat(),
+        "curve": curve,
+    }
+
+    try:
+        redis_client = get_redis_client()
+        redis_client.setex(cache_key, 1800, json.dumps(result))
     except Exception:
         pass
 

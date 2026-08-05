@@ -25,6 +25,9 @@ import PrintIcon from '@mui/icons-material/Print';
 import apiClient from '../api/client';
 import SummaryCards from '../components/OptionsMetrics/SummaryCards';
 import StrikeExposureChart from '../components/OptionsMetrics/StrikeExposureChart';
+import IVSmileChart from '../components/OptionsMetrics/IVSmileChart';
+import IVTermStructureChart from '../components/OptionsMetrics/IVTermStructureChart';
+import UnusualVolumeTable from '../components/OptionsMetrics/UnusualVolumeTable';
 import MetricHistoryChart from '../components/OptionsMetrics/MetricHistoryChart';
 import ExpirationSelector from '../components/OptionsMetrics/ExpirationSelector';
 import LastUpdated from '../components/OptionsMetrics/LastUpdated';
@@ -983,6 +986,12 @@ export default function OptionsAnalyticsDashboardPage() {
                 putWall={displayOptionsMetrics.key_levels?.put_wall}
                 zeroGamma={displayOptionsMetrics.key_levels?.zero_gamma}
               />
+              <IVSmileChart
+                ivSmile={displayOptionsMetrics.iv_smile}
+                spot={displayOptionsMetrics.underlying_price}
+              />
+              <IVTermStructureChart symbol={selectedTicker.symbol} />
+              <UnusualVolumeTable contracts={displayOptionsMetrics.unusual_volume} />
               <Paper sx={{ p: 2, mt: 3 }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
                   <Typography variant="h6" sx={{ mr: 1 }}>
