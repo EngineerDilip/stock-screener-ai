@@ -14,6 +14,12 @@ import {
   Chip,
   Autocomplete,
   Button,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
 } from '@mui/material';
 import PrintIcon from '@mui/icons-material/Print';
 import apiClient from '../api/client';
@@ -22,6 +28,19 @@ import StrikeExposureChart from '../components/OptionsMetrics/StrikeExposureChar
 import MetricHistoryChart from '../components/OptionsMetrics/MetricHistoryChart';
 import ExpirationSelector from '../components/OptionsMetrics/ExpirationSelector';
 import LastUpdated from '../components/OptionsMetrics/LastUpdated';
+
+// Human-readable label + one-line rationale per evaluateMarketFactors() key,
+// used only by the factor-breakdown table -- keeps that table's copy in one
+// place instead of scattered across the sentence strings in evaluateMarketFactors.
+const MARKET_FACTOR_LABELS = {
+  gex: { label: 'Total GEX', why: 'Dominant dealer-hedging-flow signal' },
+  skew: { label: '25Δ Volatility Skew', why: 'Put vs call IV demand' },
+  maxPain: { label: 'Max Pain Pull', why: 'Weak, contested on its own' },
+  premiumPcr: { label: 'Premium Put/Call Ratio', why: 'Dollar-weighted flow' },
+  openInterest: { label: 'Open Interest Skew', why: 'Call OI vs put OI' },
+  callWallBreak: { label: 'Call Wall Break', why: 'Resistance no longer holding' },
+  putWallBreak: { label: 'Put Wall Break', why: 'Support no longer holding' },
+};
 
 export default function OptionsAnalyticsDashboardPage() {
   const queryClient = useQueryClient();
@@ -324,127 +343,177 @@ export default function OptionsAnalyticsDashboardPage() {
   const callOiStatus = getOpenInterestStatus(maxPainRow?.call_oi, maxPainRow?.put_oi, 'call');
   const putOiStatus = getOpenInterestStatus(maxPainRow?.call_oi, maxPainRow?.put_oi, 'put');
 
-  const getOverallConclusion = () => {
+  // Every directional factor the Market Conclusion draws on, computed once so
+  // the headline label (getMarketSignal) and the narrative sentences
+  // (getOverallConclusion) can never drift apart -- previously maxPain fed
+  // the narrative text but was silently absent from the label's own logic.
+  //
+  // Deliberately excluded as votes (shown elsewhere on the page as context,
+  // not opinions): IV Rank, Historical Volatility, VRP, and Expected Move
+  // are magnitude/pricing-context metrics, not price-direction signals --
+  // forcing them into a bullish/bearish vote would be dishonest. Net DEX/
+  // VEX/CEX are already presented neutrally elsewhere on this page
+  // (getExposureSignStatus never assigns a bullish/bearish color), so they
+  // stay contextual here too rather than getting a vote this page doesn't
+  // give them anywhere else.
+  //
+  // Weights: GEX is the dominant dealer-hedging-flow risk and gets the
+  // heaviest weight (2), matching the priority-over-skew rule already
+  // established below. Max pain gets the lightest weight (0.5) since it's
+  // a weak/contested predictor even by its own card's description ("not a
+  // reliable predictor on its own"). Wall breaks only vote when they've
+  // actually happened (not "near"), since "near" is inherently ambiguous.
+  const evaluateMarketFactors = () => {
+    const factors = [];
+
     const totalGex = gexRow?.total_gex != null ? Number(gexRow.total_gex) : null;
-    const skew = displayOptionsMetrics?.skew != null ? Number(displayOptionsMetrics.skew) : null;
-    const maxPain = maxPainRow?.distance_pct != null ? Number(maxPainRow.distance_pct) : null;
-
-    if (totalGex == null && skew == null && maxPain == null) {
-      return null;
-    }
-
-    const sentences = [];
-
     if (totalGex != null) {
-      if (totalGex > 0) {
-        sentences.push('Total GEX is positive, indicating a long-gamma regime that may support upward pressure as option sellers hedge into rising prices.');
-      } else if (totalGex < 0) {
-        sentences.push('Total GEX is negative, indicating a short-gamma regime that may amplify downside moves as option sellers hedge into falling prices.');
-      } else {
-        sentences.push('Total GEX is neutral, indicating balanced gamma exposure.');
-      }
+      factors.push({
+        key: 'gex',
+        weight: 2,
+        vote: totalGex > 0 ? 1 : totalGex < 0 ? -1 : 0,
+        sentence:
+          totalGex > 0
+            ? 'Total GEX is positive, indicating a long-gamma regime that may support upward pressure as option sellers hedge into rising prices.'
+            : totalGex < 0
+              ? 'Total GEX is negative, indicating a short-gamma regime that may amplify downside moves as option sellers hedge into falling prices.'
+              : 'Total GEX is neutral, indicating balanced gamma exposure.',
+      });
     }
 
+    const skew = displayOptionsMetrics?.skew != null ? Number(displayOptionsMetrics.skew) : null;
     if (skew != null) {
-      if (skew > 0) {
-        sentences.push('Volatility skew is positive, showing put skew and suggesting demand for downside protection.');
-      } else if (skew < 0) {
-        sentences.push('Volatility skew is negative, showing call skew and suggesting bullish interest in upside risk.');
-      } else {
-        sentences.push('Volatility skew is neutral, showing no strong call/put bias.');
-      }
+      factors.push({
+        key: 'skew',
+        weight: 1,
+        vote: skew < 0 ? 1 : skew > 0 ? -1 : 0,
+        sentence:
+          skew > 0
+            ? 'Volatility skew is positive, showing put skew and suggesting demand for downside protection.'
+            : skew < 0
+              ? 'Volatility skew is negative, showing call skew and suggesting bullish interest in upside risk.'
+              : 'Volatility skew is neutral, showing no strong call/put bias.',
+      });
     }
 
+    const maxPain = maxPainRow?.distance_pct != null ? Number(maxPainRow.distance_pct) : null;
     if (maxPain != null) {
-      if (maxPain < -0.5) {
-        sentences.push('Price is below max pain, which may reflect heavier put exposure and a potential support area.');
-      } else if (maxPain > 0.5) {
-        sentences.push('Price is above max pain, which may reflect heavier call exposure and a potential resistance area.');
-      } else {
-        sentences.push('Price is close to max pain, suggesting the options market is relatively balanced around current levels.');
-      }
+      // Max pain theory: price tends to drift toward max pain into expiry,
+      // so being meaningfully above/below it is a mild pull in the
+      // OPPOSITE direction -- not "above max pain = bullish".
+      factors.push({
+        key: 'maxPain',
+        weight: 0.5,
+        vote: maxPain > 0.5 ? -1 : maxPain < -0.5 ? 1 : 0,
+        sentence:
+          maxPain > 0.5
+            ? 'Price is above max pain, which may reflect heavier call exposure and a mild pull back toward max pain into expiry.'
+            : maxPain < -0.5
+              ? 'Price is below max pain, which may reflect heavier put exposure and a mild pull back toward max pain into expiry.'
+              : 'Price is close to max pain, suggesting the options market is relatively balanced around current levels.',
+      });
     }
 
-    const { advice } = getMarketSignal();
+    const callPremium = displayOptionsMetrics?.call_premium_notional;
+    const putPremium = displayOptionsMetrics?.put_premium_notional;
+    const premiumPcr = callPremium != null && putPremium != null ? putPremium / (callPremium || 1) : null;
+    if (premiumPcr != null) {
+      // Same call-biased/put-biased thresholds as the Premium Put/Call
+      // Ratio card itself (SummaryCards.jsx getMetricStatus('premium_pcr')).
+      factors.push({
+        key: 'premiumPcr',
+        weight: 1,
+        vote: premiumPcr < 0.7 ? 1 : premiumPcr > 1.5 ? -1 : 0,
+        sentence:
+          premiumPcr < 0.7
+            ? 'Premium put/call ratio is call-biased -- real dollars are flowing predominantly into calls today.'
+            : premiumPcr > 1.5
+              ? 'Premium put/call ratio is put-biased -- real dollars are flowing predominantly into puts today.'
+              : 'Premium put/call ratio is roughly balanced between calls and puts.',
+      });
+    }
 
-    return `${sentences.join(' ')} ${advice}`;
+    const callOi = maxPainRow?.call_oi != null ? Number(maxPainRow.call_oi) : null;
+    const putOi = maxPainRow?.put_oi != null ? Number(maxPainRow.put_oi) : null;
+    if (callOi != null && putOi != null) {
+      // Same 1.15x threshold as getOpenInterestStatus above.
+      const vote = callOi > putOi * 1.15 ? 1 : putOi > callOi * 1.15 ? -1 : 0;
+      factors.push({
+        key: 'openInterest',
+        weight: 1,
+        vote,
+        sentence:
+          vote === 1
+            ? 'Call open interest exceeds put open interest, suggesting bullish or resistance-testing positioning.'
+            : vote === -1
+              ? 'Put open interest exceeds call open interest, suggesting protective or bearish positioning.'
+              : 'Call and put open interest are roughly balanced.',
+      });
+    }
+
+    const spot = displayAnalysisData?.spot_price;
+    const callWallStrike = displayAnalysisData?.call_wall?.strike;
+    const putWallStrike = displayAnalysisData?.put_wall?.strike;
+    if (spot != null && callWallStrike != null && spot >= callWallStrike) {
+      factors.push({
+        key: 'callWallBreak',
+        weight: 1,
+        vote: 1,
+        sentence: 'Price has pushed above the call wall, suggesting that resistance is no longer holding.',
+      });
+    }
+    if (spot != null && putWallStrike != null && spot <= putWallStrike) {
+      factors.push({
+        key: 'putWallBreak',
+        weight: 1,
+        vote: -1,
+        sentence: 'Price has fallen below the put wall, suggesting that support is no longer holding.',
+      });
+    }
+
+    return factors;
   };
 
-  // Total GEX reflects the dominant dealer-hedging-flow risk (short gamma
-  // amplifies moves, long gamma dampens them) and takes priority over skew.
-  // Skew is only used as a secondary confirming/tie-breaking signal — it must
-  // never flip a negative-GEX (short-gamma) regime into a "Bullish" badge.
-  const getMarketSignal = () => {
-    const totalGex = gexRow?.total_gex != null ? Number(gexRow.total_gex) : null;
-    const skew = displayOptionsMetrics?.skew != null ? Number(displayOptionsMetrics.skew) : null;
-    const maxPain = maxPainRow?.distance_pct != null ? Number(maxPainRow.distance_pct) : null;
+  const marketFactors = evaluateMarketFactors();
 
-    if (totalGex == null && skew == null && maxPain == null) {
-      return null;
-    }
+  // Weighted sum of every factor's vote -- see evaluateMarketFactors above
+  // for what's included/excluded and why. Thresholds are set relative to
+  // the max possible score (2 + 1 + 0.5 + 1 + 1 + 1(each wall) = 7.5) so
+  // "Buy"/"Sell" require several factors actually agreeing, not just GEX
+  // alone -- GEX alone (weight 2) now lands as Bullish/Bearish, matching
+  // the old behavior for the single-factor case.
+  const getMarketSignal = (factors) => {
+    if (!factors || factors.length === 0) return null;
+    const score = factors.reduce((sum, f) => sum + f.weight * f.vote, 0);
 
-    if (totalGex > 0 && skew < 0) {
-      return {
-        label: 'Buy',
-        chipColor: 'success',
-        textColor: 'success.main',
-        advice: 'Buy.',
-      };
+    if (score >= 3) {
+      return { label: 'Buy', chipColor: 'success', textColor: 'success.main', advice: 'Buy.' };
     }
-    if (totalGex < 0 && skew > 0) {
-      return {
-        label: 'Sell',
-        chipColor: 'error',
-        textColor: 'error.main',
-        advice: 'Sell.',
-      };
+    if (score >= 1) {
+      return { label: 'Bullish', chipColor: 'success', textColor: 'success.main', advice: 'Keep with bullish bias.' };
     }
-    if (totalGex < 0) {
-      // Short gamma alone is a downside-risk signal — never label it Bullish,
-      // even when skew leans bullish (e.g. ACN: negative total GEX with
-      // negative/call skew previously showed an incorrect "Bullish" badge).
-      return {
-        label: 'Bearish',
-        chipColor: 'error',
-        textColor: 'error.main',
-        advice: 'Keep with bearish/cautious bias.',
-      };
+    if (score <= -3) {
+      return { label: 'Sell', chipColor: 'error', textColor: 'error.main', advice: 'Sell.' };
     }
-    if (totalGex > 0) {
-      return {
-        label: 'Bullish',
-        chipColor: 'success',
-        textColor: 'success.main',
-        advice: 'Keep with bullish bias.',
-      };
+    if (score <= -1) {
+      return { label: 'Bearish', chipColor: 'error', textColor: 'error.main', advice: 'Keep with bearish/cautious bias.' };
     }
-    // totalGex is zero/unavailable — fall back to skew alone as a secondary signal.
-    if (skew > 0) {
-      return {
-        label: 'Cautious',
-        chipColor: 'warning',
-        textColor: 'warning.main',
-        advice: 'Keep with cautious bias.',
-      };
-    }
-    if (skew < 0) {
-      return {
-        label: 'Bullish',
-        chipColor: 'success',
-        textColor: 'success.main',
-        advice: 'Keep with bullish bias.',
-      };
-    }
-
     return {
       label: 'Neutral',
       chipColor: 'default',
       textColor: 'text.secondary',
-      advice: 'Keep position.',
+      advice: 'Keep position; signals are mixed or too weak for a clear bias.',
     };
   };
 
-  const marketSignal = getMarketSignal();
+  const getOverallConclusion = (factors) => {
+    if (!factors || factors.length === 0) return null;
+    const sentences = factors.map((f) => f.sentence);
+    const { advice } = getMarketSignal(factors);
+    return `${sentences.join(' ')} ${advice}`;
+  };
+
+  const marketSignal = getMarketSignal(marketFactors);
 
   return (
     <Container maxWidth="xl" sx={{ py: 2 }}>
@@ -938,8 +1007,74 @@ export default function OptionsAnalyticsDashboardPage() {
                   )}
                 </Box>
                 <Typography variant="body2" color="text.secondary">
-                  {getOverallConclusion() || 'No conclusion available due to missing metric data.'}
+                  {getOverallConclusion(marketFactors) || 'No conclusion available due to missing metric data.'}
                 </Typography>
+
+                {marketFactors.length > 0 && (
+                  <TableContainer sx={{ mt: 2 }}>
+                    <Table size="small">
+                      <TableHead>
+                        <TableRow>
+                          <TableCell>Factor</TableCell>
+                          <TableCell>Signal</TableCell>
+                          <TableCell align="right">Weight</TableCell>
+                          <TableCell align="right">Contribution</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {marketFactors.map((factor) => {
+                          const meta = MARKET_FACTOR_LABELS[factor.key] || { label: factor.key, why: '' };
+                          const contribution = factor.weight * factor.vote;
+                          const voteLabel = factor.vote > 0 ? 'Bullish' : factor.vote < 0 ? 'Bearish' : 'Neutral';
+                          const voteColor = factor.vote > 0 ? 'success' : factor.vote < 0 ? 'error' : 'default';
+                          return (
+                            <TableRow key={factor.key}>
+                              <TableCell>
+                                <Typography variant="body2">{meta.label}</Typography>
+                                {meta.why && (
+                                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                                    {meta.why}
+                                  </Typography>
+                                )}
+                              </TableCell>
+                              <TableCell>
+                                <Chip label={voteLabel} color={voteColor} size="small" />
+                              </TableCell>
+                              <TableCell align="right">{factor.weight}</TableCell>
+                              <TableCell
+                                align="right"
+                                sx={{
+                                  color:
+                                    contribution > 0
+                                      ? 'success.main'
+                                      : contribution < 0
+                                        ? 'error.main'
+                                        : 'text.secondary',
+                                  fontWeight: 600,
+                                }}
+                              >
+                                {contribution > 0 ? '+' : ''}
+                                {contribution.toFixed(1)}
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
+                        <TableRow>
+                          <TableCell colSpan={3}>
+                            <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                              Total score
+                            </Typography>
+                          </TableCell>
+                          <TableCell align="right" sx={{ fontWeight: 700, color: marketSignal?.textColor }}>
+                            {marketFactors.reduce((sum, f) => sum + f.weight * f.vote, 0) > 0 ? '+' : ''}
+                            {marketFactors.reduce((sum, f) => sum + f.weight * f.vote, 0).toFixed(1)}
+                          </TableCell>
+                        </TableRow>
+                      </TableBody>
+                    </Table>
+                  </TableContainer>
+                )}
+
                 {/* Repeats the same timestamp shown next to the "Options Metrics"
                     heading above -- this card is long enough that the top-of-
                     section timestamp scrolls out of view, leaving the reader
