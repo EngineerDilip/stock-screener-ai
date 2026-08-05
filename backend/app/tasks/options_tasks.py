@@ -4,6 +4,7 @@ import logging
 
 from celery import shared_task
 
+from .market_queues import data_fetch_queue_for_market
 from .options_analysis_tasks import batch_analyze_options_exposure
 
 logger = logging.getLogger(__name__)
@@ -23,5 +24,13 @@ def schedule_daily_update(limit: int = 2000):
     just delegates to the shared batch instead of fetching again.
     """
     logger.info("Triggering consolidated options analysis batch (options metrics is now derived from it)")
-    return batch_analyze_options_exposure.delay(market='US', limit=limit)
+    # Explicit queue routing -- batch_analyze_options_exposure isn't in the
+    # default task_routes map, so a plain .delay() would dispatch it (and
+    # the per-batch pacing loop it runs for its full duration) on the
+    # general compute queue instead of data_fetch_us, same bug class as
+    # max_pain_tasks.schedule_daily_update.
+    return batch_analyze_options_exposure.apply_async(
+        kwargs={"market": "US", "limit": limit},
+        queue=data_fetch_queue_for_market("US"),
+    )
 

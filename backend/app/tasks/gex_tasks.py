@@ -420,7 +420,12 @@ def schedule_daily_update() -> dict:
     NOT cascade into the options update (chain_next=False).
     """
     logger.info("Triggering GEX update for full active universe (manual, standalone)")
-    task = update_gex.delay(chain_next=False)
+    # Explicit queue routing -- update_gex isn't in the default task_routes
+    # map, so a plain .delay() here would land it on the general compute
+    # queue instead of the single-concurrency data_fetch worker, same bug
+    # class as max_pain_tasks.schedule_daily_update (see its comment).
+    from .market_queues import data_fetch_queue_for_market
+    task = update_gex.apply_async(kwargs={"chain_next": False}, queue=data_fetch_queue_for_market("US"))
     return {
         "status": "queued",
         "task_id": task.id,

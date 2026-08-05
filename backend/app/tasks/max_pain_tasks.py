@@ -569,9 +569,9 @@ def update_max_pain(self, config_path: str | None = None, wait_until: str | None
 def schedule_daily_update():
     """
     Scheduled task to run daily max pain update.
-    
+
     Add to celery beat schedule:
-    
+
     from celery.schedules import crontab
     app.conf.beat_schedule = {
         'max-pain-nightly': {
@@ -581,4 +581,16 @@ def schedule_daily_update():
     }
     """
     logger.info("Triggering scheduled max pain update")
-    update_max_pain.delay()
+    # Explicit queue routing (not just .delay()) so the actual heavy,
+    # yfinance-hammering task lands on the single-concurrency data_fetch
+    # worker instead of the general compute queue. Routing the *wrapper*
+    # task (this function) to data_fetch_us -- via the beat entry's
+    # 'options': {'queue': ...} or SCHEDULED_TASKS' manual_dispatch_options
+    # -- does NOT propagate to update_max_pain: a plain .delay() call from
+    # inside a task dispatches on that task's own default route, not the
+    # caller's queue. update_max_pain isn't in celery_app.py's default
+    # task_routes map, so it was landing on the general 'celery' queue and
+    # tying up a general-compute worker for the full run -- exactly what
+    # the queue split was meant to prevent.
+    from .market_queues import data_fetch_queue_for_market
+    update_max_pain.apply_async(queue=data_fetch_queue_for_market("US"))
