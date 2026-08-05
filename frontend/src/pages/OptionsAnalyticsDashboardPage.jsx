@@ -735,7 +735,7 @@ export default function OptionsAnalyticsDashboardPage() {
             <Paper sx={{ p: 2, mb: 3 }}>
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
                 <Typography variant="h6">
-                  📊 Structural Levels {selectedExpiration ? `(Live: ${selectedExpiration})` : '(Live: nearest expiration)'}
+                  Structural Levels {selectedExpiration ? `(Live: ${selectedExpiration})` : '(Live: nearest expiration)'}
                 </Typography>
                 <LastUpdated timestamp={displayAnalysisData.timestamp} />
               </Box>
