@@ -20,7 +20,7 @@ from ..models.stock_universe import StockUniverse
 logger = logging.getLogger(__name__)
 
 
-def _chunked(items: list[str], chunk_size: int):
+def _chunked(items: list, chunk_size: int):
     """Yield fixed-size chunks from a list."""
     if chunk_size <= 0:
         chunk_size = 200
@@ -28,20 +28,25 @@ def _chunked(items: list[str], chunk_size: int):
         yield items[i:i + chunk_size]
 
 
-def _resolve_all_active_tickers(db: Session) -> list[str]:
-    """Return all active symbols from stock_universe."""
+def _resolve_all_active_tickers(db: Session) -> list[dict]:
+    """Return all active symbols (with company names) from stock_universe.
+
+    Including the name here lets max_pain_batch.py skip yfinance's `stock.info`
+    call per ticker -- by far the slowest yfinance endpoint -- since it's only
+    used for a display label that's already in our own database.
+    """
     rows = (
-        db.query(StockUniverse.symbol)
+        db.query(StockUniverse.symbol, StockUniverse.name)
         .filter(StockUniverse.active_filter())
         .order_by(StockUniverse.symbol.asc())
         .all()
     )
-    return [symbol for (symbol,) in rows if symbol]
+    return [{"symbol": symbol, "company_name": name} for symbol, name in rows if symbol]
 
 
 def _build_temp_universe_config(
     *,
-    tickers: list[str],
+    tickers: list[dict],
     strike_range_pct: float = 20.0,
     max_strikes: int = 30,
 ) -> str:
@@ -247,14 +252,18 @@ def parse_max_pain_output(xlsx_path: str, batch_id: str, db: Session) -> dict:
 
 
 @app.task(name='app.tasks.max_pain_tasks.update_max_pain', bind=True, max_retries=1)
-def update_max_pain(self, config_path: str | None = None, wait_until: str | None = None):
+def update_max_pain(self, config_path: str | None = None, wait_until: str | None = None, chain_next: bool = True):
     """
     Run max pain batch job and store results in database.
-    
+
     Args:
         config_path: Path to config JSON (default: scripts/max_pain_config.json)
         wait_until: HH:MM format to wait until before starting (optional)
-    
+        chain_next: If True (the default, used by the daily scheduled run),
+            triggers the GEX update when this run finishes. Manual/API-triggered
+            runs pass False so an operator re-running Max Pain alone doesn't
+            unexpectedly cascade into GEX and Options too.
+
     Returns:
         dict with task status and summary stats
     """
@@ -283,9 +292,12 @@ def update_max_pain(self, config_path: str | None = None, wait_until: str | None
             chunk_size = int(os.getenv("MAX_PAIN_UNIVERSE_CHUNK_SIZE", "50"))
             retry_minutes = float(os.getenv("MAX_PAIN_FULL_RETRY_MINUTES", "1.0"))
             retry_interval = float(os.getenv("MAX_PAIN_FULL_RETRY_INTERVAL_SEC", "10.0"))
+            fetch_concurrency = int(os.getenv("MAX_PAIN_FETCH_CONCURRENCY", "6"))
+            yfinance_rate_limit = float(os.getenv("MAX_PAIN_YFINANCE_RATE_LIMIT", "3.5"))
             logger.info(
                 f"[{batch_id}] Running full-universe max pain for {len(tickers)} active symbols "
-                f"in chunks of {chunk_size} (retry window {retry_minutes}m, interval {retry_interval}s)"
+                f"in chunks of {chunk_size} (retry window {retry_minutes}m, interval {retry_interval}s, "
+                f"fetch concurrency {fetch_concurrency}, rate limit {yfinance_rate_limit}/s)"
             )
 
             total_ok = 0
@@ -314,6 +326,10 @@ def update_max_pain(self, config_path: str | None = None, wait_until: str | None
                         str(retry_minutes),
                         "--retry-interval-sec",
                         str(retry_interval),
+                        "--fetch-concurrency",
+                        str(fetch_concurrency),
+                        "--rate-limit-per-sec",
+                        str(yfinance_rate_limit),
                     ]
 
                     if wait_until and chunk_index == 1:
@@ -424,6 +440,8 @@ def update_max_pain(self, config_path: str | None = None, wait_until: str | None
             "scripts/max_pain_batch.py",
             config_path,
             "--output", output_path,
+            "--fetch-concurrency", os.getenv("MAX_PAIN_FETCH_CONCURRENCY", "6"),
+            "--rate-limit-per-sec", os.getenv("MAX_PAIN_YFINANCE_RATE_LIMIT", "3.5"),
         ]
         
         if wait_until:
@@ -512,6 +530,20 @@ def update_max_pain(self, config_path: str | None = None, wait_until: str | None
         except Exception:
             pass
         db.close()
+
+        # Chain into the GEX update regardless of this run's outcome, so a bad
+        # Max Pain day doesn't stall the rest of the evening pipeline. Explicit
+        # queue routing is required here -- these tasks aren't in
+        # celery_app.py's default data_fetch task_routes map, so a plain
+        # .delay() would silently land on the general 'celery' queue.
+        if chain_next:
+            try:
+                from .gex_tasks import update_gex
+                from .market_queues import data_fetch_queue_for_market
+                update_gex.apply_async(queue=data_fetch_queue_for_market("US"))
+                logger.info(f"[{batch_id}] Chained GEX update")
+            except Exception:
+                logger.exception(f"[{batch_id}] Failed to chain GEX update")
 
 
 @app.task(name='app.tasks.max_pain_tasks.schedule_daily_update')

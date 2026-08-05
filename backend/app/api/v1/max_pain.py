@@ -15,6 +15,7 @@ from ...database import get_db
 from ...models.max_pain import MaxPainSnapshot, MaxPainBatch
 from ...models.stock_universe import StockUniverse
 from ...services.symbol_format import normalize_symbol
+from ...tasks.market_queues import data_fetch_queue_for_market
 from ...tasks.max_pain_tasks import update_max_pain
 
 logger = logging.getLogger(__name__)
@@ -299,9 +300,17 @@ async def trigger_max_pain_update(
     """
     try:
         logger.info("Max pain update triggered via API")
-        
-        # Queue the task
-        task = update_max_pain.delay(config_path=config_path, wait_until=wait_until)
+
+        # Explicit queue routing (not just .delay()) so this lands on the
+        # single-concurrency data_fetch worker instead of the general compute
+        # queue -- otherwise a manual trigger could run concurrently with a
+        # scheduled data_fetch job and double up load against Yahoo.
+        # chain_next=False: this is a standalone manual run, it should not
+        # also cascade into GEX and Options.
+        task = update_max_pain.apply_async(
+            kwargs={"config_path": config_path, "wait_until": wait_until, "chain_next": False},
+            queue=data_fetch_queue_for_market("US"),
+        )
         
         return {
             "status": "success",

@@ -133,8 +133,19 @@ def parse_gex_output(json_path: str, batch_id: str, db) -> dict:
 
 
 @app.task(name="app.tasks.gex_tasks.update_gex", bind=True, max_retries=1)
-def update_gex(self, strike_range_pct: float = 20.0, max_strikes: int | None = None) -> dict:
-    """Run GEX batch job and store full-universe results in database."""
+def update_gex(
+    self,
+    strike_range_pct: float = 20.0,
+    max_strikes: int | None = None,
+    chain_next: bool = True,
+) -> dict:
+    """Run GEX batch job and store full-universe results in database.
+
+    chain_next: If True (the default, used when chained from the Max Pain
+        run), triggers the daily options update when this run finishes.
+        Manual/API-triggered runs pass False so an operator re-running GEX
+        alone doesn't unexpectedly cascade into Options too.
+    """
     batch_id = str(uuid4())[:8]
     db = SessionLocal()
     config_path = None
@@ -161,6 +172,8 @@ def update_gex(self, strike_range_pct: float = 20.0, max_strikes: int | None = N
         chunk_size = int(os.getenv("GEX_UNIVERSE_CHUNK_SIZE", "100"))
         retry_minutes = float(os.getenv("GEX_FULL_RETRY_MINUTES", "0.75"))
         retry_interval = float(os.getenv("GEX_FULL_RETRY_INTERVAL_SEC", "3.0"))
+        fetch_concurrency = int(os.getenv("GEX_FETCH_CONCURRENCY", "6"))
+        yfinance_rate_limit = float(os.getenv("GEX_YFINANCE_RATE_LIMIT", "3.5"))
 
         total_processed = 0
         total_ok = 0
@@ -171,12 +184,15 @@ def update_gex(self, strike_range_pct: float = 20.0, max_strikes: int | None = N
         closest_abs_distance = None
 
         logger.info(
-            "[%s] Running chunked GEX for %s symbols: chunk_size=%s retry_window=%sm retry_interval=%ss",
+            "[%s] Running chunked GEX for %s symbols: chunk_size=%s retry_window=%sm retry_interval=%ss "
+            "fetch_concurrency=%s rate_limit=%s/s",
             batch_id,
             len(tickers),
             chunk_size,
             retry_minutes,
             retry_interval,
+            fetch_concurrency,
+            yfinance_rate_limit,
         )
 
         for chunk_index, ticker_chunk in enumerate(_chunked(tickers, chunk_size), start=1):
@@ -206,6 +222,10 @@ def update_gex(self, strike_range_pct: float = 20.0, max_strikes: int | None = N
                     str(retry_minutes),
                     "--retry-interval-sec",
                     str(retry_interval),
+                    "--fetch-concurrency",
+                    str(fetch_concurrency),
+                    "--rate-limit-per-sec",
+                    str(yfinance_rate_limit),
                 ]
 
                 logger.info(
@@ -355,12 +375,33 @@ def update_gex(self, strike_range_pct: float = 20.0, max_strikes: int | None = N
             pass
         db.close()
 
+        # Chain into the daily options update regardless of this run's
+        # outcome, so a bad GEX day doesn't stall the rest of the evening
+        # pipeline. Explicit queue routing is required here -- these tasks
+        # aren't in celery_app.py's default data_fetch task_routes map, so a
+        # plain .delay() would silently land on the general 'celery' queue.
+        if chain_next:
+            try:
+                from .market_queues import data_fetch_queue_for_market
+                from .options_tasks import schedule_daily_update as schedule_daily_options_update
+                schedule_daily_options_update.apply_async(queue=data_fetch_queue_for_market("US"))
+                logger.info("[%s] Chained daily options update", batch_id)
+            except Exception:
+                logger.exception("[%s] Failed to chain daily options update", batch_id)
+
 
 @app.task(name="app.tasks.gex_tasks.schedule_daily_update")
 def schedule_daily_update() -> dict:
-    """Scheduled wrapper that refreshes full-universe GEX snapshots."""
-    logger.info("Triggering scheduled GEX update for full active universe")
-    task = update_gex.delay()
+    """Manual-trigger wrapper that refreshes full-universe GEX snapshots.
+
+    No longer reachable from Celery Beat -- the daily run is chained
+    straight from update_max_pain's finally block instead (see
+    max_pain_tasks.py). This wrapper remains as the "run GEX independently"
+    entry point for the Scheduled Tasks dashboard, so it deliberately does
+    NOT cascade into the options update (chain_next=False).
+    """
+    logger.info("Triggering GEX update for full active universe (manual, standalone)")
+    task = update_gex.delay(chain_next=False)
     return {
         "status": "queued",
         "task_id": task.id,

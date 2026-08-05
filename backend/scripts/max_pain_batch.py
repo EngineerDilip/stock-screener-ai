@@ -14,8 +14,11 @@ tickers and are reported clearly rather than crashing the batch.
 
 import argparse
 import json
+import os
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
 try:
@@ -49,13 +52,14 @@ def load_config(path):
     tickers = []
     for t in cfg.get("tickers", []):
         if isinstance(t, str):
-            tickers.append({"symbol": t, "yahoo_ticker": t, "expiration": None})
+            tickers.append({"symbol": t, "yahoo_ticker": t, "expiration": None, "company_name": None})
         else:
             symbol = t["symbol"]
             tickers.append({
                 "symbol": symbol,
                 "yahoo_ticker": t.get("yahoo_ticker", symbol),
                 "expiration": t.get("expiration"),
+                "company_name": t.get("company_name"),
             })
 
     cfg["tickers"] = tickers
@@ -76,6 +80,58 @@ def is_valid_data(rows):
     return True, None
 
 
+# ---------------------------------------------------------------------------
+# Rate limiting -- shared Redis budget so concurrent fetch threads (and
+# concurrent chunk subprocesses) stay under one aggregate cap instead of each
+# hammering Yahoo independently. Lazily imported so --demo runs never need
+# the backend app package importable.
+# ---------------------------------------------------------------------------
+
+_rate_limiter = None
+_rate_limiter_lock = threading.Lock()
+
+
+def _get_rate_limiter():
+    global _rate_limiter
+    if _rate_limiter is None:
+        with _rate_limiter_lock:
+            if _rate_limiter is None:
+                from app.services.rate_limiter import RedisRateLimiter
+                _rate_limiter = RedisRateLimiter()
+    return _rate_limiter
+
+
+def _throttle(rate_interval_s):
+    if rate_interval_s > 0:
+        _get_rate_limiter().wait("yfinance:max_pain", min_interval_s=rate_interval_s)
+
+
+def _get_yf_session():
+    """Shared curl_cffi session (browser TLS fingerprint) for yfinance calls.
+
+    Yahoo's bot detection routinely 429s plain `requests`-based clients --
+    this is the same mitigation app/services/yf_session.py already provides
+    for the rest of the backend's yfinance traffic; a per-ticker plain
+    yf.Ticker() here would have skipped it entirely. Returns None (yfinance
+    falls back to its default session) if curl_cffi/settings aren't
+    available, e.g. when running --demo standalone.
+    """
+    try:
+        from app.services.yf_session import get_session
+        return get_session()
+    except Exception:
+        return None
+
+
+def _is_rate_limit_error(error: str | None) -> bool:
+    try:
+        from app.services.price_fetch_failures import is_rate_limit_error
+        return is_rate_limit_error(error)
+    except Exception:
+        lower = (error or "").lower()
+        return any(s in lower for s in ("rate", "429", "too many", "limit", "throttl"))
+
+
 def compute_max_pain(rows):
     best_strike, best_pain = None, None
     for p, _, _ in rows:
@@ -88,10 +144,20 @@ def compute_max_pain(rows):
     return best_strike
 
 
-def fetch_one(yahoo_ticker, expiration, strike_range_pct, max_strikes):
+def fetch_one(yahoo_ticker, expiration, strike_range_pct, max_strikes,
+              company_name_hint=None, rate_interval_s=0.0):
     import yfinance as yf
 
-    stock = yf.Ticker(yahoo_ticker)
+    session = _get_yf_session()
+    if session is not None:
+        try:
+            stock = yf.Ticker(yahoo_ticker, session=session)
+        except TypeError:
+            stock = yf.Ticker(yahoo_ticker)
+    else:
+        stock = yf.Ticker(yahoo_ticker)
+
+    _throttle(rate_interval_s)
     expirations = stock.options
     if not expirations:
         raise PermanentFetchError(
@@ -103,12 +169,19 @@ def fetch_one(yahoo_ticker, expiration, strike_range_pct, max_strikes):
     if exp not in expirations:
         raise PermanentFetchError(f"expiration '{exp}' not available. Choices: {list(expirations)}")
 
-    # Fetch company name
-    try:
-        company_name = stock.info.get('shortName', yahoo_ticker)
-    except Exception:
-        company_name = yahoo_ticker
+    # Company name: use the caller-supplied hint (e.g. from stock_universe) when
+    # available to skip `stock.info`, which is by far the slowest yfinance call
+    # and otherwise gets fetched for every single ticker just for a display label.
+    if company_name_hint:
+        company_name = company_name_hint
+    else:
+        _throttle(rate_interval_s)
+        try:
+            company_name = stock.info.get('shortName', yahoo_ticker)
+        except Exception:
+            company_name = yahoo_ticker
 
+    _throttle(rate_interval_s)
     chain = stock.option_chain(exp)
     calls = chain.calls[["strike", "openInterest"]].fillna(0)
     puts = chain.puts[["strike", "openInterest"]].fillna(0)
@@ -119,6 +192,7 @@ def fetch_one(yahoo_ticker, expiration, strike_range_pct, max_strikes):
     try:
         last_price = stock.fast_info["last_price"]
     except Exception:
+        _throttle(rate_interval_s)
         last_price = stock.history(period="1d")["Close"].iloc[-1]
 
     rows = [(k, int(call_oi.get(k, 0)), int(put_oi.get(k, 0))) for k in strikes]
@@ -177,7 +251,8 @@ def fetch_one_demo(symbol):
 # ---------------------------------------------------------------------------
 
 def fetch_with_retry(ticker_cfg, strike_range_pct, max_strikes,
-                      max_retry_minutes, retry_interval_sec, demo):
+                      max_retry_minutes, retry_interval_sec, demo,
+                      rate_interval_s=0.0):
     symbol = ticker_cfg["symbol"]
     deadline = time.monotonic() + max_retry_minutes * 60
     attempt = 0
@@ -192,6 +267,8 @@ def fetch_with_retry(ticker_cfg, strike_range_pct, max_strikes,
                 rows, exp, price, company_name = fetch_one(
                     ticker_cfg["yahoo_ticker"], ticker_cfg["expiration"],
                     strike_range_pct, max_strikes,
+                    company_name_hint=ticker_cfg.get("company_name"),
+                    rate_interval_s=rate_interval_s,
                 )
             ok, reason = is_valid_data(rows)
             if ok:
@@ -215,8 +292,16 @@ def fetch_with_retry(ticker_cfg, strike_range_pct, max_strikes,
             return {"status": "FAILED", "error": last_err,
                     "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
-        print(f"[{symbol}] attempt {attempt} failed ({last_err}); retrying in {retry_interval_sec:.0f}s...")
-        time.sleep(retry_interval_sec)
+        if _is_rate_limit_error(last_err):
+            # Yahoo is actively throttling us -- retrying at the normal pace
+            # would just hammer straight back into the same throttle window.
+            # Back off harder than a plain transient failure.
+            penalty = max(retry_interval_sec * 3, 30.0)
+            print(f"[{symbol}] rate-limit signal detected ({last_err}); backing off {penalty:.0f}s...")
+            time.sleep(penalty)
+        else:
+            print(f"[{symbol}] attempt {attempt} failed ({last_err}); retrying in {retry_interval_sec:.0f}s...")
+            time.sleep(retry_interval_sec)
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +497,16 @@ def main():
     ap.add_argument("--max-retry-minutes", type=float, default=45.0, help="Keep retrying a ticker up to this long before marking it FAILED")
     ap.add_argument("--retry-interval-sec", type=float, default=120.0, help="Seconds between retries")
     ap.add_argument("--demo", action="store_true", help="Use synthetic data -- no network, no waiting, instant preview")
+    ap.add_argument(
+        "--fetch-concurrency", type=int,
+        default=int(os.environ.get("MAX_PAIN_FETCH_CONCURRENCY", "6")),
+        help="Number of tickers to fetch concurrently (threads)",
+    )
+    ap.add_argument(
+        "--rate-limit-per-sec", type=float,
+        default=float(os.environ.get("MAX_PAIN_YFINANCE_RATE_LIMIT", "3.5")),
+        help="Aggregate Yahoo requests/sec across all concurrent fetch threads (shared Redis budget). 0 disables throttling.",
+    )
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -421,13 +516,25 @@ def main():
 
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    rate_interval_s = (1.0 / args.rate_limit_per_sec) if args.rate_limit_per_sec > 0 else 0.0
+    concurrency = max(1, args.fetch_concurrency)
+
     results = {}
-    for t in cfg["tickers"]:
-        print(f"\n=== {t['symbol']} ===")
-        results[t["symbol"]] = fetch_with_retry(
-            t, cfg["strike_range_pct"], cfg["max_strikes"],
-            args.max_retry_minutes, args.retry_interval_sec, args.demo,
-        )
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        future_to_symbol = {
+            pool.submit(
+                fetch_with_retry, t, cfg["strike_range_pct"], cfg["max_strikes"],
+                args.max_retry_minutes, args.retry_interval_sec, args.demo,
+                rate_interval_s,
+            ): t["symbol"]
+            for t in cfg["tickers"]
+        }
+        for future in as_completed(future_to_symbol):
+            symbol = future_to_symbol[future]
+            results[symbol] = future.result()
+
+    # Restore original config order for the Excel dashboard/report.
+    results = {t["symbol"]: results[t["symbol"]] for t in cfg["tickers"]}
 
     wb = Workbook()
     wb.remove(wb.active)

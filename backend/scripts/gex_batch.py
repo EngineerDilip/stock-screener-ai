@@ -9,7 +9,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 
@@ -43,6 +46,57 @@ def load_config(path: str) -> dict:
     return cfg
 
 
+# ---------------------------------------------------------------------------
+# Rate limiting -- shared Redis budget so concurrent fetch threads stay under
+# one aggregate cap instead of each hammering Yahoo independently. Uses its
+# own key ("yfinance:gex") separate from max_pain's budget since the two jobs
+# now run as distinct chained steps rather than overlapping.
+# ---------------------------------------------------------------------------
+
+_rate_limiter = None
+_rate_limiter_lock = threading.Lock()
+
+
+def _get_rate_limiter():
+    global _rate_limiter
+    if _rate_limiter is None:
+        with _rate_limiter_lock:
+            if _rate_limiter is None:
+                from app.services.rate_limiter import RedisRateLimiter
+                _rate_limiter = RedisRateLimiter()
+    return _rate_limiter
+
+
+def _throttle(rate_interval_s: float) -> None:
+    if rate_interval_s > 0:
+        _get_rate_limiter().wait("yfinance:gex", min_interval_s=rate_interval_s)
+
+
+def _get_yf_session():
+    """Shared curl_cffi session (browser TLS fingerprint) for yfinance calls.
+
+    Yahoo's bot detection routinely 429s plain `requests`-based clients --
+    this is the same mitigation app/services/yf_session.py already provides
+    for the rest of the backend's yfinance traffic; a per-ticker plain
+    yf.Ticker() here would have skipped it entirely. Returns None (yfinance
+    falls back to its default session) if curl_cffi/settings aren't available.
+    """
+    try:
+        from app.services.yf_session import get_session
+        return get_session()
+    except Exception:
+        return None
+
+
+def _is_rate_limit_error(error: str | None) -> bool:
+    try:
+        from app.services.price_fetch_failures import is_rate_limit_error
+        return is_rate_limit_error(error)
+    except Exception:
+        lower = (error or "").lower()
+        return any(s in lower for s in ("rate", "429", "too many", "limit", "throttl"))
+
+
 def _norm_pdf(x: float) -> float:
     return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
 
@@ -74,23 +128,35 @@ def _infer_flip_level(gex_by_strike: list[tuple[float, float]]) -> float | None:
     return nearest[0]
 
 
-def fetch_one(symbol_cfg: dict, strike_range_pct: float, max_strikes: int | None) -> dict:
+def fetch_one(symbol_cfg: dict, strike_range_pct: float, max_strikes: int | None,
+              rate_interval_s: float = 0.0) -> dict:
     import yfinance as yf
 
     symbol = symbol_cfg["symbol"]
     yahoo_ticker = symbol_cfg.get("yahoo_ticker") or symbol
 
-    ticker = yf.Ticker(yahoo_ticker)
+    session = _get_yf_session()
+    if session is not None:
+        try:
+            ticker = yf.Ticker(yahoo_ticker, session=session)
+        except TypeError:
+            ticker = yf.Ticker(yahoo_ticker)
+    else:
+        ticker = yf.Ticker(yahoo_ticker)
+
+    _throttle(rate_interval_s)
     expirations = ticker.options
     if not expirations:
         raise PermanentFetchError("no options chain available")
 
     expiration = expirations[0]
+    _throttle(rate_interval_s)
     chain = ticker.option_chain(expiration)
 
     try:
         spot = float(ticker.fast_info["last_price"])
     except Exception:
+        _throttle(rate_interval_s)
         hist = ticker.history(period="1d")
         if hist.empty:
             raise PermanentFetchError("unable to resolve spot price")
@@ -162,6 +228,7 @@ def fetch_one(symbol_cfg: dict, strike_range_pct: float, max_strikes: int | None
 
     company_name = symbol_cfg.get("company_name")
     if not company_name:
+        _throttle(rate_interval_s)
         try:
             company_name = ticker.info.get("shortName") or symbol
         except Exception:
@@ -190,6 +257,7 @@ def fetch_with_retry(
     max_strikes: int | None,
     max_retry_minutes: float,
     retry_interval_sec: float,
+    rate_interval_s: float = 0.0,
 ) -> dict:
     symbol = symbol_cfg["symbol"]
     deadline = time.monotonic() + (max_retry_minutes * 60.0)
@@ -199,7 +267,7 @@ def fetch_with_retry(
     while True:
         attempt += 1
         try:
-            result = fetch_one(symbol_cfg, strike_range_pct, max_strikes)
+            result = fetch_one(symbol_cfg, strike_range_pct, max_strikes, rate_interval_s=rate_interval_s)
             print(f"[{symbol}] OK on attempt {attempt}", flush=True)
             return result
         except PermanentFetchError as exc:
@@ -224,7 +292,15 @@ def fetch_with_retry(
                 "fetched_at": datetime.utcnow().isoformat(),
             }
 
-        time.sleep(retry_interval_sec)
+        if _is_rate_limit_error(last_error):
+            # Yahoo is actively throttling us -- retrying at the normal pace
+            # would just hammer straight back into the same throttle window.
+            # Back off harder than a plain transient failure.
+            penalty = max(retry_interval_sec * 3, 30.0)
+            print(f"[{symbol}] rate-limit signal detected ({last_error}); backing off {penalty:.0f}s...", flush=True)
+            time.sleep(penalty)
+        else:
+            time.sleep(retry_interval_sec)
 
 
 def main() -> None:
@@ -233,6 +309,16 @@ def main() -> None:
     parser.add_argument("--output", default="gex_output.json", help="Path to output JSON")
     parser.add_argument("--max-retry-minutes", type=float, default=0.75)
     parser.add_argument("--retry-interval-sec", type=float, default=3.0)
+    parser.add_argument(
+        "--fetch-concurrency", type=int,
+        default=int(os.environ.get("GEX_FETCH_CONCURRENCY", "6")),
+        help="Number of tickers to fetch concurrently (threads)",
+    )
+    parser.add_argument(
+        "--rate-limit-per-sec", type=float,
+        default=float(os.environ.get("GEX_YFINANCE_RATE_LIMIT", "3.5")),
+        help="Aggregate Yahoo requests/sec across all concurrent fetch threads (shared Redis budget). 0 disables throttling.",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -240,17 +326,27 @@ def main() -> None:
     raw_max_strikes = cfg.get("max_strikes")
     max_strikes = int(raw_max_strikes) if isinstance(raw_max_strikes, int) and raw_max_strikes > 0 else None
 
-    rows = []
-    for ticker_cfg in cfg.get("tickers", []):
-        rows.append(
-            fetch_with_retry(
-                ticker_cfg,
-                strike_range_pct=strike_range_pct,
-                max_strikes=max_strikes,
-                max_retry_minutes=args.max_retry_minutes,
-                retry_interval_sec=args.retry_interval_sec,
-            )
-        )
+    rate_interval_s = (1.0 / args.rate_limit_per_sec) if args.rate_limit_per_sec > 0 else 0.0
+    concurrency = max(1, args.fetch_concurrency)
+
+    tickers = cfg.get("tickers", [])
+    results_by_symbol = {}
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        future_to_symbol = {
+            pool.submit(
+                fetch_with_retry, ticker_cfg,
+                strike_range_pct, max_strikes,
+                args.max_retry_minutes, args.retry_interval_sec,
+                rate_interval_s,
+            ): ticker_cfg["symbol"]
+            for ticker_cfg in tickers
+        }
+        for future in as_completed(future_to_symbol):
+            symbol = future_to_symbol[future]
+            results_by_symbol[symbol] = future.result()
+
+    # Restore original config order in the output.
+    rows = [results_by_symbol[t["symbol"]] for t in tickers]
 
     payload = {
         "generated_at": datetime.utcnow().isoformat(),

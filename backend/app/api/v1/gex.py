@@ -14,6 +14,7 @@ from ...models.gex import GexBatch, GexSnapshot
 from ...models.stock_universe import StockUniverse
 from ...services.symbol_format import normalize_symbol
 from ...tasks.gex_tasks import update_gex
+from ...tasks.market_queues import data_fetch_queue_for_market
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -211,7 +212,16 @@ async def trigger_gex_update(
 ) -> dict:
     """Trigger background GEX update task."""
     try:
-        task = update_gex.delay(strike_range_pct=strike_range_pct, max_strikes=max_strikes)
+        # Explicit queue routing (not just .delay()) so this lands on the
+        # single-concurrency data_fetch worker instead of the general compute
+        # queue -- otherwise a manual trigger could run concurrently with a
+        # scheduled data_fetch job and double up load against Yahoo.
+        # chain_next=False: this is a standalone manual run, it should not
+        # also cascade into the options update.
+        task = update_gex.apply_async(
+            kwargs={"strike_range_pct": strike_range_pct, "max_strikes": max_strikes, "chain_next": False},
+            queue=data_fetch_queue_for_market("US"),
+        )
         return {
             "status": "success",
             "task_id": task.id,

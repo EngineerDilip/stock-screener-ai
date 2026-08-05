@@ -531,8 +531,21 @@ def _build_cache_warmup_beat_schedule(enabled_markets: list[str]) -> dict:
             ),
         },
 
-        # Daily max pain options analysis update.
-        # Runs at 4:30 PM ET, approximately 30 minutes after US market close.
+        # Daily options pipeline: max pain -> GEX -> options metrics/batch
+        # analysis, chained rather than scheduled at three independent fixed
+        # clock times.
+        #
+        # These all share ONE single-concurrency global data_fetch worker
+        # (see start_celery.sh), so they were always going to run
+        # sequentially regardless of scheduling. Firing them 10 minutes apart
+        # (4:30/4:40/4:50) assumed each finished almost instantly; in
+        # practice a full-universe yfinance sweep can run for hours, so the
+        # later jobs piled up in "Queued" for most of the day waiting on the
+        # one before them. Each task now triggers the next one itself, from
+        # its `finally` block, the moment it actually finishes (success or
+        # failure) — see the end of max_pain_tasks.update_max_pain and
+        # gex_tasks.update_gex. Only the first stage needs a beat entry.
+        #
         # Routed to the US data_fetch queue (previously unrouted, which meant
         # this long, rate-limited yfinance sweep ran on the shared general
         # 'celery' queue and tied up a general-compute worker for its duration).
@@ -542,31 +555,11 @@ def _build_cache_warmup_beat_schedule(enabled_markets: list[str]) -> dict:
             'options': {'queue': data_fetch_queue_for_market('US')},
         },
 
-        # Daily gamma exposure update.
-        # Runs at 4:40 PM ET to avoid overlap with max pain scheduling.
-        'daily-gex-update': {
-            'task': 'app.tasks.gex_tasks.schedule_daily_update',
-            'schedule': crontab(hour=16, minute=40),
-            'options': {'queue': data_fetch_queue_for_market('US')},
-        },
-
-        # Daily options metrics precompute (nearest-expiry cache warm).
-        # Runs at 4:50 PM ET after the primary options reads have completed.
-        # This now delegates straight to the batch options-analysis task below
-        # (options_tasks.schedule_daily_update no longer does its own separate
-        # yfinance sweep — see that module for details), so the two jobs no
-        # longer duplicate the same per-symbol fetch. The standalone
-        # 'daily-batch-options-analysis' beat entry was removed to avoid
-        # running that same batch twice a day (it previously fired again at
-        # 11:00 PM ET / hour=23, despite its registry description claiming
-        # "5:00 PM ET" — a pre-existing schedule/description mismatch).
-        # It remains available for manual triggering from the Scheduled Tasks
-        # dashboard.
-        'daily-options-update': {
-            'task': 'app.tasks.options_tasks.schedule_daily_update',
-            'schedule': crontab(hour=16, minute=50),
-            'options': {'queue': data_fetch_queue_for_market('US')},
-        },
+        # daily-gex-update and daily-options-update no longer have their own
+        # beat entries -- they're chained from max-pain and GEX respectively
+        # (see comment above). Both tasks remain registered in
+        # task_registry_service.SCHEDULED_TASKS for manual/independent
+        # triggering from the Scheduled Tasks dashboard.
     }
 
     # Merge shared entries into the fanned-out schedule.
