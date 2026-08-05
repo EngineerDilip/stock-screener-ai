@@ -67,12 +67,8 @@ code {
 }
 
 /* Elements that only make sense in the interactive UI (controls, spinners,
-   the print trigger itself) -- hidden via the print stylesheet below rather
-   than at render time, so the DOM/state is untouched for screen use. */
-.no-print {
-  display: none !important;
-}
-
+   the print trigger itself) -- hidden only when actually printing, not on
+   screen. */
 @media print {
   .no-print {
     display: none !important;
