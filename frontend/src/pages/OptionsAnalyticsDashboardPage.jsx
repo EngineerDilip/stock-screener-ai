@@ -705,7 +705,7 @@ export default function OptionsAnalyticsDashboardPage() {
           {/* Options Metrics (Key Gamma, DEX/VEX/CEX, IVR, Skew) */}
           {optionsMetrics && (
             <>
-              <SummaryCards data={optionsMetrics} showGreekExposures={false} />
+              <SummaryCards data={optionsMetrics} showGreekExposures />
               <Paper sx={{ p: 2, mt: 3 }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
                   <Typography variant="h6" sx={{ mr: 1 }}>
