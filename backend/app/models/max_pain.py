@@ -26,16 +26,21 @@ class MaxPainSnapshot(Base):
     put_call_ratio = Column(Float, nullable=True)
     last_price = Column(Float, nullable=True)
     distance_pct = Column(Float, nullable=True)
-    
+
     # Metadata
     fetched_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # US/Eastern trading day this snapshot belongs to (derived from fetched_at
+    # at write time, not from a raw UTC date_trunc -- see migration 20260805_0028).
+    # Used for weekly/monthly/quarterly/yearly history rollups.
+    trading_date = Column(Date, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     batch_id = Column(String(50), nullable=True, index=True)  # Group snapshots by batch run
-    
+
     # Indexes for common queries
     __table_args__ = (
         Index('ix_max_pain_ticker_fetched', 'ticker', 'fetched_at'),
         Index('ix_max_pain_batch_fetched', 'batch_id', 'fetched_at'),
+        Index('ix_max_pain_snapshots_ticker_trading_date', 'ticker', 'trading_date'),
     )
 
 

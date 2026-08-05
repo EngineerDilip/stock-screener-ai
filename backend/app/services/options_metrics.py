@@ -314,6 +314,39 @@ def _bs_gamma_delta(spot: float, strike: float, time_years: float, vol: float, o
     return gamma, delta
 
 
+def _bs_vanna_charm(spot: float, strike: float, time_years: float, vol: float) -> Tuple[float, float]:
+    """Black-Scholes vanna and charm, zero-rate/zero-dividend (matches
+    _bs_gamma_delta's simplified d1, which carries no r/q term).
+
+    Yahoo's public options data doesn't supply vanna or charm at all (unlike
+    gamma/delta, which are at least sometimes present as stale/absent
+    columns) -- there's no provider value to fall back to, so these are
+    model estimates, not market-observed figures. Callers should flag that
+    (see `greeks_methodology` on the API response) rather than presenting
+    them as if Yahoo reported them directly.
+
+    vanna = d(Delta)/d(vol) = -phi(d1) * d2 / vol
+    charm = d(Delta)/d(T)   = -phi(d1) * d2 / (2T)
+    Both are identical for calls and puts under r=q=0 (the "-1" delta offset
+    for puts is a constant, so it drops out of both derivatives). `charm`
+    here is the mathematical derivative w.r.t. time-to-expiry T -- positive
+    means delta rises as T increases (further from expiry), not a
+    "per calendar day" decay figure.
+    """
+    if spot <= 0 or strike <= 0 or time_years <= 0 or vol <= 0:
+        return 0.0, 0.0
+    sqrt_t = math.sqrt(time_years)
+    denominator = vol * sqrt_t
+    if denominator <= 0:
+        return 0.0, 0.0
+    d1 = (math.log(spot / strike) + 0.5 * vol * vol * time_years) / denominator
+    d2 = d1 - denominator
+    pdf_d1 = _norm_pdf(d1)
+    vanna = -pdf_d1 * d2 / vol
+    charm = -pdf_d1 * d2 / (2.0 * time_years)
+    return vanna, charm
+
+
 def _time_to_expiry_years(expiration: str) -> float:
     try:
         expiry_dt = datetime.strptime(expiration, "%Y-%m-%d").date()
@@ -465,13 +498,24 @@ def calculate_options_metrics(ticker: str, expiration: str) -> Dict[str, Any]:
 
         # yfinance option chains do not reliably supply gamma/delta, so derive
         # both via Black-Scholes from strike + implied volatility rather than
-        # trusting a (usually absent) provider-supplied greek column.
+        # trusting a (usually absent) provider-supplied greek column. vanna/
+        # charm aren't provided by yfinance at all -- these are pure model
+        # estimates (see _bs_vanna_charm docstring); flagged via
+        # `greeks_methodology` in the response rather than presented as
+        # market-observed values.
         greeks = [
             _bs_gamma_delta(underlying_price, strike, time_years, iv, option_type)
             for strike, iv in zip(df["strike"], df["impliedVolatility"])
         ]
         df["gamma"] = [g for g, _ in greeks]
         df["delta"] = [d for _, d in greeks]
+
+        vanna_charm = [
+            _bs_vanna_charm(underlying_price, strike, time_years, iv)
+            for strike, iv in zip(df["strike"], df["impliedVolatility"])
+        ]
+        df["vanna"] = [v for v, _ in vanna_charm]
+        df["charm"] = [c for _, c in vanna_charm]
 
     calls["call_gex"] = calls["gamma"] * calls["openInterest"] * 100 * underlying_price * 0.01
     puts["put_gex"] = puts["gamma"] * puts["openInterest"] * 100 * underlying_price * 0.01 * -1
@@ -578,6 +622,12 @@ def calculate_options_metrics(ticker: str, expiration: str) -> Dict[str, Any]:
         "total_gex": total_gex,
         "call_wall": call_wall,
         "put_wall": put_wall,
+        # gamma/delta/vanna/charm are all Black-Scholes estimates from
+        # strike + IV + time-to-expiry, not values reported by the options
+        # exchange -- Yahoo's public chain doesn't reliably supply any of
+        # them. Surfaced explicitly so a real-vs-modeled distinction is never
+        # silently lost between backend and UI.
+        "greeks_methodology": "black_scholes_derived",
     })
     return result
 

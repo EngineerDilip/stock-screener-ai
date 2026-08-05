@@ -10,6 +10,7 @@ import tempfile
 from datetime import date, datetime
 from pathlib import Path
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from ..celery_app import celery_app as app
 from ..database import SessionLocal
@@ -17,6 +18,17 @@ from ..models.gex import GexBatch, GexSnapshot
 from ..models.stock_universe import StockUniverse
 
 logger = logging.getLogger(__name__)
+
+_ET = ZoneInfo("America/New_York")
+
+
+def _trading_date_for(fetched_at_utc: datetime) -> date:
+    """US/Eastern trading day for a naive-UTC fetched_at timestamp.
+
+    See migration 20260805_0028 -- avoids bucketing history queries on a raw
+    UTC date_trunc, which drifts across DST/midnight boundaries.
+    """
+    return fetched_at_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(_ET).date()
 
 
 def _chunked(items: list[dict], chunk_size: int):
@@ -101,6 +113,7 @@ def parse_gex_output(json_path: str, batch_id: str, db) -> dict:
         call_gex = _safe_float(row.get("call_gex"))
         put_gex = _safe_float(row.get("put_gex"))
 
+        fetched_at = datetime.utcnow()
         snapshot = GexSnapshot(
             ticker=row.get("symbol"),
             company_name=row.get("company_name"),
@@ -115,7 +128,8 @@ def parse_gex_output(json_path: str, batch_id: str, db) -> dict:
             total_gex=total_gex,
             flip_level=_safe_float(row.get("flip_level")),
             distance_to_flip_pct=distance,
-            fetched_at=datetime.utcnow(),
+            fetched_at=fetched_at,
+            trading_date=_trading_date_for(fetched_at),
             batch_id=batch_id,
         )
         db.add(snapshot)

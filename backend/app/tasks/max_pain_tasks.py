@@ -9,6 +9,7 @@ import tempfile
 from datetime import datetime, date
 from pathlib import Path
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
@@ -18,6 +19,17 @@ from ..models.max_pain import MaxPainSnapshot, MaxPainBatch
 from ..models.stock_universe import StockUniverse
 
 logger = logging.getLogger(__name__)
+
+_ET = ZoneInfo("America/New_York")
+
+
+def _trading_date_for(fetched_at_utc: datetime) -> date:
+    """US/Eastern trading day for a naive-UTC fetched_at timestamp.
+
+    See migration 20260805_0028 -- avoids bucketing history queries on a raw
+    UTC date_trunc, which drifts across DST/midnight boundaries.
+    """
+    return fetched_at_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(_ET).date()
 
 
 def _chunked(items: list, chunk_size: int):
@@ -206,6 +218,7 @@ def parse_max_pain_output(xlsx_path: str, batch_id: str, db: Session) -> dict:
             else:
                 expiration_date = None
 
+            fetched_at = datetime.utcnow()
             snapshot = MaxPainSnapshot(
                 ticker=ticker,
                 company_name=company_name,
@@ -219,7 +232,8 @@ def parse_max_pain_output(xlsx_path: str, batch_id: str, db: Session) -> dict:
                 last_price=price,
                 distance_pct=distance,
                 batch_id=batch_id,
-                fetched_at=datetime.utcnow(),
+                fetched_at=fetched_at,
+                trading_date=_trading_date_for(fetched_at),
             )
             db.add(snapshot)
 

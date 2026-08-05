@@ -49,3 +49,4 @@ class OptionsMetricsResponse(BaseModel):
     total_gex: Optional[float] = None
     call_wall: Optional[float] = None
     put_wall: Optional[float] = None
+    greeks_methodology: Optional[str] = None

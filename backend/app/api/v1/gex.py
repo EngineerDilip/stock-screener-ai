@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from ...database import get_db
 from ...models.gex import GexBatch, GexSnapshot
 from ...models.stock_universe import StockUniverse
+from ...services.options_history_service import Timeframe, fetch_gex_history
 from ...services.symbol_format import normalize_symbol
 from ...tasks.gex_tasks import update_gex
 from ...tasks.market_queues import data_fetch_queue_for_market
@@ -203,6 +204,38 @@ async def get_gex_dashboard(
     except Exception as exc:
         logger.exception("Error fetching GEX dashboard")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/history")
+async def get_gex_history(
+    symbol: str = Query(...),
+    timeframe: Timeframe = Query(default=Timeframe.MONTHLY),
+    start: date | None = Query(default=None),
+    end: date | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> dict:
+    """GEX time series for one ticker over a timeframe window.
+
+    Every point is a real point-in-time EOD snapshot -- never an average.
+    Daily/Weekly/Monthly plot every trading day in the window; Quarterly/
+    Yearly downsample to the last snapshot of each week/month respectively
+    (still a real dated value, not a computed mean) to keep point counts
+    chart-friendly. See `sampling`/`period` in the response.
+    """
+    normalized_symbol = normalize_symbol(symbol)
+    if normalized_symbol is None:
+        raise HTTPException(status_code=422, detail=f"Invalid symbol format: {symbol!r}")
+
+    if start and end and start > end:
+        raise HTTPException(status_code=422, detail="start must be on or before end")
+
+    try:
+        return fetch_gex_history(
+            db, symbol=normalized_symbol, timeframe=timeframe, start=start, end=end
+        )
+    except Exception:
+        logger.exception("Error fetching GEX history for %s", normalized_symbol)
+        raise HTTPException(status_code=500, detail="Failed to fetch GEX history")
 
 
 @router.post("/trigger-update")

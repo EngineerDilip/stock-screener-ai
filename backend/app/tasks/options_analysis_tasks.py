@@ -20,6 +20,7 @@ from ..services.options_metrics import (
     compute_options_metrics,
     find_current_atm_iv_from_chain,
     _bs_gamma_delta,
+    _bs_vanna_charm,
     _time_to_expiry_years,
     _update_iv_history_and_get_range,
 )
@@ -172,7 +173,8 @@ def analyze_options_exposure(self, symbol: str) -> Dict[str, Any]:
         # a `gamma` column, so it's derived via Black-Scholes from strike + IV +
         # time-to-expiry (see services/options_metrics.py::_bs_gamma_delta) instead
         # of trusting a column that's usually absent and silently fills with 0.
-        # Vanna/charm remain provider-supplied (usually 0) — out of scope here.
+        # Vanna/charm aren't provided by yfinance at all -- also Black-Scholes
+        # model estimates (see _bs_vanna_charm), not market-observed values.
         all_options = []
         nearest_chain: List[Dict[str, Any]] = []
         for exp_index, exp_date in enumerate(expirations[:3]):
@@ -194,8 +196,13 @@ def analyze_options_exposure(self, symbol: str) -> Dict[str, Any]:
                     ]
                     df_source['gamma'] = [g for g, _ in greeks]
                     df_source['delta'] = [d for _, d in greeks]
-                    df_source['vanna'] = pd.to_numeric(df_source.get('vanna', 0.0), errors='coerce').fillna(0.0)
-                    df_source['charm'] = pd.to_numeric(df_source.get('charm', 0.0), errors='coerce').fillna(0.0)
+
+                    vanna_charm = [
+                        _bs_vanna_charm(spot_price, strike, time_years, iv)
+                        for strike, iv in zip(df_source['strike'], df_source['impliedVolatility'])
+                    ]
+                    df_source['vanna'] = [v for v, _ in vanna_charm]
+                    df_source['charm'] = [c for _, c in vanna_charm]
                     df_source['type'] = option_type
 
                     if exp_index == 0:
@@ -302,6 +309,11 @@ def analyze_options_exposure(self, symbol: str) -> Dict[str, Any]:
             } if flip_level else None,
             "strikes": strikes_data,
             "timestamp": datetime.utcnow().isoformat(),
+            # gamma/delta/vanna/charm behind these walls/strikes are all
+            # Black-Scholes estimates (strike + IV + time-to-expiry), not
+            # values reported by the options exchange -- Yahoo's public
+            # chain doesn't reliably supply any of them.
+            "greeks_methodology": "black_scholes_derived",
         }
         
         # Cache results for 24 hours
@@ -330,6 +342,7 @@ def analyze_options_exposure(self, symbol: str) -> Dict[str, Any]:
                     iv_52w_low=iv_52w_low,
                     iv_52w_high=iv_52w_high,
                 )
+                metrics["greeks_methodology"] = "black_scholes_derived"
                 redis_client = get_redis_client()
                 redis_client.set(f"options_metrics:{symbol}", json.dumps(metrics), ex=7 * 24 * 3600)
             except Exception:

@@ -14,80 +14,6 @@ import json
 router = APIRouter()
 
 
-def _options_from_yfinance(symbol: str, max_expiries: int = 1) -> List[Dict[str, Any]]:
-  """Fetch options from yfinance for the given symbol.
-
-  Returns a list of option dicts compatible with compute_options_metrics.
-  Only fetches the nearest `max_expiries` expirations (default 1).
-  """
-  svc = YFinanceService()
-  # respect service rate limiter
-  try:
-    svc._wait_for_yfinance_rate_limit()
-  except Exception:
-    # best-effort; continue
-    pass
-
-  ticker = yf.Ticker(symbol)
-  expirations = getattr(ticker, 'options', []) or []
-  if not expirations:
-    return []
-
-  taken = expirations[:max_expiries]
-  out: List[Dict[str, Any]] = []
-  for exp in taken:
-    try:
-      oc = ticker.option_chain(exp)
-      # oc.calls and oc.puts are DataFrames
-      for _, r in oc.calls.iterrows():
-        try:
-          delta = float(r.get('delta', 0.0) or 0.0)
-          gamma = float(r.get('gamma', 0.0) or 0.0)
-          vanna = float(r.get('vanna', 0.0) or 0.0)
-          charm = float(r.get('charm', 0.0) or 0.0)
-          iv = float(r.get('impliedVolatility', 0.0) or r.get('impliedVol', 0.0) or 0.0)
-          oi = int(r.get('openInterest', 0) or 0)
-          strike = float(r.get('strike', 0.0))
-        except (ValueError, TypeError):
-          continue
-        
-        out.append({
-          "strike": strike,
-          "type": "call",
-          "delta": delta,
-          "gamma": gamma,
-          "vanna": vanna,
-          "charm": charm,
-          "open_interest": oi,
-          "iv": iv,
-        })
-      for _, r in oc.puts.iterrows():
-        try:
-          delta = float(r.get('delta', 0.0) or 0.0)
-          gamma = float(r.get('gamma', 0.0) or 0.0)
-          vanna = float(r.get('vanna', 0.0) or 0.0)
-          charm = float(r.get('charm', 0.0) or 0.0)
-          iv = float(r.get('impliedVolatility', 0.0) or r.get('impliedVol', 0.0) or 0.0)
-          oi = int(r.get('openInterest', 0) or 0)
-          strike = float(r.get('strike', 0.0))
-        except (ValueError, TypeError):
-          continue
-        
-        out.append({
-          "strike": strike,
-          "type": "put",
-          "delta": delta,
-          "gamma": gamma,
-          "vanna": vanna,
-          "charm": charm,
-          "open_interest": oi,
-          "iv": iv,
-        })
-    except Exception:
-      continue
-  return out
-
-
 @router.post("/metrics", response_model=OptionsMetricsResponse)
 async def post_options_metrics(payload: Dict[str, Any]):
   """Compute options exposure metrics.
@@ -104,7 +30,13 @@ async def post_options_metrics(payload: Dict[str, Any]):
     if not options_chain and not symbol:
       raise HTTPException(status_code=422, detail="Missing options_chain or symbol in payload")
 
-    # If symbol provided and options_chain absent, try cache then yfinance
+    # If symbol provided and options_chain absent, try cache then compute live.
+    # (Previously this also called a now-removed _options_from_yfinance()
+    # pre-fetch here that read a `gamma`/`delta` column yfinance doesn't
+    # actually provide -- it always came back zeroed -- and whose result was
+    # then thrown away anyway once `expiration` resolved below and
+    # calculate_options_metrics() took over. That was two extra live yfinance
+    # round-trips wasted on every cache miss for no effect.)
     if not options_chain and symbol:
       try:
         redis_client = get_redis_client()
@@ -117,16 +49,12 @@ async def post_options_metrics(payload: Dict[str, Any]):
         # cache miss or error — fall back to live fetch
         pass
 
-      options_chain = _options_from_yfinance(symbol)
-      if not options_chain:
-        raise HTTPException(status_code=404, detail=f"No options data found for symbol {symbol}")
-
     expiration = payload.get("expiration")
     current_iv = payload.get("current_iv")
     iv_52w_low = payload.get("iv_52w_low")
     iv_52w_high = payload.get("iv_52w_high")
 
-    if symbol and not expiration:
+    if symbol and not options_chain and not expiration:
       try:
         ticker = yf.Ticker(symbol)
         expirations = getattr(ticker, 'options', []) or []
@@ -134,8 +62,10 @@ async def post_options_metrics(payload: Dict[str, Any]):
           expiration = expirations[0]
       except Exception:
         expiration = None
+      if not expiration:
+        raise HTTPException(status_code=404, detail=f"No options data found for symbol {symbol}")
 
-    if symbol and expiration:
+    if symbol and not options_chain and expiration:
       result = calculate_options_metrics(symbol, expiration)
       return result
 
@@ -169,8 +99,17 @@ async def post_options_metrics(payload: Dict[str, Any]):
 @router.post("/analysis")
 async def post_options_analysis(payload: Dict[str, Any]):
   """Comprehensive options exposure analysis including structural levels.
-  
+
   Returns Call Wall, Put Wall, Flip Level, spot price, and strike-by-strike GEX/VEX/CEX.
+
+  Not called by the frontend (it uses GET /analysis/{symbol}, backed by
+  analyze_options_exposure in options_analysis_tasks.py, which derives gamma
+  via Black-Scholes). This POST variant instead reads `gamma`/`vanna`/`charm`
+  straight off the raw yfinance option chain rows, columns yfinance doesn't
+  actually populate -- they come back 0.0 here. Left unfixed since nothing
+  currently exercises this path; if you wire something to it, route gamma
+  through the same _bs_gamma_delta helper the GET path uses instead of
+  trusting these columns.
   """
   import pandas as pd
   from datetime import datetime
@@ -371,9 +310,19 @@ async def get_options_analysis(symbol: str):
     except Exception:
       pass  # Cache miss or error
     
-    # If no cache, trigger on-demand analysis via Celery
+    # If no cache, trigger on-demand analysis via Celery.
+    # Must route to a queue an actual worker consumes -- the bare 'data_fetch'
+    # name has no subscriber (see start_celery.sh / docker-compose.yml, both
+    # only listen on the per-market data_fetch_<market> queues), so every
+    # cache miss here previously dispatched into a void and reliably burned
+    # the full 30s timeout below before returning a 504. This is the same
+    # class of bug batch_analyze_options_exposure was already fixed for
+    # (see options_analysis_tasks.py) but this on-demand path was missed.
+    from ...tasks.market_queues import data_fetch_queue_for_market
     from ...tasks.options_analysis_tasks import analyze_options_exposure
-    task_result = analyze_options_exposure.apply_async(args=[symbol], queue='data_fetch')
+    task_result = analyze_options_exposure.apply_async(
+        args=[symbol], queue=data_fetch_queue_for_market("US")
+    )
     
     # Wait up to 30 seconds for result
     try:

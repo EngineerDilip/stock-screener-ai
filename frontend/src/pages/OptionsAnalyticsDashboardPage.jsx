@@ -15,6 +15,7 @@ import {
 } from '@mui/material';
 import apiClient from '../api/client';
 import SummaryCards from '../components/OptionsMetrics/SummaryCards';
+import MetricHistoryChart from '../components/OptionsMetrics/MetricHistoryChart';
 
 export default function OptionsAnalyticsDashboardPage() {
   const [tickerList, setTickerList] = useState([]);
@@ -410,6 +411,11 @@ export default function OptionsAnalyticsDashboardPage() {
           <Typography variant="h5" sx={{ mb: 2 }}>
             {selectedTicker.symbol} {selectedTicker.name && `- ${selectedTicker.name}`}
           </Typography>
+
+          {/* History trend charts (separate from the point-in-time cards below --
+              see MetricHistoryChart's doc comment for why these are never averaged) */}
+          <MetricHistoryChart symbol={selectedTicker.symbol} metric="maxPain" />
+          <MetricHistoryChart symbol={selectedTicker.symbol} metric="gex" />
 
           {/* GEX Summary */}
           {gexRow && (

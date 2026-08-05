@@ -4,7 +4,7 @@ Max Pain Dashboard API endpoints with database integration.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from ...database import get_db
 from ...models.max_pain import MaxPainSnapshot, MaxPainBatch
 from ...models.stock_universe import StockUniverse
+from ...services.options_history_service import Timeframe, fetch_max_pain_history
 from ...services.symbol_format import normalize_symbol
 from ...tasks.market_queues import data_fetch_queue_for_market
 from ...tasks.max_pain_tasks import update_max_pain
@@ -280,6 +281,38 @@ async def get_max_pain_dashboard(
             )
         # Return mock data on generic error for the full dashboard endpoint
         return get_mock_dashboard()
+
+
+@router.get("/history")
+async def get_max_pain_history(
+    symbol: str = Query(...),
+    timeframe: Timeframe = Query(default=Timeframe.MONTHLY),
+    start: date | None = Query(default=None),
+    end: date | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Max Pain time series for one ticker over a timeframe window.
+
+    Every point is a real point-in-time EOD snapshot -- never an average.
+    Daily/Weekly/Monthly plot every trading day in the window; Quarterly/
+    Yearly downsample to the last snapshot of each week/month respectively
+    (still a real dated value, not a computed mean) to keep point counts
+    chart-friendly. See `sampling`/`period` in the response.
+    """
+    normalized_symbol = normalize_symbol(symbol)
+    if normalized_symbol is None:
+        raise HTTPException(status_code=422, detail=f"Invalid symbol format: {symbol!r}")
+
+    if start and end and start > end:
+        raise HTTPException(status_code=422, detail="start must be on or before end")
+
+    try:
+        return fetch_max_pain_history(
+            db, symbol=normalized_symbol, timeframe=timeframe, start=start, end=end
+        )
+    except Exception:
+        logger.exception("Error fetching max pain history for %s", normalized_symbol)
+        raise HTTPException(status_code=500, detail="Failed to fetch max pain history")
 
 
 @router.post("/trigger-update")

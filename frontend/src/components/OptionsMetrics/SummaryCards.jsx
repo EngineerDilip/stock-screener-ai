@@ -35,7 +35,14 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
     expected_move,
     call_premium_notional,
     put_premium_notional,
+    greeks_methodology,
   } = data;
+
+  // Yahoo's public options data doesn't supply vanna/charm at all -- these
+  // are Black-Scholes model estimates, not exchange-reported values. Flagged
+  // on VEX/CEX specifically (not gamma/delta) since vanna/charm have no
+  // provider fallback whatsoever.
+  const isModelDerivedGreeks = greeks_methodology === 'black_scholes_derived';
 
   const historicalVolatilityPct = historical_volatility != null ? historical_volatility * 100 : null;
   const volatilityRiskPremiumPct = volatility_risk_premium != null ? volatility_risk_premium * 100 : null;
@@ -232,22 +239,29 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
             />
           </Grid>
           <Grid item xs={12} sm={6} md={4} lg={3}>
-            <MetricCard 
-              title="Net VEX" 
-              value={net?.net_vex !== undefined ? formatNumber(net.net_vex) : '—'} 
-              subtitle="Vanna Exposure"
+            <MetricCard
+              title="Net VEX"
+              value={net?.net_vex !== undefined ? formatNumber(net.net_vex) : '—'}
+              subtitle={isModelDerivedGreeks ? 'Vanna Exposure (model estimate)' : 'Vanna Exposure'}
               color={net?.net_vex > 0 ? 'success.main' : net?.net_vex < 0 ? 'error.main' : undefined}
             />
           </Grid>
           <Grid item xs={12} sm={6} md={4} lg={3}>
-            <MetricCard 
-              title="Net CEX" 
-              value={net?.net_cex !== undefined ? formatNumber(net.net_cex) : '—'} 
-              subtitle="Charm Exposure"
+            <MetricCard
+              title="Net CEX"
+              value={net?.net_cex !== undefined ? formatNumber(net.net_cex) : '—'}
+              subtitle={isModelDerivedGreeks ? 'Charm Exposure (model estimate)' : 'Charm Exposure'}
               color={net?.net_cex > 0 ? 'success.main' : net?.net_cex < 0 ? 'error.main' : undefined}
             />
           </Grid>
         </>
+      )}
+      {showGreekExposures && isModelDerivedGreeks && (
+        <Grid item xs={12}>
+          <Typography variant="caption" color="text.secondary">
+            VEX/CEX are Black-Scholes estimates (strike + IV + time-to-expiry) — Yahoo's options data doesn't report vanna/charm directly.
+          </Typography>
+        </Grid>
       )}
 
       {/* Volatility Metrics */}
