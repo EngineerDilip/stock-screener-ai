@@ -10,11 +10,25 @@ import argparse
 import json
 import math
 import os
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
+
+# gex_tasks.py invokes this as `python scripts/gex_batch.py` (a real script
+# file, not `-c`), so sys.path[0] is this file's own directory
+# (.../backend/scripts) -- the backend root (.../backend, which `import app`
+# needs) is never on sys.path on its own, and nothing else (no PYTHONPATH,
+# no .pth/editable install) provides it. Same bug, same fix as
+# max_pain_batch.py: every deferred `from app.services import ...` below
+# fails deterministically -- 100% of the time, every ticker -- unless the
+# backend root is added here before those run.
+_BACKEND_ROOT = str(Path(__file__).resolve().parent.parent)
+if _BACKEND_ROOT not in sys.path:
+    sys.path.insert(0, _BACKEND_ROOT)
 
 _ET = ZoneInfo("America/New_York")
 
@@ -281,6 +295,19 @@ def fetch_with_retry(
             return result
         except PermanentFetchError as exc:
             print(f"[{symbol}] permanent failure: {exc}", flush=True)
+            return {
+                "symbol": symbol,
+                "company_name": symbol_cfg.get("company_name"),
+                "status": "FAILED",
+                "error": str(exc),
+                "fetched_at": datetime.utcnow().isoformat(),
+            }
+        except ImportError as exc:
+            # A broken/missing module will never fix itself by retrying --
+            # retrying anyway just burns the full max_retry_minutes window
+            # on every single symbol for nothing. Treat it like a permanent
+            # failure.
+            print(f"[{symbol}] import failure, not retrying: {exc}", flush=True)
             return {
                 "symbol": symbol,
                 "company_name": symbol_cfg.get("company_name"),
