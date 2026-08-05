@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 """Stock data API endpoints"""
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, case, func, or_
+from sqlalchemy import and_, case, cast, func, or_
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from ...database import get_db
 from ...infra.serialization import normalize_string_list
 from ...models.market_breadth import MarketBreadth
 from ...models.stock_universe import StockUniverse
-from ...models.theme import ThemeCluster, ThemeConstituent, ThemeMetrics
+from ...models.theme import ContentItem, ThemeCluster, ThemeConstituent, ThemeMention, ThemeMetrics
 from ...schemas.scanning import ExplainResponse, ScanResultItem
 from ...schemas.stock import (
     FundamentalsBatchRequest,
@@ -22,6 +23,8 @@ from ...schemas.stock import (
     StockData,
     StockDecisionDashboardResponse,
     StockInfo,
+    StockNewsResponse,
+    StockNewsItem,
     StockPriceHistoryPoint,
     StockSearchResult,
     StockTechnicals,
@@ -593,6 +596,66 @@ async def get_stock_industry(
         classification['ibd_industry_group'] = None
 
     return classification
+
+
+@router.get("/{symbol}/news", response_model=StockNewsResponse)
+def get_stock_news(
+    symbol: str = Depends(require_valid_symbol),
+    limit: int = Query(20, ge=1, le=100, description="Max mentions to return"),
+    days: int = Query(30, ge=1, le=365, description="Lookback window in days"),
+    db: Session = Depends(get_db),
+):
+    """Recent news/content mentions of this ticker.
+
+    Sourced from the theme-discovery pipeline's LLM ticker extraction
+    (ThemeMention.tickers), not a dedicated news fetch -- same underlying
+    data as the Themes page, just filtered to one symbol instead of one
+    theme. Requires content_sources to actually be configured and polled;
+    if this is always empty, check GET /v1/themes/sources (or POST
+    /v1/themes/sources/seed-defaults to seed the built-in RSS sources) and
+    that Celery beat's poll_due_sources/extract_themes tasks are running.
+
+    Filters in SQL (JSONB containment on `tickers`) rather than pulling
+    every mention in the window into Python and checking membership there
+    -- unlike the theme-scoped queries elsewhere in this codebase, this is
+    ticker-scoped, so the unfiltered set can span every ticker ever
+    mentioned.
+    """
+    since = datetime.utcnow() - timedelta(days=days)
+
+    mentions = (
+        db.query(ThemeMention, ContentItem)
+        .join(ContentItem, ThemeMention.content_item_id == ContentItem.id)
+        .filter(
+            ThemeMention.mentioned_at >= since,
+            cast(ThemeMention.tickers, JSONB).contains([symbol]),
+        )
+        .order_by(ThemeMention.mentioned_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    return StockNewsResponse(
+        symbol=symbol,
+        total_count=len(mentions),
+        items=[
+            StockNewsItem(
+                mention_id=mention.id,
+                title=content.title,
+                url=content.url,
+                source_type=mention.source_type,
+                source_name=mention.source_name or content.source_name,
+                author=content.author,
+                published_at=content.published_at,
+                sentiment=mention.sentiment,
+                confidence=mention.confidence,
+                excerpt=mention.excerpt,
+                theme=mention.canonical_theme,
+                other_tickers=[t for t in (mention.tickers or []) if t != symbol],
+            )
+            for mention, content in mentions
+        ],
+    )
 
 
 @router.get("/{symbol}/chart-data")

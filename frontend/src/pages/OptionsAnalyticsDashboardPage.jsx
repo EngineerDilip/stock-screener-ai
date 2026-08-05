@@ -18,6 +18,7 @@ import {
 import PrintIcon from '@mui/icons-material/Print';
 import apiClient from '../api/client';
 import SummaryCards from '../components/OptionsMetrics/SummaryCards';
+import StrikeExposureChart from '../components/OptionsMetrics/StrikeExposureChart';
 import MetricHistoryChart from '../components/OptionsMetrics/MetricHistoryChart';
 import ExpirationSelector from '../components/OptionsMetrics/ExpirationSelector';
 import LastUpdated from '../components/OptionsMetrics/LastUpdated';
@@ -906,6 +907,13 @@ export default function OptionsAnalyticsDashboardPage() {
                 <LastUpdated timestamp={displayOptionsMetrics.computed_at} />
               </Box>
               <SummaryCards data={displayOptionsMetrics} showGreekExposures />
+              <StrikeExposureChart
+                strikes={displayOptionsMetrics.strikes}
+                spot={displayOptionsMetrics.underlying_price}
+                callWall={displayOptionsMetrics.key_levels?.call_wall}
+                putWall={displayOptionsMetrics.key_levels?.put_wall}
+                zeroGamma={displayOptionsMetrics.key_levels?.zero_gamma}
+              />
               <Paper sx={{ p: 2, mt: 3 }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
                   <Typography variant="h6" sx={{ mr: 1 }}>
