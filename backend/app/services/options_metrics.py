@@ -444,6 +444,47 @@ def find_current_atm_iv_from_chain(
     return None
 
 
+def _iv_history_range_from_rows(rows) -> Tuple[Optional[float], Optional[float]]:
+    values: List[float] = []
+    for (v,) in rows:
+        try:
+            values.append(float(v))
+        except (TypeError, ValueError):
+            continue
+
+    if len(values) < 2:
+        return None, None
+    return min(values), max(values)
+
+
+def _get_iv_history_range(db: Optional["Session"], ticker: str) -> Tuple[Optional[float], Optional[float]]:
+    """Read-only lookup of the trailing ~252-row (low, high) ATM IV range for
+    a ticker, without adding a new point.
+
+    Used for on-demand, non-default-expiration lookups (term structure) --
+    see _update_iv_history_and_get_range's docstring for why those must not
+    write to this table.
+    """
+    if db is None:
+        return None, None
+
+    from ..models.iv_history import IvHistory
+
+    ticker = ticker.upper()
+    try:
+        rows = (
+            db.query(IvHistory.atm_iv)
+            .filter(IvHistory.ticker == ticker)
+            .order_by(IvHistory.trading_date.desc())
+            .limit(252)
+            .all()
+        )
+    except Exception:
+        return None, None
+
+    return _iv_history_range_from_rows(rows)
+
+
 def _update_iv_history_and_get_range(
     db: Optional["Session"], ticker: str, current_iv: Optional[float]
 ) -> Tuple[Optional[float], Optional[float]]:
@@ -460,6 +501,16 @@ def _update_iv_history_and_get_range(
     Rank back to "building up history again"). Postgres makes it durable
     across cache clears and restarts, consistent with how max_pain_snapshots
     and gex_snapshots already persist their daily options data.
+
+    IMPORTANT: only call this for a ticker's NEAREST/default expiration (the
+    nightly batch, and the default no-expiration /v1/options/metrics fetch).
+    There's no `expiration` column here -- one row per ticker per day, full
+    stop -- so writing a far-dated expiration's IV here would overwrite that
+    day's near-term value with an unrelated one (different expirations have
+    structurally different IV levels), corrupting the rolling series everyone
+    else's IV Rank is computed against. On-demand term-structure lookups for
+    a user-picked expiration must use the read-only _get_iv_history_range
+    instead.
     """
     if current_iv is None or current_iv <= 0 or db is None:
         return None, None
@@ -492,19 +543,12 @@ def _update_iv_history_and_get_range(
         db.rollback()
         return None, None
 
-    values: List[float] = []
-    for (v,) in rows:
-        try:
-            values.append(float(v))
-        except (TypeError, ValueError):
-            continue
-
-    if len(values) < 2:
-        return None, None
-    return min(values), max(values)
+    return _iv_history_range_from_rows(rows)
 
 
-def calculate_options_metrics(ticker: str, expiration: str, db: Optional["Session"] = None) -> Dict[str, Any]:
+def calculate_options_metrics(
+    ticker: str, expiration: str, db: Optional["Session"] = None, record_iv_history: bool = True
+) -> Dict[str, Any]:
     """Fetch an options chain from yfinance and compute institutional options metrics.
 
     The returned payload includes GEX, walls, PCR, premium, HV, VRP, and expected move.
@@ -512,6 +556,15 @@ def calculate_options_metrics(ticker: str, expiration: str, db: Optional["Sessio
     `db` is used to persist/read today's ATM IV for IV Rank (see
     _update_iv_history_and_get_range); when omitted, IVR is left null rather
     than raising, since not every caller has a DB session to hand.
+
+    `record_iv_history` must be False for any caller passing a non-default
+    expiration (e.g. the term-structure endpoint, where `expiration` is
+    whatever the user picked in the dropdown) -- iv_history has no
+    `expiration` column, so writing a far-dated expiration's IV into it would
+    corrupt the single per-ticker-per-day series IV Rank is computed from.
+    Only the nightly batch and the default/nearest-expiration fetch should
+    pass True. When False, the 52w range is still read (read-only) so IVR
+    can be displayed for that expiration's own compute.
     """
     from .yfinance_service import YFinanceService
     import yfinance as yf
@@ -710,7 +763,10 @@ def calculate_options_metrics(ticker: str, expiration: str, db: Optional["Sessio
     if current_atm_iv is not None and historical_volatility is not None:
         volatility_risk_premium = current_atm_iv - historical_volatility
 
-    iv_52w_low, iv_52w_high = _update_iv_history_and_get_range(db, ticker, current_atm_iv)
+    if record_iv_history:
+        iv_52w_low, iv_52w_high = _update_iv_history_and_get_range(db, ticker, current_atm_iv)
+    else:
+        iv_52w_low, iv_52w_high = _get_iv_history_range(db, ticker)
     result = compute_options_metrics(options_chain, spot=underlying_price, current_iv=current_atm_iv,
                                       iv_52w_low=iv_52w_low, iv_52w_high=iv_52w_high)
     result.update({

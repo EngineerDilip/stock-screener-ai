@@ -144,7 +144,12 @@ async def get_options_term_structure(
         raise HTTPException(status_code=422, detail=f"Invalid expiration format: {expiration!r}, expected YYYY-MM-DD")
 
     try:
-        metrics = calculate_options_metrics(normalized_symbol, expiration, db=db)
+        # expiration here is always an explicit, user-picked date (never the
+        # nearest-expiration default) -- must not feed iv_history, or a
+        # far-dated expiration's IV would overwrite today's IV Rank data
+        # point with an unrelated value. See calculate_options_metrics'
+        # record_iv_history docstring.
+        metrics = calculate_options_metrics(normalized_symbol, expiration, db=db, record_iv_history=False)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -252,13 +257,34 @@ async def post_options_metrics(payload: Dict[str, Any], db: Session = Depends(ge
         key = f"options_metrics:{symbol.upper()}"
         cached = redis_client.get(key)
         if cached:
-          # cached value is precomputed metrics JSON; return directly
-          return json.loads(cached)
+          cached_data = json.loads(cached)
+          # This same key is also written by the nightly batch task
+          # (options_analysis_tasks.py::analyze_options_exposure), which
+          # only calls compute_options_metrics() -- key_levels/net/ivr/skew/
+          # strikes -- never the fuller calculate_options_metrics() below,
+          # since it doesn't fetch the 1mo price history or per-strike
+          # lastPrice/volume that HV/VRP/expected_move/premium notionals
+          # need. `underlying_price` only ever appears in a
+          # calculate_options_metrics() payload, so its absence means this
+          # is a batch-authored entry -- serving it as-is would permanently
+          # show blank HV/VRP/Expected Move/Premium PCR for up to the 7-day
+          # TTL on every ticker the batch (not a live dashboard view)
+          # touched last. Fall through to a live compute instead; that live
+          # compute re-caches a complete payload below, self-healing this
+          # key for the next 7 days.
+          if "underlying_price" in cached_data:
+            return cached_data
       except Exception:
         # cache miss or error — fall back to live fetch
         pass
 
     expiration = payload.get("expiration")
+    # Whether the caller asked for a specific expiration vs. let this default
+    # to the nearest one -- iv_history has no expiration dimension, so only
+    # the nearest-expiration case should feed it (see calculate_options_metrics'
+    # record_iv_history docstring); an explicit non-default expiration must
+    # not overwrite that day's IV Rank data point with an unrelated value.
+    explicit_expiration = expiration is not None
     current_iv = payload.get("current_iv")
     iv_52w_low = payload.get("iv_52w_low")
     iv_52w_high = payload.get("iv_52w_high")
@@ -275,7 +301,19 @@ async def post_options_metrics(payload: Dict[str, Any], db: Session = Depends(ge
         raise HTTPException(status_code=404, detail=f"No options data found for symbol {symbol}")
 
     if symbol and not options_chain and expiration:
-      result = calculate_options_metrics(symbol, expiration, db=db)
+      result = calculate_options_metrics(symbol, expiration, db=db, record_iv_history=not explicit_expiration)
+      if not explicit_expiration:
+        # Re-cache the complete payload under the same key the batch task
+        # writes an abbreviated version to (see the cache-hit block above)
+        # -- this is what actually self-heals a batch-only ticker's cache
+        # to the full payload for the rest of its 7-day TTL. Only for the
+        # default/nearest-expiration view, matching that key's lack of an
+        # expiration dimension.
+        try:
+          redis_client = get_redis_client()
+          redis_client.set(f"options_metrics:{symbol.upper()}", json.dumps(result), ex=7 * 24 * 3600)
+        except Exception:
+          pass
       return result
 
     # If we have a symbol and any IV pieces are missing, try to fetch price range
