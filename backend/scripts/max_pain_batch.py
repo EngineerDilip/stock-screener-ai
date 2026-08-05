@@ -20,6 +20,20 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+from pathlib import Path
+
+# max_pain_tasks.py invokes this as `python scripts/max_pain_batch.py ...`
+# (a real script file, not `-c`), so sys.path[0] is this file's own directory
+# (.../backend/scripts) -- the backend root (.../backend, which `import app`
+# needs) is never on sys.path on its own. There's no PYTHONPATH or .pth/
+# editable-install providing it either, so every deferred `from app.services
+# import ...` below (_get_rate_limiter/_get_yf_session/_is_rate_limit_error)
+# fails deterministically -- 100% of the time, every ticker, not an
+# occasional/environmental thing -- unless the backend root is added here
+# before those run.
+_BACKEND_ROOT = str(Path(__file__).resolve().parent.parent)
+if _BACKEND_ROOT not in sys.path:
+    sys.path.insert(0, _BACKEND_ROOT)
 
 try:
     from zoneinfo import ZoneInfo
@@ -282,6 +296,14 @@ def fetch_with_retry(ticker_cfg, strike_range_pct, max_strikes,
             last_err = reason
         except PermanentFetchError as e:
             print(f"[{symbol}] permanent failure, not retrying: {e}")
+            return {"status": "FAILED", "error": str(e),
+                    "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        except ImportError as e:
+            # A broken/missing module (e.g. sys.path misconfigured for this
+            # invocation) will never fix itself by retrying -- retrying it
+            # anyway just burns the full max_retry_minutes window on every
+            # single ticker for nothing. Treat it like a permanent failure.
+            print(f"[{symbol}] import failure, not retrying: {e}")
             return {"status": "FAILED", "error": str(e),
                     "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         except Exception as e:
