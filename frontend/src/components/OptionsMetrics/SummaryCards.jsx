@@ -1,6 +1,6 @@
 import { Grid, Paper, Typography, Box, Chip } from '@mui/material';
 
-function MetricCard({ title, value, subtitle, color, status }) {
+function MetricCard({ title, value, subtitle, color, status, description }) {
   const isZero = value === 0 || value === '0';
   return (
     <Paper sx={{ p: 2, height: '100%', backgroundColor: isZero ? 'rgba(255,152,0,0.05)' : 'inherit' }}>
@@ -19,6 +19,15 @@ function MetricCard({ title, value, subtitle, color, status }) {
         </Box>
       )}
       {subtitle && <Typography variant="caption" color="text.secondary">{subtitle}</Typography>}
+      {/* Plain-language explanation for cards with no good/bad judgment to
+          make (structural levels, exposure greeks) -- distinct from
+          status.description, which only renders alongside an evaluative
+          Chip (Low/High/Neutral etc). */}
+      {description && (
+        <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: 'text.secondary' }}>
+          {description}
+        </Typography>
+      )}
       {isZero && <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: 'warning.main' }}>No data</Typography>}
     </Paper>
   );
@@ -222,20 +231,29 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
     <Grid container spacing={2} sx={{ mb: 2 }}>
       {/* Key Gamma Levels */}
       <Grid item xs={12} sm={6} md={4} lg={3}>
-        <MetricCard title="Call Wall" value={safeKeyLevel(key_levels?.call_wall)} />
+        <MetricCard
+          title="Call Wall"
+          value={safeKeyLevel(key_levels?.call_wall)}
+          description="Strike with the heaviest call-side gamma. Price often struggles to push above this level, since dealers hedge in a way that leans against the move -- it tends to act like a ceiling."
+        />
       </Grid>
       <Grid item xs={12} sm={6} md={4} lg={3}>
-        <MetricCard title="Put Wall" value={safeKeyLevel(key_levels?.put_wall)} />
+        <MetricCard
+          title="Put Wall"
+          value={safeKeyLevel(key_levels?.put_wall)}
+          description="Strike with the heaviest put-side gamma. Price often finds support here as dealers hedge -- tends to act like a floor."
+        />
       </Grid>
 
       {showGreekExposures && (
         <>
           <Grid item xs={12} sm={6} md={4} lg={3}>
-            <MetricCard 
-              title="Net DEX" 
-              value={net?.net_dex !== undefined ? formatNumber(net.net_dex) : '—'} 
+            <MetricCard
+              title="Net DEX"
+              value={net?.net_dex !== undefined ? formatNumber(net.net_dex) : '—'}
               subtitle="Delta Exposure"
               color={net?.net_dex > 0 ? 'success.main' : net?.net_dex < 0 ? 'error.main' : undefined}
+              description="Roughly how many dollars of stock dealers may need to trade for every $1 the price moves, to stay hedged. Positive: dealers may sell into rallies (dampens moves). Negative: dealers may buy into rallies (can fuel moves)."
             />
           </Grid>
           <Grid item xs={12} sm={6} md={4} lg={3}>
@@ -244,6 +262,7 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
               value={net?.net_vex !== undefined ? formatNumber(net.net_vex) : '—'}
               subtitle={isModelDerivedGreeks ? 'Vanna Exposure (model estimate)' : 'Vanna Exposure'}
               color={net?.net_vex > 0 ? 'success.main' : net?.net_vex < 0 ? 'error.main' : undefined}
+              description="How much dealer hedging would shift if implied volatility itself changes, separate from any price move. Matters most when volatility is swinging sharply."
             />
           </Grid>
           <Grid item xs={12} sm={6} md={4} lg={3}>
@@ -252,6 +271,7 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
               value={net?.net_cex !== undefined ? formatNumber(net.net_cex) : '—'}
               subtitle={isModelDerivedGreeks ? 'Charm Exposure (model estimate)' : 'Charm Exposure'}
               color={net?.net_cex > 0 ? 'success.main' : net?.net_cex < 0 ? 'error.main' : undefined}
+              description="How much dealer hedging drifts purely from time passing (fewer days left to expiration), even if price doesn't move. Tends to matter more as expiration gets close."
             />
           </Grid>
         </>

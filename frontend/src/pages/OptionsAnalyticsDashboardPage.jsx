@@ -505,6 +505,10 @@ export default function OptionsAnalyticsDashboardPage() {
                       <Typography variant="h6">
                         ${gexRow.flip_level?.toFixed(2) || 'N/A'}
                       </Typography>
+                      <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
+                        The price where dealer hedging flips character. Above it, dealers tend to smooth out
+                        price swings; below it, their hedging can amplify moves instead.
+                      </Typography>
                     </CardContent>
                   </Card>
                 </Grid>
@@ -525,6 +529,10 @@ export default function OptionsAnalyticsDashboardPage() {
                       <Typography color="textSecondary">Max Pain Level</Typography>
                       <Typography variant="h6">
                         ${maxPainRow.max_pain?.toFixed(2) || 'N/A'}
+                      </Typography>
+                      <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
+                        The strike where option buyers collectively lose the most at expiration. Some traders
+                        watch it as a possible price magnet into expiry, but it's not a reliable predictor on its own.
                       </Typography>
                     </CardContent>
                   </Card>
@@ -638,6 +646,10 @@ export default function OptionsAnalyticsDashboardPage() {
                             <Typography variant="caption" color="textSecondary">
                               GEX: {formatGex(analysisData.call_wall?.gex)}
                             </Typography>
+                            <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
+                              Strike with the heaviest call-side gamma -- tends to act like a ceiling the price
+                              struggles to push above.
+                            </Typography>
                           </CardContent>
                         </Card>
                       </Grid>
@@ -650,6 +662,9 @@ export default function OptionsAnalyticsDashboardPage() {
                             </Typography>
                             <Typography variant="caption" color="textSecondary">
                               GEX: {formatGex(analysisData.put_wall?.gex)}
+                            </Typography>
+                            <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
+                              Strike with the heaviest put-side gamma -- tends to act like a floor that offers support.
                             </Typography>
                           </CardContent>
                         </Card>
@@ -664,6 +679,9 @@ export default function OptionsAnalyticsDashboardPage() {
                             <Typography variant="caption" color="textSecondary">
                               CumGEX: {formatCumGex(analysisData.flip_level?.cumulative_gex)}
                             </Typography>
+                            <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
+                              Where dealer hedging flips character -- calmer above it, choppier below it.
+                            </Typography>
                           </CardContent>
                         </Card>
                       </Grid>
@@ -676,6 +694,9 @@ export default function OptionsAnalyticsDashboardPage() {
                             </Typography>
                             <Typography variant="caption" color="textSecondary">
                               Reference
+                            </Typography>
+                            <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
+                              Today's actual stock price -- the point every level above is measured against.
                             </Typography>
                           </CardContent>
                         </Card>
