@@ -354,7 +354,13 @@ def analyze_options_exposure(self, symbol: str) -> Dict[str, Any]:
                 # which is what the dashboard was showing for every symbol
                 # served from cache (i.e. almost all page loads).
                 current_atm_iv = find_current_atm_iv_from_chain(nearest_chain, spot_price)
-                iv_52w_low, iv_52w_high = _update_iv_history_and_get_range(symbol, current_atm_iv)
+                iv_session = SessionLocal()
+                try:
+                    iv_52w_low, iv_52w_high = _update_iv_history_and_get_range(
+                        iv_session, symbol, current_atm_iv
+                    )
+                finally:
+                    iv_session.close()
                 metrics = compute_options_metrics(
                     nearest_chain,
                     spot=spot_price,

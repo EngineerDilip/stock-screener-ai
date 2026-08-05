@@ -4,17 +4,24 @@
  * Lets a user compare options positioning across different expiration
  * dates using TODAY's data -- a cross-section ("term structure"), not a
  * forecast. Selecting an expiration triggers a live compute (Max Pain + GEX
- * for that specific expiration) via GET /v1/options/term-structure/{symbol},
- * which also persists the result so /v1/max-pain/history and
- * /v1/gex/history (filtered to that expiration) start accumulating real
- * history for it going forward.
+ * + options metrics for that specific expiration) via GET
+ * /v1/options/term-structure/{symbol}, which also persists the result so
+ * /v1/max-pain/history and /v1/gex/history (filtered to that expiration)
+ * start accumulating real history for it going forward.
  *
  * "Nearest expiration (default)" clears the expiration filter, returning to
  * the daily batch's own series -- the same history that existed before this
  * feature.
+ *
+ * The term-structure fetch itself is owned by the parent dashboard page
+ * (OptionsAnalyticsDashboardPage) rather than this component -- the same
+ * response also drives the Gamma Exposure / Max Pain / Structural Levels /
+ * Options Metrics cards below, and fetching it here too would double the
+ * live yfinance call (and the duplicate max_pain_snapshots/gex_snapshots
+ * writes) every time an expiration is picked. This component only renders
+ * the dropdown and a status line from whatever the parent already fetched.
  */
-import { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import {
   Box,
   FormControl,
@@ -52,10 +59,18 @@ function fmtCompact(value) {
  * @param {string} props.symbol
  * @param {string|null} props.expiration - Currently selected expiration (YYYY-MM-DD) or null for default
  * @param {(expiration: string|null) => void} props.onExpirationChange
+ * @param {boolean} [props.termStructureLoading] - True while the parent's term-structure fetch for `expiration` is in flight
+ * @param {boolean} [props.termStructureError] - True if the parent's term-structure fetch for `expiration` failed
+ * @param {Object|null} [props.termStructureData] - The parent's fetched term-structure payload for `expiration`
  */
-export default function ExpirationSelector({ symbol, expiration, onExpirationChange }) {
-  const queryClient = useQueryClient();
-
+export default function ExpirationSelector({
+  symbol,
+  expiration,
+  onExpirationChange,
+  termStructureLoading = false,
+  termStructureError = false,
+  termStructureData = null,
+}) {
   const { data: expirationsData, isLoading: loadingExpirations, isError: expirationsError } = useQuery({
     queryKey: ['options-expirations', symbol],
     queryFn: async () => {
@@ -66,27 +81,9 @@ export default function ExpirationSelector({ symbol, expiration, onExpirationCha
     staleTime: 60 * 60 * 1000,
   });
 
-  const termStructureMutation = useMutation({
-    mutationFn: async (exp) => {
-      const resp = await apiClient.get(`/v1/options/term-structure/${symbol}`, {
-        params: { expiration: exp },
-      });
-      return resp.data;
-    },
-    onSuccess: () => {
-      // The term-structure call just persisted a fresh snapshot for this
-      // expiration -- invalidate so the history charts pick it up.
-      queryClient.invalidateQueries({ queryKey: ['metric-history'] });
-    },
-  });
-
   const handleChange = (event) => {
     const value = event.target.value;
-    const nextExpiration = value === '' ? null : value;
-    onExpirationChange(nextExpiration);
-    if (nextExpiration) {
-      termStructureMutation.mutate(nextExpiration);
-    }
+    onExpirationChange(value === '' ? null : value);
   };
 
   if (!symbol) return null;
@@ -126,24 +123,24 @@ export default function ExpirationSelector({ symbol, expiration, onExpirationCha
         </Alert>
       )}
 
-      {termStructureMutation.isPending && (
+      {expiration && termStructureLoading && (
         <Typography variant="caption" color="text.secondary">
           Computing {expiration} term structure…
         </Typography>
       )}
-      {termStructureMutation.isError && (
+      {expiration && termStructureError && (
         <Alert severity="error" sx={{ py: 0 }}>
           Failed to compute term structure for {expiration}
         </Alert>
       )}
-      {termStructureMutation.isSuccess && expiration && (
+      {expiration && termStructureData && (
         <>
           <Typography variant="caption" color="text.secondary">
-            {expiration}: Max Pain ${termStructureMutation.data?.max_pain_strike?.toFixed(2) ?? '—'} · Total GEX{' '}
-            {fmtCompact(termStructureMutation.data?.total_gex)} · Spot $
-            {termStructureMutation.data?.underlying_price?.toFixed(2) ?? '—'}
+            {expiration}: Max Pain ${termStructureData.max_pain_strike?.toFixed(2) ?? '—'} · Total GEX{' '}
+            {fmtCompact(termStructureData.total_gex)} · Spot $
+            {termStructureData.underlying_price?.toFixed(2) ?? '—'}
           </Typography>
-          <LastUpdated timestamp={termStructureMutation.data?.computed_at} />
+          <LastUpdated timestamp={termStructureData.computed_at} />
         </>
       )}
     </Box>

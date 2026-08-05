@@ -43,6 +43,7 @@ from .fx_rate import FXRate
 from .app_settings import AppSetting
 from .ui_view_snapshot import UIViewSnapshot, UIViewSnapshotPointer
 from .gex import GexSnapshot, GexBatch
+from .iv_history import IvHistory
 from app.infra.db.models.feature_store import (
     FeatureRun, FeatureRunUniverseSymbol, StockFeatureDaily, FeatureRunPointer,
 )
@@ -124,6 +125,7 @@ __all__ = [
     "UIViewSnapshotPointer",
     "GexSnapshot",
     "GexBatch",
+    "IvHistory",
     # Feature Store
     "FeatureRun",
     "FeatureRunUniverseSymbol",

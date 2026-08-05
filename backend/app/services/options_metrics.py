@@ -16,13 +16,16 @@ gamma levels, IVR and skew.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple
+from typing import TYPE_CHECKING, List, Dict, Any, Optional, Tuple
 from zoneinfo import ZoneInfo
 import math
 
 _ET = ZoneInfo("America/New_York")
 
 import pandas as pd
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 
 
 def _coerce_float(value: Any, default: Optional[float] = None) -> Optional[float]:
@@ -441,35 +444,56 @@ def find_current_atm_iv_from_chain(
     return None
 
 
-def _update_iv_history_and_get_range(ticker: str, current_iv: Optional[float]) -> Tuple[Optional[float], Optional[float]]:
-    """Persist today's ATM IV in a rolling ~252-session Redis history per ticker
-    and return the observed (low, high) so IV Rank can be computed.
+def _update_iv_history_and_get_range(
+    db: Optional["Session"], ticker: str, current_iv: Optional[float]
+) -> Tuple[Optional[float], Optional[float]]:
+    """Persist today's ATM IV in the iv_history table (one row per ticker per
+    trading day) and return the observed (low, high) over the trailing ~252
+    rows so IV Rank can be computed.
 
-    No dedicated historical-IV table exists in this codebase, so the range is
-    bootstrapped incrementally from live metric calculations rather than
-    mixing in stock-price 52-week highs/lows (a different quantity).
+    No dedicated historical-IV data source exists in this codebase, so the
+    range is bootstrapped incrementally from live metric calculations rather
+    than mixing in stock-price 52-week highs/lows (a different quantity).
+
+    Previously this lived in a Redis hash (7d-TTL keys elsewhere in this
+    codebase made a Redis flush/cache-clear silently reset every ticker's IV
+    Rank back to "building up history again"). Postgres makes it durable
+    across cache clears and restarts, consistent with how max_pain_snapshots
+    and gex_snapshots already persist their daily options data.
     """
-    if current_iv is None or current_iv <= 0:
+    if current_iv is None or current_iv <= 0 or db is None:
         return None, None
+
+    from .options_snapshot_upsert import trading_date_for
+    from ..models.iv_history import IvHistory
+
+    ticker = ticker.upper()
+    trading_date = trading_date_for(datetime.utcnow())
     try:
-        from .redis_pool import get_redis_client
-        redis_client = get_redis_client()
-        if redis_client is None:
-            return None, None
-        key = f"iv_history:{ticker.upper()}"
-        today = datetime.utcnow().strftime("%Y-%m-%d")
-        redis_client.hset(key, today, str(current_iv))
-        redis_client.expire(key, 400 * 24 * 3600)
-        raw = redis_client.hgetall(key)
+        existing = (
+            db.query(IvHistory)
+            .filter(IvHistory.ticker == ticker, IvHistory.trading_date == trading_date)
+            .first()
+        )
+        if existing is not None:
+            existing.atm_iv = current_iv
+        else:
+            db.add(IvHistory(ticker=ticker, trading_date=trading_date, atm_iv=current_iv))
+        db.commit()
+
+        rows = (
+            db.query(IvHistory.atm_iv)
+            .filter(IvHistory.ticker == ticker)
+            .order_by(IvHistory.trading_date.desc())
+            .limit(252)
+            .all()
+        )
     except Exception:
+        db.rollback()
         return None, None
 
-    if not raw:
-        return None, None
-
-    entries = sorted(raw.items())[-252:]
     values: List[float] = []
-    for _, v in entries:
+    for (v,) in rows:
         try:
             values.append(float(v))
         except (TypeError, ValueError):
@@ -480,10 +504,14 @@ def _update_iv_history_and_get_range(ticker: str, current_iv: Optional[float]) -
     return min(values), max(values)
 
 
-def calculate_options_metrics(ticker: str, expiration: str) -> Dict[str, Any]:
+def calculate_options_metrics(ticker: str, expiration: str, db: Optional["Session"] = None) -> Dict[str, Any]:
     """Fetch an options chain from yfinance and compute institutional options metrics.
 
     The returned payload includes GEX, walls, PCR, premium, HV, VRP, and expected move.
+
+    `db` is used to persist/read today's ATM IV for IV Rank (see
+    _update_iv_history_and_get_range); when omitted, IVR is left null rather
+    than raising, since not every caller has a DB session to hand.
     """
     from .yfinance_service import YFinanceService
     import yfinance as yf
@@ -600,12 +628,18 @@ def calculate_options_metrics(ticker: str, expiration: str) -> Dict[str, Any]:
     total_gex = total_call_gex + total_put_gex
 
     call_wall = None
+    call_wall_gex = None
     if not calls.empty and calls["call_gex"].gt(0).any():
-        call_wall = float(calls.loc[calls["call_gex"].idxmax(), "strike"])
+        call_wall_idx = calls["call_gex"].idxmax()
+        call_wall = float(calls.loc[call_wall_idx, "strike"])
+        call_wall_gex = float(calls.loc[call_wall_idx, "call_gex"])
 
     put_wall = None
+    put_wall_gex = None
     if not puts.empty and puts["put_gex"].lt(0).any():
-        put_wall = float(puts.loc[puts["put_gex"].idxmin(), "strike"])
+        put_wall_idx = puts["put_gex"].idxmin()
+        put_wall = float(puts.loc[put_wall_idx, "strike"])
+        put_wall_gex = float(puts.loc[put_wall_idx, "put_gex"])
 
     total_call_volume = float(calls["volume"].sum())
     total_put_volume = float(puts["volume"].sum())
@@ -676,7 +710,7 @@ def calculate_options_metrics(ticker: str, expiration: str) -> Dict[str, Any]:
     if current_atm_iv is not None and historical_volatility is not None:
         volatility_risk_premium = current_atm_iv - historical_volatility
 
-    iv_52w_low, iv_52w_high = _update_iv_history_and_get_range(ticker, current_atm_iv)
+    iv_52w_low, iv_52w_high = _update_iv_history_and_get_range(db, ticker, current_atm_iv)
     result = compute_options_metrics(options_chain, spot=underlying_price, current_iv=current_atm_iv,
                                       iv_52w_low=iv_52w_low, iv_52w_high=iv_52w_high)
     result.update({
@@ -699,6 +733,16 @@ def calculate_options_metrics(ticker: str, expiration: str) -> Dict[str, Any]:
         "total_gex": total_gex,
         "call_wall": call_wall,
         "put_wall": put_wall,
+        # GEX magnitude at each wall strike -- lets a caller (e.g. the
+        # per-expiration Structural Levels card) render the same "Call Wall
+        # GEX: N" detail the nightly batch analysis provides, without a
+        # second request. There's no equivalent cumulative-GEX-at-flip-level
+        # figure here (see key_levels.zero_gamma, which is often an
+        # interpolated price between two strikes rather than a real one, so
+        # "cumulative GEX at that exact level" isn't well-defined the way it
+        # is for a wall).
+        "call_wall_gex": call_wall_gex,
+        "put_wall_gex": put_wall_gex,
         "max_pain_strike": max_pain_strike,
         "max_pain_distance_pct": (
             ((underlying_price - max_pain_strike) / max_pain_strike) * 100.0

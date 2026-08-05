@@ -51,6 +51,8 @@ class OptionsMetricsResponse(BaseModel):
     total_gex: Optional[float] = None
     call_wall: Optional[float] = None
     put_wall: Optional[float] = None
+    call_wall_gex: Optional[float] = None
+    put_wall_gex: Optional[float] = None
     max_pain_strike: Optional[float] = None
     max_pain_distance_pct: Optional[float] = None
     greeks_methodology: Optional[str] = None

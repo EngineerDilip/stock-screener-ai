@@ -144,7 +144,7 @@ async def get_options_term_structure(
         raise HTTPException(status_code=422, detail=f"Invalid expiration format: {expiration!r}, expected YYYY-MM-DD")
 
     try:
-        metrics = calculate_options_metrics(normalized_symbol, expiration)
+        metrics = calculate_options_metrics(normalized_symbol, expiration, db=db)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -219,7 +219,7 @@ async def get_options_term_structure(
 
 
 @router.post("/metrics", response_model=OptionsMetricsResponse)
-async def post_options_metrics(payload: Dict[str, Any]):
+async def post_options_metrics(payload: Dict[str, Any], db: Session = Depends(get_db)):
   """Compute options exposure metrics.
 
   Payload may either include `options_chain` (list) or a `symbol` to fetch
@@ -275,7 +275,7 @@ async def post_options_metrics(payload: Dict[str, Any]):
         raise HTTPException(status_code=404, detail=f"No options data found for symbol {symbol}")
 
     if symbol and not options_chain and expiration:
-      result = calculate_options_metrics(symbol, expiration)
+      result = calculate_options_metrics(symbol, expiration, db=db)
       return result
 
     # If we have a symbol and any IV pieces are missing, try to fetch price range

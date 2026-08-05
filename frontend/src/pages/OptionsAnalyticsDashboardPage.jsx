@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   Container,
   Typography,
@@ -12,7 +13,9 @@ import {
   Alert,
   Chip,
   Autocomplete,
+  Button,
 } from '@mui/material';
+import PrintIcon from '@mui/icons-material/Print';
 import apiClient from '../api/client';
 import SummaryCards from '../components/OptionsMetrics/SummaryCards';
 import MetricHistoryChart from '../components/OptionsMetrics/MetricHistoryChart';
@@ -20,6 +23,8 @@ import ExpirationSelector from '../components/OptionsMetrics/ExpirationSelector'
 import LastUpdated from '../components/OptionsMetrics/LastUpdated';
 
 export default function OptionsAnalyticsDashboardPage() {
+  const queryClient = useQueryClient();
+
   const [tickerList, setTickerList] = useState([]);
   const [selectedTicker, setSelectedTicker] = useState(null);
   const [tickerInputValue, setTickerInputValue] = useState('');
@@ -34,6 +39,16 @@ export default function OptionsAnalyticsDashboardPage() {
   const [maxPainData, setMaxPainData] = useState(null);
   const [optionsMetrics, setOptionsMetrics] = useState(null);
   const [analysisData, setAnalysisData] = useState(null);
+
+  // Live, per-expiration term structure (Max Pain + GEX + options metrics
+  // for the specific expiration picked in ExpirationSelector, computed from
+  // today's chain rather than the nightly batch's nearest-expiration
+  // snapshot). Drives the Gamma Exposure / Max Pain Analysis / Structural
+  // Levels / Options Metrics cards below whenever selectedExpiration is set
+  // -- otherwise those cards fall back to the batch data fetched above.
+  const [termStructureData, setTermStructureData] = useState(null);
+  const [termStructureLoading, setTermStructureLoading] = useState(false);
+  const [termStructureError, setTermStructureError] = useState(false);
   const [error, setError] = useState(null);
 
   useEffect(() => {
@@ -119,6 +134,45 @@ export default function OptionsAnalyticsDashboardPage() {
       }
     })();
   }, [selectedTicker]);
+
+  // Live per-expiration term structure, refetched whenever the user picks a
+  // specific expiration in ExpirationSelector. Cleared back to null (falling
+  // back to the batch data above) when the expiration is cleared or the
+  // ticker changes -- the ticker-change effect above always resets
+  // selectedExpiration to null first, which this effect picks up.
+  useEffect(() => {
+    if (!selectedTicker || !selectedExpiration) {
+      setTermStructureData(null);
+      setTermStructureError(false);
+      setTermStructureLoading(false);
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    (async () => {
+      setTermStructureLoading(true);
+      setTermStructureError(false);
+      try {
+        const resp = await apiClient.get(`/v1/options/term-structure/${selectedTicker.symbol}`, {
+          params: { expiration: selectedExpiration },
+          signal: controller.signal,
+        });
+        setTermStructureData(resp.data);
+        // The term-structure call just persisted a fresh snapshot for this
+        // expiration -- invalidate so the history charts pick it up.
+        queryClient.invalidateQueries({ queryKey: ['metric-history'] });
+      } catch (err) {
+        if (err.name !== 'CanceledError' && err.name !== 'AbortError') {
+          setTermStructureError(true);
+          setTermStructureData(null);
+        }
+      } finally {
+        setTermStructureLoading(false);
+      }
+    })();
+
+    return () => controller.abort();
+  }, [selectedTicker, selectedExpiration, queryClient]);
 
   const getGexStatus = (value) => {
     if (value == null || Number.isNaN(Number(value))) return null;
@@ -218,8 +272,49 @@ export default function OptionsAnalyticsDashboardPage() {
     return null;
   };
 
-  const gexRow = gexData?.rows?.[0];
-  const maxPainRow = maxPainData?.rows?.[0];
+  // When an expiration is selected, the lower cards read from the live
+  // per-expiration term-structure fetch instead of the batch/nearest-
+  // expiration data -- mapped onto the same field names the batch endpoints
+  // already use so the render logic below (and getOverallConclusion/
+  // getMarketSignal, which close over these same variables) doesn't need to
+  // branch on which source it came from.
+  const gexRow = selectedExpiration
+    ? (termStructureData && {
+        call_gex: termStructureData.total_call_gex,
+        put_gex: termStructureData.total_put_gex,
+        total_gex: termStructureData.total_gex,
+        flip_level: termStructureData.key_levels?.zero_gamma,
+        fetched_at: termStructureData.computed_at,
+      })
+    : gexData?.rows?.[0];
+
+  const maxPainRow = selectedExpiration
+    ? (termStructureData && {
+        max_pain: termStructureData.max_pain_strike,
+        distance_pct: termStructureData.max_pain_distance_pct,
+        call_oi: termStructureData.total_call_oi,
+        put_oi: termStructureData.total_put_oi,
+        fetched_at: termStructureData.computed_at,
+      })
+    : maxPainData?.rows?.[0];
+
+  const displayAnalysisData = selectedExpiration
+    ? (termStructureData && {
+        call_wall: { strike: termStructureData.call_wall, gex: termStructureData.call_wall_gex },
+        put_wall: { strike: termStructureData.put_wall, gex: termStructureData.put_wall_gex },
+        flip_level:
+          termStructureData.key_levels?.zero_gamma != null
+            ? { strike: termStructureData.key_levels.zero_gamma, cumulative_gex: null }
+            : null,
+        spot_price: termStructureData.underlying_price,
+        timestamp: termStructureData.computed_at,
+      })
+    : analysisData;
+
+  // The term-structure payload IS the same shape calculate_options_metrics()
+  // returns for /v1/options/metrics -- no field mapping needed, it drops
+  // straight into SummaryCards.
+  const displayOptionsMetrics = selectedExpiration ? termStructureData : optionsMetrics;
 
   const callGexStatus = getGexStatus(gexRow?.call_gex);
   const putGexStatus = getGexStatus(gexRow?.put_gex);
@@ -230,7 +325,7 @@ export default function OptionsAnalyticsDashboardPage() {
 
   const getOverallConclusion = () => {
     const totalGex = gexRow?.total_gex != null ? Number(gexRow.total_gex) : null;
-    const skew = optionsMetrics?.skew != null ? Number(optionsMetrics.skew) : null;
+    const skew = displayOptionsMetrics?.skew != null ? Number(displayOptionsMetrics.skew) : null;
     const maxPain = maxPainRow?.distance_pct != null ? Number(maxPainRow.distance_pct) : null;
 
     if (totalGex == null && skew == null && maxPain == null) {
@@ -280,7 +375,7 @@ export default function OptionsAnalyticsDashboardPage() {
   // never flip a negative-GEX (short-gamma) regime into a "Bullish" badge.
   const getMarketSignal = () => {
     const totalGex = gexRow?.total_gex != null ? Number(gexRow.total_gex) : null;
-    const skew = optionsMetrics?.skew != null ? Number(optionsMetrics.skew) : null;
+    const skew = displayOptionsMetrics?.skew != null ? Number(displayOptionsMetrics.skew) : null;
     const maxPain = maxPainRow?.distance_pct != null ? Number(maxPainRow.distance_pct) : null;
 
     if (totalGex == null && skew == null && maxPain == null) {
@@ -352,12 +447,24 @@ export default function OptionsAnalyticsDashboardPage() {
 
   return (
     <Container maxWidth="xl" sx={{ py: 2 }}>
-      <Typography variant="h4" sx={{ mb: 3 }}>
-        Options Analytics Dashboard
-      </Typography>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
+        <Typography variant="h4">
+          Options Analytics Dashboard
+        </Typography>
+        {selectedTicker && (
+          <Button
+            className="no-print"
+            variant="outlined"
+            startIcon={<PrintIcon />}
+            onClick={() => window.print()}
+          >
+            Print / Save as PDF
+          </Button>
+        )}
+      </Box>
 
       {/* Ticker Selector */}
-      <Paper sx={{ p: 2, mb: 3 }}>
+      <Paper className="no-print" sx={{ p: 2, mb: 3 }}>
         <Autocomplete
           open={openTickerList}
           onOpen={() => {
@@ -403,7 +510,7 @@ export default function OptionsAnalyticsDashboardPage() {
       </Paper>
 
       {loadingData && (
-        <Box sx={{ display: 'flex', justifyContent: 'center', p: 3 }}>
+        <Box className="no-print" sx={{ display: 'flex', justifyContent: 'center', p: 3 }}>
           <CircularProgress />
         </Box>
       )}
@@ -425,6 +532,9 @@ export default function OptionsAnalyticsDashboardPage() {
             symbol={selectedTicker.symbol}
             expiration={selectedExpiration}
             onExpirationChange={setSelectedExpiration}
+            termStructureLoading={termStructureLoading}
+            termStructureError={termStructureError}
+            termStructureData={termStructureData}
           />
 
           {/* History trend charts (separate from the point-in-time cards below --
@@ -437,7 +547,7 @@ export default function OptionsAnalyticsDashboardPage() {
             <Paper sx={{ p: 2, mb: 3 }}>
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
                 <Typography variant="h6">
-                  Gamma Exposure (GEX)
+                  Gamma Exposure (GEX) {selectedExpiration ? `(Live: ${selectedExpiration})` : ''}
                 </Typography>
                 <LastUpdated timestamp={gexRow.fetched_at} />
               </Box>
@@ -525,7 +635,7 @@ export default function OptionsAnalyticsDashboardPage() {
             <Paper sx={{ p: 2, mb: 3 }}>
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
                 <Typography variant="h6">
-                  Max Pain Analysis
+                  Max Pain Analysis {selectedExpiration ? `(Live: ${selectedExpiration})` : ''}
                 </Typography>
                 <LastUpdated timestamp={maxPainRow.fetched_at} />
               </Box>
@@ -611,41 +721,41 @@ export default function OptionsAnalyticsDashboardPage() {
           )}
 
           {/* Structural Levels - Call Wall, Put Wall, Flip Level */}
-          {analysisData && (
+          {displayAnalysisData && (
             <Paper sx={{ p: 2, mb: 3 }}>
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
                 <Typography variant="h6">
-                  📊 Structural Levels (Batch Analysis)
+                  📊 Structural Levels {selectedExpiration ? `(Live: ${selectedExpiration})` : '(Batch Analysis)'}
                 </Typography>
-                <LastUpdated timestamp={analysisData.timestamp} />
+                <LastUpdated timestamp={displayAnalysisData.timestamp} />
               </Box>
               {(() => {
-                const callWallStrike = analysisData.call_wall?.strike;
-                const putWallStrike = analysisData.put_wall?.strike;
-                const flipLevelStrike = analysisData.flip_level?.strike;
+                const callWallStrike = displayAnalysisData.call_wall?.strike;
+                const putWallStrike = displayAnalysisData.put_wall?.strike;
+                const flipLevelStrike = displayAnalysisData.flip_level?.strike;
                 const invalidStructuralLevels = Boolean(
                   callWallStrike != null &&
                   putWallStrike != null &&
                   flipLevelStrike != null &&
                   callWallStrike === putWallStrike &&
                   callWallStrike === flipLevelStrike &&
-                  analysisData.call_wall?.gex === 0 &&
-                  analysisData.put_wall?.gex === 0 &&
-                  (analysisData.flip_level?.cumulative_gex || 0) === 0
+                  displayAnalysisData.call_wall?.gex === 0 &&
+                  displayAnalysisData.put_wall?.gex === 0 &&
+                  (displayAnalysisData.flip_level?.cumulative_gex || 0) === 0
                 );
 
                 const formatStrike = (strike) =>
                   invalidStructuralLevels || strike == null ? 'N/A' : `$${strike.toFixed(2)}`;
 
                 const formatGex = (value) =>
-                  invalidStructuralLevels ? 'N/A' : (value || 0).toLocaleString('en-US', { maximumFractionDigits: 0 });
+                  invalidStructuralLevels || value == null ? 'N/A' : value.toLocaleString('en-US', { maximumFractionDigits: 0 });
 
                 const formatCumGex = (value) =>
-                  invalidStructuralLevels ? 'N/A' : (value || 0).toLocaleString('en-US', { maximumFractionDigits: 0 });
+                  invalidStructuralLevels || value == null ? 'N/A' : value.toLocaleString('en-US', { maximumFractionDigits: 0 });
 
                 // Where price sits relative to each structural level, right now --
                 // same "Above Max Pain" style badge as the Max Pain card above.
-                const spot = analysisData.spot_price;
+                const spot = displayAnalysisData.spot_price;
 
                 const callWallStatus = (() => {
                   if (invalidStructuralLevels || spot == null || callWallStrike == null) return null;
@@ -688,7 +798,7 @@ export default function OptionsAnalyticsDashboardPage() {
                               {formatStrike(callWallStrike)}
                             </Typography>
                             <Typography variant="caption" color="textSecondary">
-                              GEX: {formatGex(analysisData.call_wall?.gex)}
+                              GEX: {formatGex(displayAnalysisData.call_wall?.gex)}
                             </Typography>
                             {callWallStatus && (
                               <Box sx={{ mt: 1 }}>
@@ -713,7 +823,7 @@ export default function OptionsAnalyticsDashboardPage() {
                               {formatStrike(putWallStrike)}
                             </Typography>
                             <Typography variant="caption" color="textSecondary">
-                              GEX: {formatGex(analysisData.put_wall?.gex)}
+                              GEX: {formatGex(displayAnalysisData.put_wall?.gex)}
                             </Typography>
                             {putWallStatus && (
                               <Box sx={{ mt: 1 }}>
@@ -737,7 +847,7 @@ export default function OptionsAnalyticsDashboardPage() {
                               {formatStrike(flipLevelStrike)}
                             </Typography>
                             <Typography variant="caption" color="textSecondary">
-                              CumGEX: {formatCumGex(analysisData.flip_level?.cumulative_gex)}
+                              CumGEX: {formatCumGex(displayAnalysisData.flip_level?.cumulative_gex)}
                             </Typography>
                             {flipStatus && (
                               <Box sx={{ mt: 1 }}>
@@ -758,7 +868,7 @@ export default function OptionsAnalyticsDashboardPage() {
                           <CardContent>
                             <Typography color="textSecondary">Spot Price</Typography>
                             <Typography variant="h6">
-                              ${analysisData.spot_price?.toFixed(2) || 'N/A'}
+                              ${displayAnalysisData.spot_price?.toFixed(2) || 'N/A'}
                             </Typography>
                             <Typography variant="caption" color="textSecondary">
                               Reference
@@ -778,29 +888,24 @@ export default function OptionsAnalyticsDashboardPage() {
                   </>
                 );
               })()}
-              {!analysisData.call_wall?.strike && !analysisData.put_wall?.strike && !analysisData.flip_level?.strike && (
-                <Typography variant="caption" sx={{ mt: 2, display: 'block', color: 'text.secondary' }}>
-                  ℹ️ Updated nightly at 23:00 UTC via batch analysis job
-                </Typography>
-              )}
-              {analysisData.call_wall?.strike || analysisData.put_wall?.strike || analysisData.flip_level?.strike ? (
-                <Typography variant="caption" sx={{ mt: 2, display: 'block', color: 'text.secondary' }}>
-                  ℹ️ Updated nightly at 23:00 UTC via batch analysis job
-                </Typography>
-              ) : null}
+              <Typography variant="caption" sx={{ mt: 2, display: 'block', color: 'text.secondary' }}>
+                {selectedExpiration
+                  ? `ℹ️ Live term structure computed just now for ${selectedExpiration}`
+                  : 'ℹ️ Updated nightly at 23:00 UTC via batch analysis job'}
+              </Typography>
             </Paper>
           )}
 
           {/* Options Metrics (Key Gamma, DEX/VEX/CEX, IVR, Skew) */}
-          {optionsMetrics && (
+          {displayOptionsMetrics && (
             <>
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
                 <Typography variant="h6">
-                  Options Metrics
+                  Options Metrics {selectedExpiration ? `(Live: ${selectedExpiration})` : ''}
                 </Typography>
-                <LastUpdated timestamp={optionsMetrics.computed_at} />
+                <LastUpdated timestamp={displayOptionsMetrics.computed_at} />
               </Box>
-              <SummaryCards data={optionsMetrics} showGreekExposures />
+              <SummaryCards data={displayOptionsMetrics} showGreekExposures />
               <Paper sx={{ p: 2, mt: 3 }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
                   <Typography variant="h6" sx={{ mr: 1 }}>
@@ -827,6 +932,12 @@ export default function OptionsAnalyticsDashboardPage() {
                 <Typography variant="body2" color="text.secondary">
                   {getOverallConclusion() || 'No conclusion available due to missing metric data.'}
                 </Typography>
+                {/* Repeats the same timestamp shown next to the "Options Metrics"
+                    heading above -- this card is long enough that the top-of-
+                    section timestamp scrolls out of view, leaving the reader
+                    with no visible answer to "how current is this?" right where
+                    the conclusion (and its Buy/Sell/Bearish label) is read. */}
+                <LastUpdated timestamp={displayOptionsMetrics.computed_at} sx={{ display: 'block', mt: 1 }} />
               </Paper>
             </>
           )}

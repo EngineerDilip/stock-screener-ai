@@ -359,6 +359,9 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
           value={ivr != null ? `${ivr.toFixed(1)}%` : '—'}
           subtitle="52W IV Percentile"
           status={getMetricStatus('ivr', ivr)}
+          description={ivr == null
+            ? 'Building 52-week IV history for this ticker from daily snapshots -- no historical IV data source exists yet, so this fills in over time as the ticker is viewed on future trading days.'
+            : undefined}
         />
       </Grid>
       <Grid item xs={12} sm={6} md={4} lg={3}>
