@@ -38,6 +38,7 @@ import {
 } from '@mui/material';
 import { format, parseISO } from 'date-fns';
 import apiClient from '../../api/client';
+import LastUpdated from './LastUpdated';
 
 const TIMEFRAMES = ['daily', 'weekly', 'monthly', 'quarterly', 'yearly'];
 const TIMEFRAME_LABELS = { daily: '1D', weekly: '1W', monthly: '1M', quarterly: '1Q', yearly: '1Y' };
@@ -147,10 +148,13 @@ export default function MetricHistoryChart({ symbol, metric, expiration = null, 
           </ToggleButtonGroup>
         </Box>
 
-        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', mb: 1, flexWrap: 'wrap' }}>
+        <Typography variant="caption" color="text.secondary">
           {data ? samplingCaption(data.sampling, data.period) : ' '}
           {data?.points?.length ? ` · ${data.points.length} points` : ''}
         </Typography>
+          <LastUpdated timestamp={data?.as_of} />
+        </Box>
 
         {isLoading && (
           <Box sx={{ display: 'flex', justifyContent: 'center', py: 6 }}>

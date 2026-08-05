@@ -45,6 +45,7 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
     call_premium_notional,
     put_premium_notional,
     greeks_methodology,
+    underlying_price,
   } = data;
 
   // Yahoo's public options data doesn't supply vanna/charm at all -- these
@@ -227,6 +228,68 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
     return null;
   };
 
+  // Where price sits relative to a structural level, in plain terms --
+  // mirrors the "Above Max Pain" / "Current price is above max pain..."
+  // pattern already used for the Max Pain card.
+  const getWallStatus = (spot, wallStrike, side) => {
+    if (spot == null || wallStrike == null || invalidSameStrikeLevels) return null;
+    const pctFromWall = ((spot - wallStrike) / wallStrike) * 100;
+
+    if (side === 'call') {
+      if (spot >= wallStrike) {
+        return {
+          label: 'Above Call Wall',
+          color: 'warning',
+          description: 'Price has pushed above the call wall -- this resistance level may no longer be holding, or a larger move is underway.',
+        };
+      }
+      if (pctFromWall > -2) {
+        return {
+          label: 'Near Call Wall',
+          color: 'warning',
+          description: 'Price is close to the call wall; upward moves may face resistance here as dealers hedge.',
+        };
+      }
+      return {
+        label: 'Below Call Wall',
+        color: 'info',
+        description: 'Price has room to run before reaching the call wall.',
+      };
+    }
+
+    // side === 'put'
+    if (spot <= wallStrike) {
+      return {
+        label: 'Below Put Wall',
+        color: 'warning',
+        description: 'Price has fallen below the put wall -- this support level may no longer be holding.',
+      };
+    }
+    if (pctFromWall < 2) {
+      return {
+        label: 'Near Put Wall',
+        color: 'warning',
+        description: 'Price is close to the put wall; downward moves may find support here as dealers hedge.',
+      };
+    }
+    return {
+      label: 'Above Put Wall',
+      color: 'success',
+      description: 'Price has room before reaching the put wall.',
+    };
+  };
+
+  // Sign-only badge for DEX/VEX/CEX -- deliberately neutral color (these
+  // aren't inherently bullish/bearish signals the way gamma regime is), just
+  // labels which direction the current reading points.
+  const getExposureSignStatus = (label) => (value) => {
+    if (value == null || Number.isNaN(Number(value))) return null;
+    const num = Number(value);
+    if (num > 0) return { label: `Positive ${label}`, color: 'info' };
+    if (num < 0) return { label: `Negative ${label}`, color: 'info' };
+    return { label: `Neutral ${label}`, color: 'info' };
+  };
+
   return (
     <Grid container spacing={2} sx={{ mb: 2 }}>
       {/* Key Gamma Levels */}
@@ -235,6 +298,7 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
           title="Call Wall"
           value={safeKeyLevel(key_levels?.call_wall)}
           description="Strike with the heaviest call-side gamma. Price often struggles to push above this level, since dealers hedge in a way that leans against the move -- it tends to act like a ceiling."
+          status={getWallStatus(underlying_price, key_levels?.call_wall, 'call')}
         />
       </Grid>
       <Grid item xs={12} sm={6} md={4} lg={3}>
@@ -242,6 +306,7 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
           title="Put Wall"
           value={safeKeyLevel(key_levels?.put_wall)}
           description="Strike with the heaviest put-side gamma. Price often finds support here as dealers hedge -- tends to act like a floor."
+          status={getWallStatus(underlying_price, key_levels?.put_wall, 'put')}
         />
       </Grid>
 
@@ -254,6 +319,7 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
               subtitle="Delta Exposure"
               color={net?.net_dex > 0 ? 'success.main' : net?.net_dex < 0 ? 'error.main' : undefined}
               description="Roughly how many dollars of stock dealers may need to trade for every $1 the price moves, to stay hedged. Positive: dealers may sell into rallies (dampens moves). Negative: dealers may buy into rallies (can fuel moves)."
+              status={getExposureSignStatus('DEX')(net?.net_dex)}
             />
           </Grid>
           <Grid item xs={12} sm={6} md={4} lg={3}>
@@ -263,6 +329,7 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
               subtitle={isModelDerivedGreeks ? 'Vanna Exposure (model estimate)' : 'Vanna Exposure'}
               color={net?.net_vex > 0 ? 'success.main' : net?.net_vex < 0 ? 'error.main' : undefined}
               description="How much dealer hedging would shift if implied volatility itself changes, separate from any price move. Matters most when volatility is swinging sharply."
+              status={getExposureSignStatus('VEX')(net?.net_vex)}
             />
           </Grid>
           <Grid item xs={12} sm={6} md={4} lg={3}>
@@ -272,6 +339,7 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
               subtitle={isModelDerivedGreeks ? 'Charm Exposure (model estimate)' : 'Charm Exposure'}
               color={net?.net_cex > 0 ? 'success.main' : net?.net_cex < 0 ? 'error.main' : undefined}
               description="How much dealer hedging drifts purely from time passing (fewer days left to expiration), even if price doesn't move. Tends to matter more as expiration gets close."
+              status={getExposureSignStatus('CEX')(net?.net_cex)}
             />
           </Grid>
         </>
@@ -307,6 +375,7 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
           value={historicalVolatilityPct != null ? `${historicalVolatilityPct.toFixed(1)}%` : '—'}
           subtitle="20-day realized volatility"
           status={getMetricStatus('historical_volatility', historicalVolatilityPct)}
+          description="How much the stock has actually moved over the past 20 trading days, annualized. This looks backward at what happened -- it isn't a forecast."
         />
       </Grid>
       <Grid item xs={12} sm={6} md={4} lg={3}>
@@ -315,6 +384,7 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
           value={volatilityRiskPremiumPct != null ? `${volatilityRiskPremiumPct.toFixed(1)}%` : '—'}
           subtitle="ATM IV - HV"
           status={getMetricStatus('volatility_risk_premium', volatilityRiskPremiumPct)}
+          description="The gap between what options are pricing in for future moves (implied) and what the stock actually did recently (realized/historical). Positive means options are pricing in more movement than has actually been happening."
         />
       </Grid>
       <Grid item xs={12} sm={6} md={4} lg={3}>
@@ -323,6 +393,7 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
           value={expected_move != null ? `$${expected_move.toFixed(2)}` : '—'}
           subtitle="ATM call + put premium"
           status={getMetricStatus('expected_move', expected_move)}
+          description="A rough one-standard-deviation price range for this expiration, priced in by at-the-money options. Roughly a 2-in-3 chance the stock stays within +/- this amount by expiry."
         />
       </Grid>
       <Grid item xs={12} sm={6} md={4} lg={3}>
@@ -333,6 +404,7 @@ export default function SummaryCards({ data, showGreekExposures = true }) {
             : '—'}
           subtitle="Volume-weighted premium ratio"
           status={getMetricStatus('premium_pcr', call_premium_notional != null && put_premium_notional != null ? (put_premium_notional / (call_premium_notional || 1)) : null)}
+          description="Compares dollars traded in put premium vs call premium today (weighted by volume, not just contract count). Above 1: more money flowing into puts. Below 1: more into calls."
         />
       </Grid>
     </Grid>

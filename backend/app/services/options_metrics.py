@@ -711,6 +711,11 @@ def calculate_options_metrics(ticker: str, expiration: str) -> Dict[str, Any]:
         # them. Surfaced explicitly so a real-vs-modeled distinction is never
         # silently lost between backend and UI.
         "greeks_methodology": "black_scholes_derived",
+        # When this was actually computed -- distinct from how fresh the
+        # underlying data is (this fetch could be live or a 7-day-old Redis
+        # cache hit at the API layer). Naive UTC, same convention as
+        # fetched_at elsewhere in this codebase.
+        "computed_at": datetime.utcnow().isoformat(),
     })
     return result
 

@@ -27,6 +27,7 @@ import {
   Alert,
 } from '@mui/material';
 import apiClient from '../../api/client';
+import LastUpdated from './LastUpdated';
 
 const BUCKET_LABELS = {
   this_week: 'This Week',
@@ -136,11 +137,14 @@ export default function ExpirationSelector({ symbol, expiration, onExpirationCha
         </Alert>
       )}
       {termStructureMutation.isSuccess && expiration && (
-        <Typography variant="caption" color="text.secondary">
-          {expiration}: Max Pain ${termStructureMutation.data?.max_pain_strike?.toFixed(2) ?? '—'} · Total GEX{' '}
-          {fmtCompact(termStructureMutation.data?.total_gex)} · Spot $
-          {termStructureMutation.data?.underlying_price?.toFixed(2) ?? '—'}
-        </Typography>
+        <>
+          <Typography variant="caption" color="text.secondary">
+            {expiration}: Max Pain ${termStructureMutation.data?.max_pain_strike?.toFixed(2) ?? '—'} · Total GEX{' '}
+            {fmtCompact(termStructureMutation.data?.total_gex)} · Spot $
+            {termStructureMutation.data?.underlying_price?.toFixed(2) ?? '—'}
+          </Typography>
+          <LastUpdated timestamp={termStructureMutation.data?.computed_at} />
+        </>
       )}
     </Box>
   );

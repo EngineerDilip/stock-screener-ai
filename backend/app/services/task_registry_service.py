@@ -92,7 +92,7 @@ SCHEDULED_TASKS = {
         'task_function': 'app.tasks.max_pain_tasks.schedule_daily_update',
         'display_name': 'Daily Max Pain Update',
         'description': 'Fetches options data and computes max pain levels',
-        'schedule_description': '4:30 PM ET daily; chains into Daily GEX Update on completion',
+        'schedule_description': '5:30 PM ET daily (after Daily Market Pipeline US clears data_fetch_us); chains into Daily GEX Update on completion',
         'manual_dispatch_options': {'queue': data_fetch_queue_for_market('US')},
     },
     'daily-gex-update': {

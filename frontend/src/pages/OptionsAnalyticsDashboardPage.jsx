@@ -17,6 +17,7 @@ import apiClient from '../api/client';
 import SummaryCards from '../components/OptionsMetrics/SummaryCards';
 import MetricHistoryChart from '../components/OptionsMetrics/MetricHistoryChart';
 import ExpirationSelector from '../components/OptionsMetrics/ExpirationSelector';
+import LastUpdated from '../components/OptionsMetrics/LastUpdated';
 
 export default function OptionsAnalyticsDashboardPage() {
   const [tickerList, setTickerList] = useState([]);
@@ -434,9 +435,12 @@ export default function OptionsAnalyticsDashboardPage() {
           {/* GEX Summary */}
           {gexRow && (
             <Paper sx={{ p: 2, mb: 3 }}>
-              <Typography variant="h6" sx={{ mb: 2 }}>
-                Gamma Exposure (GEX)
-              </Typography>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                <Typography variant="h6">
+                  Gamma Exposure (GEX)
+                </Typography>
+                <LastUpdated timestamp={gexRow.fetched_at} />
+              </Box>
               <Grid container spacing={2}>
                 <Grid item xs={12} sm={6} md={3}>
                   <Card>
@@ -519,9 +523,12 @@ export default function OptionsAnalyticsDashboardPage() {
           {/* Max Pain Summary */}
           {maxPainRow && (
             <Paper sx={{ p: 2, mb: 3 }}>
-              <Typography variant="h6" sx={{ mb: 2 }}>
-                Max Pain Analysis
-              </Typography>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                <Typography variant="h6">
+                  Max Pain Analysis
+                </Typography>
+                <LastUpdated timestamp={maxPainRow.fetched_at} />
+              </Box>
               <Grid container spacing={2}>
                 <Grid item xs={12} sm={6} md={3}>
                   <Card>
@@ -606,9 +613,12 @@ export default function OptionsAnalyticsDashboardPage() {
           {/* Structural Levels - Call Wall, Put Wall, Flip Level */}
           {analysisData && (
             <Paper sx={{ p: 2, mb: 3 }}>
-              <Typography variant="h6" sx={{ mb: 2 }}>
-                📊 Structural Levels (Batch Analysis)
-              </Typography>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                <Typography variant="h6">
+                  📊 Structural Levels (Batch Analysis)
+                </Typography>
+                <LastUpdated timestamp={analysisData.timestamp} />
+              </Box>
               {(() => {
                 const callWallStrike = analysisData.call_wall?.strike;
                 const putWallStrike = analysisData.put_wall?.strike;
@@ -633,6 +643,40 @@ export default function OptionsAnalyticsDashboardPage() {
                 const formatCumGex = (value) =>
                   invalidStructuralLevels ? 'N/A' : (value || 0).toLocaleString('en-US', { maximumFractionDigits: 0 });
 
+                // Where price sits relative to each structural level, right now --
+                // same "Above Max Pain" style badge as the Max Pain card above.
+                const spot = analysisData.spot_price;
+
+                const callWallStatus = (() => {
+                  if (invalidStructuralLevels || spot == null || callWallStrike == null) return null;
+                  if (spot >= callWallStrike) {
+                    return { label: 'Above Call Wall', color: 'warning', description: 'Price has pushed above the call wall -- this resistance may no longer be holding, or a bigger move is underway.' };
+                  }
+                  if (((spot - callWallStrike) / callWallStrike) * 100 > -2) {
+                    return { label: 'Near Call Wall', color: 'warning', description: 'Price is close to the call wall; upward moves may face resistance here as dealers hedge.' };
+                  }
+                  return { label: 'Below Call Wall', color: 'info', description: 'Price has room to run before reaching the call wall.' };
+                })();
+
+                const putWallStatus = (() => {
+                  if (invalidStructuralLevels || spot == null || putWallStrike == null) return null;
+                  if (spot <= putWallStrike) {
+                    return { label: 'Below Put Wall', color: 'warning', description: 'Price has fallen below the put wall -- this support may no longer be holding.' };
+                  }
+                  if (((spot - putWallStrike) / putWallStrike) * 100 < 2) {
+                    return { label: 'Near Put Wall', color: 'warning', description: 'Price is close to the put wall; downward moves may find support here as dealers hedge.' };
+                  }
+                  return { label: 'Above Put Wall', color: 'success', description: 'Price has room before reaching the put wall.' };
+                })();
+
+                const flipStatus = (() => {
+                  if (invalidStructuralLevels || spot == null || flipLevelStrike == null) return null;
+                  if (spot > flipLevelStrike) {
+                    return { label: 'Long Gamma Regime', color: 'success', description: 'Price is above the flip level -- dealer hedging tends to dampen swings here, favoring calmer trading.' };
+                  }
+                  return { label: 'Short Gamma Regime', color: 'warning', description: 'Price is below the flip level -- dealer hedging can amplify moves here, favoring choppier trading.' };
+                })();
+
                 return (
                   <>
                     <Grid container spacing={2}>
@@ -646,6 +690,14 @@ export default function OptionsAnalyticsDashboardPage() {
                             <Typography variant="caption" color="textSecondary">
                               GEX: {formatGex(analysisData.call_wall?.gex)}
                             </Typography>
+                            {callWallStatus && (
+                              <Box sx={{ mt: 1 }}>
+                                <Chip label={callWallStatus.label} color={callWallStatus.color} size="small" />
+                                <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: 'text.secondary' }}>
+                                  {callWallStatus.description}
+                                </Typography>
+                              </Box>
+                            )}
                             <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
                               Strike with the heaviest call-side gamma -- tends to act like a ceiling the price
                               struggles to push above.
@@ -663,6 +715,14 @@ export default function OptionsAnalyticsDashboardPage() {
                             <Typography variant="caption" color="textSecondary">
                               GEX: {formatGex(analysisData.put_wall?.gex)}
                             </Typography>
+                            {putWallStatus && (
+                              <Box sx={{ mt: 1 }}>
+                                <Chip label={putWallStatus.label} color={putWallStatus.color} size="small" />
+                                <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: 'text.secondary' }}>
+                                  {putWallStatus.description}
+                                </Typography>
+                              </Box>
+                            )}
                             <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
                               Strike with the heaviest put-side gamma -- tends to act like a floor that offers support.
                             </Typography>
@@ -679,6 +739,14 @@ export default function OptionsAnalyticsDashboardPage() {
                             <Typography variant="caption" color="textSecondary">
                               CumGEX: {formatCumGex(analysisData.flip_level?.cumulative_gex)}
                             </Typography>
+                            {flipStatus && (
+                              <Box sx={{ mt: 1 }}>
+                                <Chip label={flipStatus.label} color={flipStatus.color} size="small" />
+                                <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: 'text.secondary' }}>
+                                  {flipStatus.description}
+                                </Typography>
+                              </Box>
+                            )}
                             <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
                               Where dealer hedging flips character -- calmer above it, choppier below it.
                             </Typography>
@@ -726,6 +794,12 @@ export default function OptionsAnalyticsDashboardPage() {
           {/* Options Metrics (Key Gamma, DEX/VEX/CEX, IVR, Skew) */}
           {optionsMetrics && (
             <>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+                <Typography variant="h6">
+                  Options Metrics
+                </Typography>
+                <LastUpdated timestamp={optionsMetrics.computed_at} />
+              </Box>
               <SummaryCards data={optionsMetrics} showGreekExposures />
               <Paper sx={{ p: 2, mt: 3 }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>

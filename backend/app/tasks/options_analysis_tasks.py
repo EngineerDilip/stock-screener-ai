@@ -363,6 +363,7 @@ def analyze_options_exposure(self, symbol: str) -> Dict[str, Any]:
                     iv_52w_high=iv_52w_high,
                 )
                 metrics["greeks_methodology"] = "black_scholes_derived"
+                metrics["computed_at"] = result["timestamp"]
                 redis_client = get_redis_client()
                 redis_client.set(f"options_metrics:{symbol}", json.dumps(metrics), ex=7 * 24 * 3600)
             except Exception:

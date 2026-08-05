@@ -549,9 +549,21 @@ def _build_cache_warmup_beat_schedule(enabled_markets: list[str]) -> dict:
         # Routed to the US data_fetch queue (previously unrouted, which meant
         # this long, rate-limited yfinance sweep ran on the shared general
         # 'celery' queue and tied up a general-compute worker for its duration).
+        #
+        # 17:30 ET, not 16:30 -- daily-market-pipeline-us also starts at
+        # 16:30 and its first step (smart_refresh_cache) needs this same
+        # data_fetch_us queue before the rest of that chain (breadth, group
+        # rankings, market RS) can even begin. The pipeline's data_fetch step
+        # is a quick delta refresh; Max Pain's full-universe sweep is much
+        # longer, so if Max Pain won the race to the single data_fetch_us
+        # worker, the whole US pipeline sat blocked behind it. An hour of
+        # headroom is a guessed gap, not a guarantee (same caveat as the old
+        # 10-minute gaps this replaced) -- if the US pipeline is ever still
+        # mid-run at 17:30, revisit this as a chain instead, the same fix
+        # applied to max_pain -> gex -> options below.
         'daily-max-pain-update': {
             'task': 'app.tasks.max_pain_tasks.schedule_daily_update',
-            'schedule': crontab(hour=16, minute=30),
+            'schedule': crontab(hour=17, minute=30),
             'options': {'queue': data_fetch_queue_for_market('US')},
         },
 
