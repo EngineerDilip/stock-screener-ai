@@ -15,6 +15,16 @@ The macro SPY/QQQ bar is the one exception: it's just two symbols, so
 _fetch_live_macro_index does a live on-demand fetch when there's no usable
 persisted snapshot, so the top bar stays populated regardless of universe
 coverage.
+
+Volatility Acceleration and Gamma Flip Proximity are a second exception:
+they only need total_gex / flip level / spot, which the existing daily
+max-pain -> GEX -> options pipeline (gex_tasks.py) already computes for
+~10k tickers, independent of and far ahead of the much narrower
+options-metrics batch sweep (analyze_options_exposure) that everything
+else here depends on. Making those two tables wait on that sweep to
+individually re-derive numbers the GEX pipeline already has would leave
+them sitting near-empty for no reason -- so they read GexSnapshot directly
+instead.
 """
 
 from __future__ import annotations
@@ -27,6 +37,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from ...database import get_db
+from ...models.gex import GexSnapshot
 from ...models.options_metrics_snapshot import OptionsMetricsSnapshot
 from ...models.stock_universe import StockUniverse
 from ...services.options_market_signal import evaluate_snapshot_signal
@@ -102,26 +113,24 @@ def _latest_snapshots_for_active_universe(db: Session) -> List[OptionsMetricsSna
     return [r for r in subq.all() if not _is_degenerate_snapshot(r)]
 
 
+def _latest_gex_snapshots_for_active_universe(db: Session) -> List[GexSnapshot]:
+    """One row per active US-market ticker: latest OK GexSnapshot from the
+    existing daily max-pain -> GEX -> options pipeline (see module
+    docstring) -- ~10k tickers' worth of real total_gex/flip-level data,
+    already fresh as of the day's run, independent of the much narrower
+    options-metrics batch sweep."""
+    subq = (
+        db.query(GexSnapshot)
+        .join(StockUniverse, StockUniverse.symbol == GexSnapshot.ticker)
+        .filter(StockUniverse.active_filter(), StockUniverse.market == "US", GexSnapshot.status == "OK")
+        .distinct(GexSnapshot.ticker)
+        .order_by(GexSnapshot.ticker, GexSnapshot.fetched_at.desc())
+    )
+    return subq.all()
+
+
 def _symbol_row(symbol: str, **fields: Any) -> Dict[str, Any]:
     return {"symbol": symbol, **fields}
-
-
-def _rank_volatility_acceleration(rows: List[OptionsMetricsSnapshot]) -> List[Dict[str, Any]]:
-    # total_gex == 0 is excluded alongside None: a real chain essentially
-    # never nets to exactly zero, so 0 means "not actually computed" (an
-    # empty/degenerate chain read) rather than a genuine flat GEX reading.
-    eligible = [r for r in rows if r.total_gex]
-    eligible.sort(key=lambda r: r.total_gex)
-    return [
-        _symbol_row(
-            r.ticker,
-            price=r.underlying_price,
-            totalGex=r.total_gex,
-            distanceToFlipPct=_pct_distance(r.underlying_price, r.zero_gamma),
-            regime="short_gamma" if r.total_gex < 0 else "long_gamma",
-        )
-        for r in eligible[:_TOP_N]
-    ]
 
 
 def _pct_distance(spot: Optional[float], level: Optional[float]) -> Optional[float]:
@@ -130,7 +139,31 @@ def _pct_distance(spot: Optional[float], level: Optional[float]) -> Optional[flo
     return round((spot - level) / level * 100.0, 2)
 
 
-def _rank_gamma_flip_proximity(rows: List[OptionsMetricsSnapshot]) -> Dict[str, Any]:
+def _rank_volatility_acceleration(rows: List[GexSnapshot]) -> List[Dict[str, Any]]:
+    # total_gex == 0 is excluded alongside None: a real chain essentially
+    # never nets to exactly zero, so 0 means "not actually computed" (an
+    # empty/degenerate chain read) rather than a genuine flat GEX reading --
+    # this also doubles as the zero-OI staleness guard for this table, since
+    # a chain read entirely from zero OI collapses total_gex to 0 too.
+    eligible = [r for r in rows if r.total_gex]
+    eligible.sort(key=lambda r: r.total_gex)
+    return [
+        _symbol_row(
+            r.ticker,
+            price=r.spot_price,
+            totalGex=r.total_gex,
+            distanceToFlipPct=(
+                r.distance_to_flip_pct
+                if r.distance_to_flip_pct is not None
+                else _pct_distance(r.spot_price, r.flip_level)
+            ),
+            regime="short_gamma" if r.total_gex < 0 else "long_gamma",
+        )
+        for r in eligible[:_TOP_N]
+    ]
+
+
+def _rank_gamma_flip_proximity(rows: List[GexSnapshot]) -> Dict[str, Any]:
     """Tickers trading closest to their zero-gamma flip level. Normally
     restricted to within _FLIP_PROXIMITY_PCT (1.5%) of the flip, but that
     can legitimately come back empty on a quiet day -- rather than showing
@@ -139,7 +172,11 @@ def _rank_gamma_flip_proximity(rows: List[OptionsMetricsSnapshot]) -> Dict[str, 
     frontend can label it as an outside-threshold fallback."""
     all_candidates = []
     for r in rows:
-        distance = _pct_distance(r.underlying_price, r.zero_gamma)
+        distance = (
+            r.distance_to_flip_pct
+            if r.distance_to_flip_pct is not None
+            else _pct_distance(r.spot_price, r.flip_level)
+        )
         if distance is None:
             continue
         all_candidates.append((abs(distance), r, distance))
@@ -152,7 +189,7 @@ def _rank_gamma_flip_proximity(rows: List[OptionsMetricsSnapshot]) -> Dict[str, 
     return {
         "widened": widened,
         "rows": [
-            _symbol_row(r.ticker, spot=r.underlying_price, flipLevel=r.zero_gamma, distancePct=distance)
+            _symbol_row(r.ticker, spot=r.spot_price, flipLevel=r.flip_level, distancePct=distance)
             for _, r, distance in source
         ],
     }
@@ -414,11 +451,17 @@ def get_command_center_snapshot(db: Session = Depends(get_db)) -> Dict[str, Any]
     real to report.
     """
     rows = _latest_snapshots_for_active_universe(db)
+    gex_rows = _latest_gex_snapshots_for_active_universe(db)
     by_ticker = {r.ticker: r for r in rows}
+    gex_by_ticker = {r.ticker: r for r in gex_rows}
 
     # Resolved once each (not per-field) -- _macro_index does a live fetch
     # when there's no persisted row, and that fetch is not cheap enough to
-    # repeat for the same symbol within one request.
+    # repeat for the same symbol within one request. Deliberately NOT
+    # sourced from gex_by_ticker: GexSnapshot has no call_wall/put_wall
+    # columns at all, so preferring it here would silently drop those two
+    # fields from the macro bar even when a richer options-metrics row (or
+    # the live-fetch fallback) already has them.
     spy_index = _macro_index(db, by_ticker.get("SPY"), "SPY")
     qqq_index = _macro_index(db, by_ticker.get("QQQ"), "QQQ")
 
@@ -432,8 +475,8 @@ def get_command_center_snapshot(db: Session = Depends(get_db)) -> Dict[str, Any]
             },
             "indices": [spy_index, qqq_index],
         },
-        "volatilityAcceleration": _rank_volatility_acceleration(rows),
-        "gammaFlipProximity": _rank_gamma_flip_proximity(rows),
+        "volatilityAcceleration": _rank_volatility_acceleration(gex_rows),
+        "gammaFlipProximity": _rank_gamma_flip_proximity(gex_rows),
         "richVrp": _rank_vrp(rows, rich=True),
         "cheapVrp": _rank_vrp(rows, rich=False),
         "extremeSkew": _rank_extreme_skew(rows),
@@ -442,5 +485,6 @@ def get_command_center_snapshot(db: Session = Depends(get_db)) -> Dict[str, Any]
         "alerts": _generate_alerts(rows),
         "coverage": {
             "activeUniverseSymbolsWithData": len(rows),
+            "activeUniverseSymbolsWithGexData": len(gex_rows),
         },
     }

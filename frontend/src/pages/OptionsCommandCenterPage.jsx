@@ -45,7 +45,8 @@ export default function OptionsCommandCenterPage() {
       {data && (
         <>
           <div className="mx-auto max-w-[1800px] px-4 pt-3 text-[11px] text-slate-600">
-            {data.coverage?.activeUniverseSymbolsWithData ?? 0} active symbol(s) with persisted options data
+            {data.coverage?.activeUniverseSymbolsWithGexData ?? 0} symbol(s) with GEX/structural data &middot;{' '}
+            {data.coverage?.activeUniverseSymbolsWithData ?? 0} with full options-metrics data
             {dataUpdatedAt ? ` · refreshed ${new Date(dataUpdatedAt).toLocaleTimeString()}` : ''}
           </div>
           <CommandGrid data={data} />
