@@ -67,17 +67,35 @@ def _is_degenerate_snapshot(row: OptionsMetricsSnapshot) -> bool:
 
 
 def _latest_snapshots_for_active_universe(db: Session) -> List[OptionsMetricsSnapshot]:
-    """One row per active US-market ticker: whichever persisted snapshot is
-    most recent for that ticker, regardless of source (live_full vs.
-    batch_abbreviated) -- callers filter further by whichever fields their
-    specific ranking actually needs. Degenerate zero-OI rows (see
-    _is_degenerate_snapshot) are dropped entirely; a ticker with only a
-    degenerate row on file simply has no data yet, same as a ticker with no
-    row at all."""
+    """One row per active US-market ticker: whichever `batch_abbreviated`
+    snapshot is most recent for that ticker -- i.e. only rows produced by an
+    actual systematic sweep (analyze_options_exposure, scheduled or manually
+    triggered), never a `live_full` row.
+
+    `live_full` rows come from someone opening one specific symbol on the
+    Options Analytics dashboard (POST /v1/options/metrics) -- deliberately
+    excluded here even though they're richer data, because the Command
+    Center is supposed to represent "what a systematic scan of the universe
+    found," not "whatever tickers a user happened to click on today." Mixing
+    the two made the rankings look like an arbitrary, non-reproducible set
+    of symbols (e.g. a ticker appearing purely because someone viewed its
+    dashboard once) rather than real market-wide screening output. The
+    single-symbol dashboard and its correlation panel still read live_full
+    rows directly (see api/v1/options.py, api/v1/stocks.py) -- only the
+    universe-wide rankings here are scoped to batch data.
+
+    Degenerate zero-OI rows (see _is_degenerate_snapshot) are dropped
+    entirely; a ticker with only a degenerate row on file simply has no data
+    yet, same as a ticker with no row at all.
+    """
     subq = (
         db.query(OptionsMetricsSnapshot)
         .join(StockUniverse, StockUniverse.symbol == OptionsMetricsSnapshot.ticker)
-        .filter(StockUniverse.active_filter(), StockUniverse.market == "US")
+        .filter(
+            StockUniverse.active_filter(),
+            StockUniverse.market == "US",
+            OptionsMetricsSnapshot.source == "batch_abbreviated",
+        )
         .distinct(OptionsMetricsSnapshot.ticker)
         .order_by(OptionsMetricsSnapshot.ticker, OptionsMetricsSnapshot.fetched_at.desc())
     )
