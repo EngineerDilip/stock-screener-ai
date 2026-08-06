@@ -79,3 +79,12 @@ class OptionsMetricsResponse(BaseModel):
     greeks_methodology: Optional[str] = None
     computed_at: Optional[str] = None
     schema_version: Optional[int] = None
+    # Set when live yfinance data reports zero open interest across every
+    # strike (a known off-hours/pre-market data-staleness pattern, not a
+    # real market condition) and a persisted OptionsMetricsSnapshot with
+    # real open interest was substituted instead. Absent/false on a normal
+    # live response.
+    data_source: Optional[str] = None
+    is_stale_fallback: Optional[bool] = None
+    snapshot_trading_date: Optional[str] = None
+    snapshot_fetched_at: Optional[str] = None

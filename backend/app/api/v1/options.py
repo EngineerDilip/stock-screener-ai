@@ -5,6 +5,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
 
@@ -41,6 +42,74 @@ _EXPIRATION_BUCKETS = [
     ("this_quarter", 100),
     ("later", None),
 ]
+
+
+def _is_zero_open_interest(total_call_oi: Optional[int], total_put_oi: Optional[int]) -> bool:
+    """True when a freshly computed payload has zero open interest on both
+    sides of the chain -- a known yfinance/Yahoo off-hours data-staleness
+    pattern (OI reported as 0 before their daily snapshot refreshes), not a
+    real market condition for a chain that otherwise has live volume/price
+    data. Used to gate both the persisted-snapshot fallback and the
+    "don't clobber a good historical row" persistence guard below.
+    """
+    return (total_call_oi or 0) == 0 and (total_put_oi or 0) == 0
+
+
+def _options_metrics_from_snapshot(row: OptionsMetricsSnapshot) -> Dict[str, Any]:
+    """Reconstruct an OptionsMetricsResponse-shaped payload from a persisted
+    OptionsMetricsSnapshot row, for serving when live yfinance data is
+    stale (see _is_zero_open_interest). Marked explicitly as fallback data
+    -- callers must not treat this as a live reading."""
+    return {
+        "ticker": row.ticker,
+        "expiration": row.expiration.isoformat() if row.expiration else None,
+        "key_levels": {
+            "call_wall": row.call_wall,
+            "put_wall": row.put_wall,
+            "zero_gamma": row.zero_gamma,
+        },
+        # NetExposures requires non-optional floats -- coerce, since the
+        # columns themselves are nullable (e.g. an older/incomplete row).
+        # An unhandled ValidationError here would 500 the whole request,
+        # which is worse than the zeros this fallback exists to avoid.
+        "net": {
+            "net_dex": row.net_dex or 0.0,
+            "net_vex": row.net_vex or 0.0,
+            "net_cex": row.net_cex or 0.0,
+        },
+        "ivr": row.ivr,
+        "skew": row.skew,
+        "strikes": row.strikes_json or [],
+        "volume_put_call_ratio": row.volume_put_call_ratio,
+        "open_interest_put_call_ratio": row.open_interest_put_call_ratio,
+        "total_call_oi": row.total_call_oi,
+        "total_put_oi": row.total_put_oi,
+        "call_premium_notional": row.call_premium_notional,
+        "put_premium_notional": row.put_premium_notional,
+        "underlying_price": row.underlying_price,
+        "historical_volatility": row.historical_volatility,
+        "current_atm_iv": row.current_atm_iv,
+        "volatility_risk_premium": row.volatility_risk_premium,
+        "expected_move": row.expected_move,
+        "atm_strike": row.atm_strike,
+        "total_call_gex": row.total_call_gex,
+        "total_put_gex": row.total_put_gex,
+        "total_gex": row.total_gex,
+        "call_wall_gex": row.call_wall_gex,
+        "put_wall_gex": row.put_wall_gex,
+        "iv_smile": row.iv_smile_json,
+        "unusual_volume": row.unusual_volume_json or [],
+        "next_earnings_date": row.next_earnings_date.isoformat() if row.next_earnings_date else None,
+        "max_pain_strike": row.max_pain_strike,
+        "max_pain_distance_pct": row.max_pain_distance_pct,
+        "greeks_methodology": row.greeks_methodology,
+        "computed_at": row.fetched_at.isoformat() if row.fetched_at else None,
+        "schema_version": None,  # not a live payload -- never satisfies the cache-hit gate above
+        "data_source": "persisted_fallback",
+        "is_stale_fallback": True,
+        "snapshot_trading_date": row.trading_date.isoformat() if row.trading_date else None,
+        "snapshot_fetched_at": row.fetched_at.isoformat() if row.fetched_at else None,
+    }
 
 
 def _bucket_expirations(expirations: List[str], today_et) -> Dict[str, List[str]]:
@@ -363,6 +432,42 @@ async def post_options_metrics(payload: Dict[str, Any], db: Session = Depends(ge
     if symbol and not options_chain and expiration:
       result = calculate_options_metrics(symbol, expiration, db=db, record_iv_history=not explicit_expiration)
       if not explicit_expiration:
+        is_stale = _is_zero_open_interest(result.get("total_call_oi"), result.get("total_put_oi"))
+
+        if is_stale:
+          # Live yfinance data has zero OI on both sides -- almost always an
+          # off-hours/pre-market data-staleness artifact (see
+          # _is_zero_open_interest), not a real market condition. Serve the
+          # most recent persisted snapshot that actually had real OI instead
+          # of a wall of zeros, and deliberately skip the Redis re-cache and
+          # DB persist below for this reading -- caching or persisting it
+          # would either poison the 7-day cache with garbage or clobber a
+          # good historical row for this same (ticker, trading_date,
+          # expiration).
+          fallback_row = (
+            db.query(OptionsMetricsSnapshot)
+            .filter(
+              OptionsMetricsSnapshot.ticker == symbol.upper(),
+              or_(OptionsMetricsSnapshot.total_call_oi > 0, OptionsMetricsSnapshot.total_put_oi > 0),
+            )
+            .order_by(OptionsMetricsSnapshot.fetched_at.desc())
+            .first()
+          )
+          if fallback_row is not None:
+            fallback_payload = _options_metrics_from_snapshot(fallback_row)
+            # Price itself isn't subject to the same OI-staleness pattern --
+            # prefer the fresh live quote over the snapshot's if we have one.
+            if result.get("underlying_price") is not None:
+              fallback_payload["underlying_price"] = result["underlying_price"]
+            return fallback_payload
+          # No usable snapshot to fall back to -- return the honest (zero)
+          # live reading rather than fabricate data, but still flag it so
+          # the frontend can explain why the numbers look off instead of
+          # presenting them as normal.
+          result["data_source"] = "live_zero_oi"
+          result["is_stale_fallback"] = False
+          return result
+
         # Re-cache the complete payload under the same key the batch task
         # writes an abbreviated version to (see the cache-hit block above)
         # -- this is what actually self-heals a batch-only ticker's cache

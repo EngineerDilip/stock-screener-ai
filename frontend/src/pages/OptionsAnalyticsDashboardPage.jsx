@@ -645,6 +645,25 @@ export default function OptionsAnalyticsDashboardPage() {
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
 
+      {displayOptionsMetrics?.is_stale_fallback && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          ⚠️ Live options data currently shows zero open interest for {selectedTicker?.symbol}
+          {' '}(a known yfinance data gap during off-hours) -- showing the last known-good snapshot
+          {displayOptionsMetrics.snapshot_fetched_at
+            ? ` from ${new Date(displayOptionsMetrics.snapshot_fetched_at).toLocaleString()}`
+            : ''}
+          {' '}instead. Prices shown are current; positioning data below is not.
+        </Alert>
+      )}
+      {displayOptionsMetrics?.data_source === 'live_zero_oi' && (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          ℹ️ Live options data currently shows zero open interest for {selectedTicker?.symbol}
+          {' '}(a known yfinance data gap during off-hours) and no prior snapshot is available yet
+          to fall back to. The numbers below are likely not meaningful right now -- try again during
+          market hours.
+        </Alert>
+      )}
+
       {selectedTicker && !loadingData && (
         <>
           {/* Ticker Header */}

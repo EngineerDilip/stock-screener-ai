@@ -391,42 +391,53 @@ def analyze_options_exposure(self, symbol: str) -> Dict[str, Any]:
                 # fetched above, not the fuller payload calculate_options_metrics()
                 # produces on-demand. schema_version stays null so downstream
                 # readers can tell this row apart from a live_full one.
-                try:
-                    fetched_at = datetime.utcnow()
-                    snapshot_db = SessionLocal()
+                #
+                # Skipped entirely when every strike shows zero open interest
+                # -- a known yfinance off-hours data-staleness pattern (see
+                # _is_zero_open_interest in api/v1/options.py), not a real
+                # market condition. Persisting it would clobber a good
+                # historical row for this same (ticker, trading_date,
+                # expiration) with garbage.
+                total_batch_oi = sum((s.get("oi") or 0) for s in (metrics.get("strikes") or []))
+                if total_batch_oi <= 0:
+                    logger.debug("Skipping OptionsMetricsSnapshot persist for %s: zero OI across all strikes", symbol)
+                else:
                     try:
-                        key_levels = metrics.get("key_levels") or {}
-                        net = metrics.get("net") or {}
-                        upsert_snapshot(
-                            snapshot_db,
-                            OptionsMetricsSnapshot,
-                            ticker=symbol,
-                            trading_date=trading_date_for(fetched_at),
-                            expiration=_parse_expiration_date(expirations[0] if expirations else None),
-                            values={
-                                "status": "OK",
-                                "error": None,
-                                "source": "batch_abbreviated",
-                                "schema_version": None,
-                                "underlying_price": spot_price,
-                                "call_wall": key_levels.get("call_wall"),
-                                "put_wall": key_levels.get("put_wall"),
-                                "zero_gamma": key_levels.get("zero_gamma"),
-                                "net_dex": net.get("net_dex"),
-                                "net_vex": net.get("net_vex"),
-                                "net_cex": net.get("net_cex"),
-                                "ivr": metrics.get("ivr"),
-                                "skew": metrics.get("skew"),
-                                "greeks_methodology": metrics.get("greeks_methodology"),
-                                "strikes_json": metrics.get("strikes"),
-                                "fetched_at": fetched_at,
-                            },
-                        )
-                        snapshot_db.commit()
-                    finally:
-                        snapshot_db.close()
-                except Exception:
-                    logger.debug("Failed to persist OptionsMetricsSnapshot for %s", symbol)
+                        fetched_at = datetime.utcnow()
+                        snapshot_db = SessionLocal()
+                        try:
+                            key_levels = metrics.get("key_levels") or {}
+                            net = metrics.get("net") or {}
+                            upsert_snapshot(
+                                snapshot_db,
+                                OptionsMetricsSnapshot,
+                                ticker=symbol,
+                                trading_date=trading_date_for(fetched_at),
+                                expiration=_parse_expiration_date(expirations[0] if expirations else None),
+                                values={
+                                    "status": "OK",
+                                    "error": None,
+                                    "source": "batch_abbreviated",
+                                    "schema_version": None,
+                                    "underlying_price": spot_price,
+                                    "call_wall": key_levels.get("call_wall"),
+                                    "put_wall": key_levels.get("put_wall"),
+                                    "zero_gamma": key_levels.get("zero_gamma"),
+                                    "net_dex": net.get("net_dex"),
+                                    "net_vex": net.get("net_vex"),
+                                    "net_cex": net.get("net_cex"),
+                                    "ivr": metrics.get("ivr"),
+                                    "skew": metrics.get("skew"),
+                                    "greeks_methodology": metrics.get("greeks_methodology"),
+                                    "strikes_json": metrics.get("strikes"),
+                                    "fetched_at": fetched_at,
+                                },
+                            )
+                            snapshot_db.commit()
+                        finally:
+                            snapshot_db.close()
+                    except Exception:
+                        logger.debug("Failed to persist OptionsMetricsSnapshot for %s", symbol)
             except Exception:
                 logger.debug("Failed to derive/cache options_metrics for %s", symbol)
 
