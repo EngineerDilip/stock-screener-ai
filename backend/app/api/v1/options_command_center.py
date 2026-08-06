@@ -43,17 +43,27 @@ _FLIP_PROXIMITY_FALLBACK_N = 3
 def _is_degenerate_snapshot(row: OptionsMetricsSnapshot) -> bool:
     """True for a snapshot written while yfinance was serving its known
     off-hours zero-OI garbage (see _is_zero_open_interest in
-    app/api/v1/options.py) -- zero OI on both sides, which also collapses
-    total_gex to 0 and can drag current_atm_iv down to a near-floor value
-    that isn't a real market reading. The write-path guard added in
-    eac281c3/f7401a0e stops *new* rows like this from being persisted, but
-    rows written before that fix landed can still be sitting in the table,
-    and would otherwise surface as "the latest snapshot" for their ticker
-    since there's nothing newer to supersede them yet. Filtering here means
-    those tickers correctly drop out of every ranking (and out of the macro
-    bar) until a real fetch replaces them, rather than showing corrupted
-    numbers."""
-    return (row.total_call_oi or 0) == 0 and (row.total_put_oi or 0) == 0
+    app/api/v1/options.py) -- EXPLICIT zero OI on both sides (a live_full
+    fetch that got zeros back), which also collapses total_gex to 0 and can
+    drag current_atm_iv down to a near-floor value that isn't a real market
+    reading. The write-path guard added in eac281c3/f7401a0e stops *new*
+    rows like this from being persisted, but rows written before that fix
+    landed can still be sitting in the table, and would otherwise surface as
+    "the latest snapshot" for their ticker since there's nothing newer to
+    supersede them yet. Filtering here means those tickers correctly drop
+    out of every ranking (and out of the macro bar) until a real fetch
+    replaces them, rather than showing corrupted numbers.
+
+    Deliberately NOT triggered by NULL OI: the batch_abbreviated write path
+    (analyze_options_exposure) never populates total_call_oi/total_put_oi at
+    all -- it's a lighter payload than the live_full fetch, not a degenerate
+    one -- so those columns are always NULL there, on every legitimately
+    good row. Treating NULL the same as explicit 0 (an earlier version of
+    this check did, via `(x or 0) == 0`) silently dropped every
+    batch_abbreviated row out of the universe, which is most of what the
+    nightly/manual batch sweep actually produces.
+    """
+    return row.total_call_oi == 0 and row.total_put_oi == 0
 
 
 def _latest_snapshots_for_active_universe(db: Session) -> List[OptionsMetricsSnapshot]:
