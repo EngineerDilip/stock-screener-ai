@@ -179,6 +179,17 @@ def _rank_gamma_flip_proximity(rows: List[GexSnapshot]) -> Dict[str, Any]:
         )
         if distance is None:
             continue
+        # Live-diagnosed on 2026-08-06: a small (~0.2%, ~11/4649 that day),
+        # persistent slice of GexSnapshot rows have spot_price landing on
+        # flip_level to exact float precision -- a degenerate key-level
+        # solver fallback for sparse/illiquid chains, not a real "trading
+        # exactly at the flip" reading (a continuous spot price essentially
+        # never lands on a discrete strike to full precision). Since this
+        # ranking sorts by smallest |distance|, that tiny buggy slice
+        # otherwise always wins the top slots outright, crowding out every
+        # genuine near-flip candidate.
+        if distance == 0:
+            continue
         all_candidates.append((abs(distance), r, distance))
     all_candidates.sort(key=lambda t: t[0])
 
