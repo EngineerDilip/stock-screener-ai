@@ -24,12 +24,24 @@ from ..services.options_metrics import (
     _time_to_expiry_years,
     _update_iv_history_and_get_range,
 )
+from ..services.options_snapshot_upsert import trading_date_for, upsert_snapshot
 from ..wiring.bootstrap import get_redis_client
 from ..models import StockUniverse
+from ..models.options_metrics_snapshot import OptionsMetricsSnapshot
 from ..database import SessionLocal
 from .market_queues import data_fetch_queue_for_market
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_expiration_date(expiration_str):
+    """Parse a yfinance 'YYYY-MM-DD' expiration string into a date, or None."""
+    if not expiration_str:
+        return None
+    try:
+        return datetime.strptime(expiration_str, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
 
 
 @shared_task(bind=True, max_retries=2)
@@ -372,6 +384,49 @@ def analyze_options_exposure(self, symbol: str) -> Dict[str, Any]:
                 metrics["computed_at"] = result["timestamp"]
                 redis_client = get_redis_client()
                 redis_client.set(f"options_metrics:{symbol}", json.dumps(metrics), ex=7 * 24 * 3600)
+
+                # Durable history alongside the 7-day Redis cache. This is the
+                # "batch_abbreviated" write path (see OptionsMetricsSnapshot's
+                # docstring) -- only what's derivable from the chain already
+                # fetched above, not the fuller payload calculate_options_metrics()
+                # produces on-demand. schema_version stays null so downstream
+                # readers can tell this row apart from a live_full one.
+                try:
+                    fetched_at = datetime.utcnow()
+                    snapshot_db = SessionLocal()
+                    try:
+                        key_levels = metrics.get("key_levels") or {}
+                        net = metrics.get("net") or {}
+                        upsert_snapshot(
+                            snapshot_db,
+                            OptionsMetricsSnapshot,
+                            ticker=symbol,
+                            trading_date=trading_date_for(fetched_at),
+                            expiration=_parse_expiration_date(expirations[0] if expirations else None),
+                            values={
+                                "status": "OK",
+                                "error": None,
+                                "source": "batch_abbreviated",
+                                "schema_version": None,
+                                "underlying_price": spot_price,
+                                "call_wall": key_levels.get("call_wall"),
+                                "put_wall": key_levels.get("put_wall"),
+                                "zero_gamma": key_levels.get("zero_gamma"),
+                                "net_dex": net.get("net_dex"),
+                                "net_vex": net.get("net_vex"),
+                                "net_cex": net.get("net_cex"),
+                                "ivr": metrics.get("ivr"),
+                                "skew": metrics.get("skew"),
+                                "greeks_methodology": metrics.get("greeks_methodology"),
+                                "strikes_json": metrics.get("strikes"),
+                                "fetched_at": fetched_at,
+                            },
+                        )
+                        snapshot_db.commit()
+                    finally:
+                        snapshot_db.close()
+                except Exception:
+                    logger.debug("Failed to persist OptionsMetricsSnapshot for %s", symbol)
             except Exception:
                 logger.debug("Failed to derive/cache options_metrics for %s", symbol)
 

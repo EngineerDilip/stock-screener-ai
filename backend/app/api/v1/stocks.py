@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from ...database import get_db
 from ...infra.serialization import normalize_string_list
 from ...models.market_breadth import MarketBreadth
+from ...models.options_metrics_snapshot import OptionsMetricsSnapshot
 from ...models.stock_universe import StockUniverse
 from ...models.theme import ContentItem, ThemeCluster, ThemeConstituent, ThemeMention, ThemeMetrics
 from ...schemas.scanning import ExplainResponse, ScanResultItem
@@ -851,6 +852,132 @@ async def get_stock_decision_dashboard(
         "regime": regime,
         "event_risk": event_risk,
         "regime_actions": regime_actions,
+        "degraded_reasons": sorted(set(degraded_reasons)),
+    }
+
+
+@router.get("/{symbol}/correlated-signal")
+async def get_stock_correlated_signal(
+    symbol: str = Depends(require_valid_symbol),
+    db: Session = Depends(get_db),
+    uow=Depends(get_uow),
+):
+    """Correlate the technical screener composite with the latest persisted
+    options-metrics snapshot for this symbol.
+
+    v1 uses a single-factor heuristic for the options side (Total GEX sign:
+    positive/long-gamma reads bullish, negative/short-gamma reads bearish).
+    This is deliberately narrower than the multi-factor weighted "Executive
+    Signal" the Options Analytics dashboard computes client-side (GEX +
+    skew + max-pain pull + PCR + OI skew + call-wall break, see
+    OptionsAnalyticsDashboardPage.jsx) -- porting that full scorer to the
+    backend is a separate follow-up. Total GEX is that scorer's
+    highest-weighted factor, so this is a reasonable single-factor stand-in
+    rather than a guess, but it should not be read as equivalent to the
+    dashboard's "Buy"/"Sell" conclusion.
+    """
+    degraded_reasons: list[str] = []
+
+    with uow:
+        latest_run = _get_latest_feature_run_for_symbol(uow, db, symbol)
+        feature_row = None
+        if latest_run is None:
+            degraded_reasons.append("missing_feature_run")
+        else:
+            feature_row = uow.feature_store.get_row_by_symbol(latest_run.id, symbol)
+            if feature_row is None:
+                degraded_reasons.append("symbol_missing_from_feature_run")
+
+    technical = None
+    technical_bias = None
+    if feature_row is not None:
+        explanation_item = ExplainStockUseCase._build_item_from_feature_row(feature_row)
+        explanation = ExplainStockUseCase.build_explanation_from_item(explanation_item)
+        technical = {
+            "composite_score": explanation.composite_score,
+            "rating": explanation.rating,
+            "screeners_passed": explanation.screeners_passed,
+            "screeners_total": explanation.screeners_total,
+            "as_of_date": (
+                latest_run.as_of_date.isoformat() if latest_run and latest_run.as_of_date else None
+            ),
+        }
+        if explanation.screeners_total:
+            pass_ratio = explanation.screeners_passed / explanation.screeners_total
+            technical_bias = "bullish" if pass_ratio >= 0.5 else "bearish"
+    else:
+        degraded_reasons.append("missing_technical_data")
+
+    # Prefer the richest available row (live_full, i.e. schema_version set)
+    # over an abbreviated batch row, then most recent within that tier.
+    options_row = (
+        db.query(OptionsMetricsSnapshot)
+        .filter(OptionsMetricsSnapshot.ticker == symbol.upper())
+        .order_by(
+            OptionsMetricsSnapshot.schema_version.isnot(None).desc(),
+            OptionsMetricsSnapshot.fetched_at.desc(),
+        )
+        .first()
+    )
+
+    options = None
+    options_bias = None
+    if options_row is not None:
+        is_stale = (
+            options_row.fetched_at is not None
+            and (datetime.utcnow() - options_row.fetched_at) > timedelta(days=10)
+        )
+        options = {
+            "source": options_row.source,
+            "trading_date": options_row.trading_date.isoformat() if options_row.trading_date else None,
+            "fetched_at": options_row.fetched_at.isoformat() if options_row.fetched_at else None,
+            "is_stale": is_stale,
+            "total_gex": options_row.total_gex,
+            "call_wall": options_row.call_wall,
+            "put_wall": options_row.put_wall,
+            "zero_gamma": options_row.zero_gamma,
+            "ivr": options_row.ivr,
+            "skew": options_row.skew,
+            "max_pain_strike": options_row.max_pain_strike,
+        }
+        if options_row.total_gex is not None:
+            if options_row.total_gex > 0:
+                options_bias = "bullish"
+            elif options_row.total_gex < 0:
+                options_bias = "bearish"
+            else:
+                options_bias = "neutral"
+    else:
+        degraded_reasons.append("missing_options_data")
+
+    if technical_bias is None or options_bias is None:
+        verdict = "insufficient_data"
+        note = "Not enough technical and/or options data to compare."
+    elif options_bias == "neutral":
+        verdict = "mixed"
+        note = f"Options positioning is flat (GEX near zero); technical bias is {technical_bias}."
+    elif technical_bias == options_bias:
+        verdict = "agreement"
+        note = f"Technical screeners and options positioning both read {technical_bias}."
+    else:
+        passed = technical.get("screeners_passed") if technical else None
+        total = technical.get("screeners_total") if technical else None
+        note = (
+            f"Technical screeners read {technical_bias} ({passed}/{total} passing) while options "
+            f"positioning (Total GEX) reads {options_bias} -- worth a closer look before acting on either alone."
+        )
+        verdict = "divergence"
+
+    return {
+        "symbol": symbol.upper(),
+        "technical": technical,
+        "technical_bias": technical_bias,
+        "options": options,
+        "options_bias": options_bias,
+        "correlation": {
+            "verdict": verdict,
+            "note": note,
+        },
         "degraded_reasons": sorted(set(degraded_reasons)),
     }
 

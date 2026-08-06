@@ -11,6 +11,7 @@ from typing import List, Dict, Any, Optional
 from ...database import get_db
 from ...models.max_pain import MaxPainSnapshot
 from ...models.gex import GexSnapshot
+from ...models.options_metrics_snapshot import OptionsMetricsSnapshot
 from ...services.options_metrics import (
     calculate_options_metrics,
     compute_options_metrics,
@@ -373,6 +374,71 @@ async def post_options_metrics(payload: Dict[str, Any], db: Session = Depends(ge
           redis_client.set(f"options_metrics:{symbol.upper()}", json.dumps(result), ex=7 * 24 * 3600)
         except Exception:
           pass
+
+        # Durable history for the FULL payload -- this is the "live_full"
+        # write path (see OptionsMetricsSnapshot's docstring), distinct from
+        # the abbreviated rows the nightly batch writes. Only fires for the
+        # default/nearest-expiration view, same scope as the Redis re-cache
+        # above, so history stays aligned with what schema_version-gated
+        # cache reads actually serve.
+        try:
+          fetched_at = datetime.utcnow()
+          key_levels = result.get("key_levels") or {}
+          net = result.get("net") or {}
+          upsert_snapshot(
+            db,
+            OptionsMetricsSnapshot,
+            ticker=symbol.upper(),
+            trading_date=trading_date_for(fetched_at),
+            expiration=datetime.strptime(expiration, "%Y-%m-%d").date() if expiration else None,
+            values={
+              "status": "OK",
+              "error": None,
+              "source": "live_full",
+              "schema_version": result.get("schema_version"),
+              "underlying_price": result.get("underlying_price"),
+              "call_wall": result.get("call_wall") or key_levels.get("call_wall"),
+              "call_wall_gex": result.get("call_wall_gex"),
+              "put_wall": result.get("put_wall") or key_levels.get("put_wall"),
+              "put_wall_gex": result.get("put_wall_gex"),
+              "zero_gamma": key_levels.get("zero_gamma"),
+              "total_call_gex": result.get("total_call_gex"),
+              "total_put_gex": result.get("total_put_gex"),
+              "total_gex": result.get("total_gex"),
+              "net_dex": net.get("net_dex"),
+              "net_vex": net.get("net_vex"),
+              "net_cex": net.get("net_cex"),
+              "ivr": result.get("ivr"),
+              "skew": result.get("skew"),
+              "historical_volatility": result.get("historical_volatility"),
+              "current_atm_iv": result.get("current_atm_iv"),
+              "volatility_risk_premium": result.get("volatility_risk_premium"),
+              "expected_move": result.get("expected_move"),
+              "atm_strike": result.get("atm_strike"),
+              "volume_put_call_ratio": result.get("volume_put_call_ratio"),
+              "open_interest_put_call_ratio": result.get("open_interest_put_call_ratio"),
+              "total_call_oi": result.get("total_call_oi"),
+              "total_put_oi": result.get("total_put_oi"),
+              "call_premium_notional": result.get("call_premium_notional"),
+              "put_premium_notional": result.get("put_premium_notional"),
+              "max_pain_strike": result.get("max_pain_strike"),
+              "max_pain_distance_pct": result.get("max_pain_distance_pct"),
+              "next_earnings_date": (
+                datetime.strptime(result["next_earnings_date"], "%Y-%m-%d").date()
+                if result.get("next_earnings_date")
+                else None
+              ),
+              "greeks_methodology": result.get("greeks_methodology"),
+              "strikes_json": result.get("strikes"),
+              "iv_smile_json": result.get("iv_smile"),
+              "unusual_volume_json": result.get("unusual_volume"),
+              "fetched_at": fetched_at,
+            },
+          )
+          db.commit()
+        except Exception:
+          db.rollback()
+          logger.exception("Failed to persist OptionsMetricsSnapshot (live_full) for %s", symbol)
       return result
 
     # If we have a symbol and any IV pieces are missing, try to fetch price range
