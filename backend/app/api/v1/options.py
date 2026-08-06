@@ -401,7 +401,17 @@ async def post_options_metrics(payload: Dict[str, Any], db: Session = Depends(ge
           # Fall through to a live compute instead; that live compute
           # re-caches a current payload below, self-healing this key for
           # the next 7 days.
-          if cached_data.get("schema_version") == OPTIONS_METRICS_SCHEMA_VERSION:
+          #
+          # A cached entry with zero OI on both sides is never trusted here
+          # either, schema_version match or not -- it's the same
+          # off-hours yfinance staleness pattern (see
+          # _is_zero_open_interest), and simply returning it would bypass
+          # the persisted-snapshot fallback entirely for up to the full
+          # 7-day TTL. Falling through re-runs the live-compute branch
+          # below, which applies that fallback itself.
+          if cached_data.get("schema_version") == OPTIONS_METRICS_SCHEMA_VERSION and not _is_zero_open_interest(
+            cached_data.get("total_call_oi"), cached_data.get("total_put_oi")
+          ):
             return cached_data
       except Exception:
         # cache miss or error — fall back to live fetch
