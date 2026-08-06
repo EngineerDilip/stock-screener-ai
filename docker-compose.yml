@@ -401,6 +401,24 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  pgadmin:
+    image: dpage/pgadmin4:9
+    profiles: ["pgadmin"]
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: "True"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    ports:
+      # Loopback-only by default; override PGADMIN_BIND (e.g. 0.0.0.0:5050) to
+      # expose it on the LAN/behind a reverse proxy.
+      - "${PGADMIN_BIND:-127.0.0.1:5050}:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
   frontend:
     build:
       context: ./frontend
@@ -426,3 +444,4 @@ services:
 
 volumes:
   redis_data:
+  pgadmin_data:

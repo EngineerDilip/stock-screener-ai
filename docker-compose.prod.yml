@@ -385,6 +385,22 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  pgadmin:
+    env_file:
+      - .env.docker
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   frontend:
     deploy:
       resources:
