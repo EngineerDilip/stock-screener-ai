@@ -55,6 +55,12 @@ _include("operations", tags=["operations"])
 _include("max_pain", prefix="/max-pain", tags=["max-pain"], protected=False)
 _include("gex", prefix="/gex", tags=["gex"], protected=False)
 _include("options", prefix="/options", tags=["options"], protected=False)
+_include(
+    "options_command_center",
+    prefix="/options-command-center",
+    tags=["options-command-center"],
+    protected=False,
+)
 
 if settings.feature_themes:
     _include("themes", prefix="/themes", tags=["themes"])
