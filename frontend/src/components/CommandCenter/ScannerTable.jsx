@@ -5,8 +5,9 @@ import { useNavigate } from 'react-router-dom';
  *
  * `columns`: [{ key, label, align?: 'left'|'right', render(row) => node }]
  * `rows`: array of plain objects, each must have a `symbol` field -- rows
- * are clickable and route to the single-stock deep-dive page (not built
- * yet; navigates to /stocks/:symbol, which already exists in the app).
+ * are clickable and route to that symbol's Options Analytics dashboard
+ * (/options-analytics?ticker=SYMBOL), which reads the ticker query param on
+ * mount to pre-select it.
  */
 export default function ScannerTable({ title, subtitle, columns, rows }) {
   const navigate = useNavigate();
@@ -34,8 +35,8 @@ export default function ScannerTable({ title, subtitle, columns, rows }) {
           {rows.map((row, idx) => (
             <tr
               key={row.symbol + idx}
-              onClick={() => navigate(`/stocks/${row.symbol}`)}
-              className="cursor-pointer border-b border-slate-800/60 font-mono transition-colors last:border-0 hover:bg-slate-800/50"
+              onClick={() => navigate(`/options-analytics?ticker=${encodeURIComponent(row.symbol)}`)}
+              className="cursor-pointer border-b border-slate-800/60 font-mono transition-colors last:border-0 hover:bg-slate-800/70 hover:ring-1 hover:ring-inset hover:ring-sky-500/40"
             >
               {columns.map((col) => (
                 <td key={col.key} className={`px-3 py-1.5 ${col.align === 'right' ? 'text-right' : 'text-left'}`}>

@@ -475,13 +475,27 @@ def _time_to_expiry_years(expiration: str) -> float:
     return max(days_to_expiry / 365.0, 1.0 / 365.0)
 
 
-def _find_valid_atm_option(df: pd.DataFrame, underlying_price: float, min_iv: float = 0.01) -> Optional[pd.Series]:
+# Below this, a reported IV is treated as a degenerate/placeholder reading
+# rather than a real market quote. Raised from an earlier 0.01 (1%) floor
+# after live diagnosis on 2026-08-06 showed yfinance serving a flat ~1.5-3%
+# "IV" across an entire chain -- for SPY and QQQ simultaneously, with open
+# interest otherwise genuinely populated (so the zero-OI staleness check
+# elsewhere doesn't catch it) -- which the old floor happily accepted as
+# "valid" once the walk-outward loop below reached it. No liquid large-cap
+# or index ETF has legitimately printed single-digit-percent ATM IV; 8% is
+# comfortably below any real quiet-market reading while well above that
+# degenerate band.
+_MIN_PLAUSIBLE_IV = 0.08
+
+
+def _find_valid_atm_option(df: pd.DataFrame, underlying_price: float, min_iv: float = _MIN_PLAUSIBLE_IV) -> Optional[pd.Series]:
     """Find the strike closest to the money that has a usable (non-degenerate) IV.
 
-    yfinance sometimes reports impliedVolatility as 0 (or near-zero) for a
-    stale/illiquid contract even when its strike is otherwise ATM. Using that
-    value directly collapses VRP to roughly `-historical_volatility`. Walk
-    outward from the nearest strike until a contract with a real IV is found.
+    yfinance sometimes reports impliedVolatility as 0, near-zero, or a flat
+    implausibly-low placeholder (see _MIN_PLAUSIBLE_IV) for a stale/illiquid
+    contract even when its strike is otherwise ATM. Using that value directly
+    collapses VRP to roughly `-historical_volatility`. Walk outward from the
+    nearest strike until a contract with a plausible IV is found.
     """
     if df is None or df.empty or "strike" not in df.columns or "impliedVolatility" not in df.columns:
         return None
@@ -493,15 +507,44 @@ def _find_valid_atm_option(df: pd.DataFrame, underlying_price: float, min_iv: fl
     return None
 
 
+def _chain_iv_is_degenerate(iv_values: List[float], min_distinct: int = 10) -> bool:
+    """True when a chain's impliedVolatility readings look like a synthetic
+    placeholder rather than real market quotes.
+
+    Live-diagnosed on 2026-08-06: yfinance served a SPY chain where 96 calls
+    across a wide, actively-traded strike range (thousands of contracts of
+    volume on many strikes) collapsed onto just 8 distinct IV values, each
+    almost exactly double the previous one (~0.00001, 0.0020, 0.0078, 0.0156,
+    0.0313, 0.0625, 0.1250, 0.2500) -- a geometric step function, not a
+    smile/skew curve, and unrelated to the real volume sitting on those
+    strikes. QQQ served the same pattern simultaneously. A _MIN_PLAUSIBLE_IV
+    floor alone can't catch this: the sequence spans from near-zero up
+    through values ordinarily plausible on their own (0.125, 0.25), so
+    whatever floor is set, some rung of the ladder clears it.
+
+    A real IV surface varies near-continuously strike to strike (skew), so
+    collapsing onto a handful of distinct values across dozens of contracts
+    is the tell, independent of the specific numbers involved.
+    """
+    if len(iv_values) < 20:
+        return False
+    distinct = len({round(v, 6) for v in iv_values if v is not None})
+    return distinct < min_distinct
+
+
 def find_current_atm_iv_from_chain(
-    options_chain: List[Dict[str, Any]], underlying_price: float, min_iv: float = 0.01
+    options_chain: List[Dict[str, Any]], underlying_price: float, min_iv: float = _MIN_PLAUSIBLE_IV
 ) -> Optional[float]:
     """List-of-dicts equivalent of `_find_valid_atm_option` for callers (like the
     nightly batch task) that build a plain `options_chain` instead of a
     yfinance DataFrame. Walks outward from the nearest strike per side (calls
     preferred, then puts) to avoid a stale/near-zero IV on an illiquid ATM
-    contract.
+    contract, unless the whole chain's IV looks synthetic (see
+    _chain_iv_is_degenerate), in which case there's nothing trustworthy to
+    walk toward.
     """
+    if _chain_iv_is_degenerate([opt.get("iv") for opt in options_chain]):
+        return None
     for option_type in ("call", "put"):
         candidates = sorted(
             (
@@ -902,6 +945,14 @@ def calculate_options_metrics(
     atm_call_iv = float(atm_call_iv_row["impliedVolatility"]) if atm_call_iv_row is not None else None
     atm_put_iv = float(atm_put_iv_row["impliedVolatility"]) if atm_put_iv_row is not None else None
     current_atm_iv = atm_call_iv if atm_call_iv is not None else atm_put_iv
+
+    # See _chain_iv_is_degenerate: reject the whole chain's IV rather than
+    # trust a value that only looks plausible in isolation.
+    all_ivs = list(calls.get("impliedVolatility", [])) + list(puts.get("impliedVolatility", []))
+    if _chain_iv_is_degenerate(all_ivs):
+        current_atm_iv = None
+        atm_call_iv = None
+        atm_put_iv = None
 
     expected_move = None
     if atm_call_last_price is not None and atm_put_last_price is not None:

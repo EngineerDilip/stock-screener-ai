@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   Container,
@@ -65,6 +66,7 @@ function SectionHeader({ icon, title, goal }) {
 
 export default function OptionsAnalyticsDashboardPage() {
   const queryClient = useQueryClient();
+  const [searchParams] = useSearchParams();
 
   const [tickerList, setTickerList] = useState([]);
   const [selectedTicker, setSelectedTicker] = useState(null);
@@ -90,6 +92,22 @@ export default function OptionsAnalyticsDashboardPage() {
   const [termStructureLoading, setTermStructureLoading] = useState(false);
   const [termStructureError, setTermStructureError] = useState(false);
   const [error, setError] = useState(null);
+
+  // Pre-select a ticker when arriving via /options-analytics?ticker=SYMBOL
+  // (e.g. a row click from the Options Command Center). Only the symbol is
+  // known at this point -- the Autocomplete's `name`/`exchange` fields are
+  // cosmetic (used for its dropdown label, not for data fetching, which
+  // only reads .symbol) and get filled in for real once tickerList loads,
+  // if the user reopens the dropdown.
+  useEffect(() => {
+    const tickerParam = searchParams.get('ticker');
+    if (tickerParam) {
+      const symbol = tickerParam.toUpperCase();
+      setSelectedTicker({ symbol });
+      setTickerInputValue(symbol);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();

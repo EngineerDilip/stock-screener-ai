@@ -14,11 +14,15 @@ const columns = [
   },
 ];
 
-export default function GammaFlipProximityTable({ rows = [] }) {
+export default function GammaFlipProximityTable({ rows = [], widened = false }) {
   return (
     <ScannerTable
       title="Gamma Flip Proximity"
-      subtitle="Within 1.5% of flip -- one print from a regime change"
+      subtitle={
+        widened
+          ? 'Nothing within 1.5% right now -- showing the 3 closest tickers instead'
+          : 'Within 1.5% of flip -- one print from a regime change'
+      }
       columns={columns}
       rows={rows}
     />

@@ -17,11 +17,11 @@ export default function CommandGrid({ data }) {
     <div className="mx-auto grid max-w-[1800px] grid-cols-1 gap-6 px-4 py-6 lg:grid-cols-3">
       <PillarColumn title="Structural & Dealer Risk" icon="🎯">
         <VolatilityAccelerationTable rows={data?.volatilityAcceleration} />
-        <GammaFlipProximityTable rows={data?.gammaFlipProximity} />
+        <GammaFlipProximityTable rows={data?.gammaFlipProximity?.rows} widened={data?.gammaFlipProximity?.widened} />
       </PillarColumn>
 
       <PillarColumn title="Volatility Mispricing" icon="📈">
-        <RichVrpTable rows={data?.richVrp} />
+        <RichVrpTable rows={data?.richVrp} cheapRows={data?.cheapVrp} />
         <ExtremeSkewTable rows={data?.extremeSkew} />
       </PillarColumn>
 
