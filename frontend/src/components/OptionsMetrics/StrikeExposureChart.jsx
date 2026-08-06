@@ -106,6 +106,7 @@ const CustomTooltip = ({ active, payload, label, metric }) => {
  * @param {number} [props.callWall]
  * @param {number} [props.putWall]
  * @param {number} [props.zeroGamma] - flip level
+ * @param {number} [props.expectedMove] - +/- 1sd expected move (from ATM straddle pricing); drawn as spot +/- this value
  * @param {number} [props.windowPct=0.2] - only plot strikes within +/- this fraction of spot (matches the ATM window used elsewhere in this codebase for max pain)
  * @param {number} [props.height=360]
  */
@@ -115,6 +116,7 @@ export default function StrikeExposureChart({
   callWall,
   putWall,
   zeroGamma,
+  expectedMove,
   windowPct = 0.2,
   height = 360,
 }) {
@@ -212,6 +214,24 @@ export default function StrikeExposureChart({
                   stroke="#9e9e9e"
                   strokeDasharray="2 2"
                   label={{ value: 'Flip', position: 'insideBottomRight', fontSize: 10, fill: '#9e9e9e' }}
+                />
+              )}
+              {spot != null && expectedMove != null && (
+                <ReferenceLine
+                  x={spot - expectedMove}
+                  stroke="#9e9e9e"
+                  strokeDasharray="3 3"
+                  strokeOpacity={0.6}
+                  label={{ value: 'Expected Move (-)', position: 'insideTopLeft', fontSize: 9, fill: '#9e9e9e' }}
+                />
+              )}
+              {spot != null && expectedMove != null && (
+                <ReferenceLine
+                  x={spot + expectedMove}
+                  stroke="#9e9e9e"
+                  strokeDasharray="3 3"
+                  strokeOpacity={0.6}
+                  label={{ value: 'Expected Move (+)', position: 'insideTopRight', fontSize: 9, fill: '#9e9e9e' }}
                 />
               )}
 

@@ -73,6 +73,7 @@ class OptionsMetricsResponse(BaseModel):
     put_wall_gex: Optional[float] = None
     iv_smile: Optional[IvSmile] = None
     unusual_volume: List[UnusualVolumeContract] = []
+    next_earnings_date: Optional[str] = None
     max_pain_strike: Optional[float] = None
     max_pain_distance_pct: Optional[float] = None
     greeks_methodology: Optional[str] = None

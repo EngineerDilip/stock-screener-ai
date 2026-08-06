@@ -33,7 +33,8 @@ _ET = ZoneInfo("America/New_York")
 # existed) silently sat in Redis for up to its full 7-day TTL. Bump this
 # any time the payload shape changes so old entries stop being trusted
 # immediately instead of waiting out their TTL.
-OPTIONS_METRICS_SCHEMA_VERSION = 2
+# v3: added next_earnings_date.
+OPTIONS_METRICS_SCHEMA_VERSION = 3
 
 import pandas as pd
 
@@ -617,6 +618,77 @@ def _update_iv_history_and_get_range(
     return _iv_history_range_from_rows(rows)
 
 
+def _coerce_date(value: Any) -> Optional["date"]:
+    """Best-effort coercion of whatever yfinance hands back (datetime.date,
+    datetime.datetime, pandas.Timestamp, or an ISO date string) into a plain
+    date, for comparison purposes only."""
+    if value is None:
+        return None
+    if hasattr(value, "date") and callable(value.date):
+        try:
+            return value.date()
+        except Exception:
+            pass
+    try:
+        from datetime import date as _date_cls
+        if isinstance(value, _date_cls):
+            return value
+    except Exception:
+        pass
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _get_next_earnings_date(yf_ticker) -> Optional[str]:
+    """Nearest future earnings date for this ticker, as an ISO date string,
+    or None if Yahoo doesn't have one listed for it.
+
+    Not having an earnings date is the common case (most tickers most of the
+    time, and some tickers -- ETFs, small/thin names -- never have one), not
+    a failure -- every branch below is defensive and swallows its own
+    errors rather than letting a missing/malformed earnings calendar break
+    the whole options-metrics payload.
+
+    yfinance's calendar API has changed shape across versions (a dict in
+    recent releases, a DataFrame in older ones), so `.calendar` is tried
+    first (cheap, already-cached with the Ticker object) and
+    `.get_earnings_dates()` (an extra network call) is a fallback rather
+    than the primary path.
+    """
+    today = datetime.now(_ET).date()
+
+    try:
+        cal = yf_ticker.calendar
+        raw_dates = None
+        if isinstance(cal, dict):
+            raw_dates = cal.get("Earnings Date")
+        elif cal is not None and hasattr(cal, "empty") and not cal.empty and "Earnings Date" in getattr(cal, "index", []):
+            raw_dates = list(cal.loc["Earnings Date"].dropna())
+        if raw_dates:
+            if not isinstance(raw_dates, (list, tuple)):
+                raw_dates = [raw_dates]
+            future = sorted(d for d in (_coerce_date(v) for v in raw_dates) if d is not None and d >= today)
+            if future:
+                return future[0].isoformat()
+    except Exception:
+        pass
+
+    try:
+        earnings_df = yf_ticker.get_earnings_dates(limit=8)
+        if earnings_df is not None and not earnings_df.empty:
+            future = sorted(
+                d for d in (_coerce_date(idx) for idx in earnings_df.index) if d is not None and d >= today
+            )
+            if future:
+                return future[0].isoformat()
+    except Exception:
+        pass
+
+    return None
+
+
 def calculate_options_metrics(
     ticker: str, expiration: str, db: Optional["Session"] = None, record_iv_history: bool = True
 ) -> Dict[str, Any]:
@@ -659,6 +731,8 @@ def calculate_options_metrics(
         option_chain = yf_ticker.option_chain(expiration)
     except Exception as exc:
         raise ValueError(f"Could not fetch option chain for {ticker} {expiration}: {exc}") from exc
+
+    next_earnings_date = _get_next_earnings_date(yf_ticker)
 
     calls = option_chain.calls if hasattr(option_chain, "calls") else pd.DataFrame()
     puts = option_chain.puts if hasattr(option_chain, "puts") else pd.DataFrame()
@@ -875,6 +949,7 @@ def calculate_options_metrics(
         "put_wall_gex": put_wall_gex,
         "iv_smile": iv_smile,
         "unusual_volume": unusual_volume,
+        "next_earnings_date": next_earnings_date,
         "max_pain_strike": max_pain_strike,
         "max_pain_distance_pct": (
             ((underlying_price - max_pain_strike) / max_pain_strike) * 100.0

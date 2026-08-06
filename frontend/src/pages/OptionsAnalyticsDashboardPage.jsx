@@ -540,6 +540,39 @@ export default function OptionsAnalyticsDashboardPage() {
 
   const marketSignal = getMarketSignal(marketFactors);
 
+  // Strategy pick crossed on two independent axes: Total Score gives
+  // direction (bullish/bearish/neutral), VRP gives pricing (is premium rich
+  // or cheap right now) -- a bullish read with rich vol calls for selling
+  // premium in a bullish structure, not just buying calls. Thresholds are
+  // the user-specified ones, not the same +-1/+-3 bands as getMarketSignal
+  // above (that one's tuned for the Buy/Sell headline label; this one's
+  // tuned for strategy selection and intentionally coarser).
+  const getRecommendedStrategy = (score, vrpPct) => {
+    if (score == null || vrpPct == null || Number.isNaN(score) || Number.isNaN(vrpPct)) return null;
+    const rich = vrpPct > 10;
+    if (score >= 1.5) {
+      return rich
+        ? 'Bull Put Spread / Covered Call (Vol is rich, sell premium)'
+        : 'Long Call / Call Debit Spread (Vol is cheap/neutral, buy premium)';
+    }
+    if (score <= -1.5) {
+      return rich
+        ? 'Bear Call Spread (Vol is rich, sell premium)'
+        : 'Long Put / Put Debit Spread (Vol is cheap/neutral, buy premium)';
+    }
+    return rich
+      ? 'Iron Condor / Short Straddle (Expect pinning, sell premium)'
+      : 'Long Straddle / Calendar Spread (Expect breakout, buy premium)';
+  };
+
+  const totalScore = marketFactors.reduce((sum, f) => sum + f.weight * f.vote, 0);
+  const vrpPct =
+    displayOptionsMetrics?.volatility_risk_premium != null
+      ? displayOptionsMetrics.volatility_risk_premium * 100
+      : null;
+  const recommendedStrategy =
+    marketFactors.length > 0 ? getRecommendedStrategy(totalScore, vrpPct) : null;
+
   return (
     <Container maxWidth="xl" sx={{ py: 2 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
@@ -910,6 +943,7 @@ export default function OptionsAnalyticsDashboardPage() {
               every other section below, so it's fetched once here. */}
           {displayOptionsMetrics && (
             <>
+              <LastUpdated timestamp={displayOptionsMetrics.computed_at} sx={{ display: 'block', mb: 1 }} />
               <SummaryCards data={displayOptionsMetrics} sections={['walls']} />
               <StrikeExposureChart
                 strikes={displayOptionsMetrics.strikes}
@@ -917,6 +951,7 @@ export default function OptionsAnalyticsDashboardPage() {
                 callWall={displayOptionsMetrics.key_levels?.call_wall}
                 putWall={displayOptionsMetrics.key_levels?.put_wall}
                 zeroGamma={displayOptionsMetrics.key_levels?.zero_gamma}
+                expectedMove={displayOptionsMetrics.expected_move}
               />
             </>
           )}
@@ -935,6 +970,12 @@ export default function OptionsAnalyticsDashboardPage() {
                 ivSmile={displayOptionsMetrics.iv_smile}
                 spot={displayOptionsMetrics.underlying_price}
               />
+              {displayOptionsMetrics.next_earnings_date &&
+                new Date(displayOptionsMetrics.next_earnings_date) >= new Date(new Date().toDateString()) && (
+                  <Alert severity="warning" sx={{ mb: 2 }}>
+                    ⚠️ Earnings Date: {displayOptionsMetrics.next_earnings_date}
+                  </Alert>
+              )}
               <IVTermStructureChart symbol={selectedTicker.symbol} />
             </>
           )}
@@ -1039,6 +1080,7 @@ export default function OptionsAnalyticsDashboardPage() {
 
           {displayOptionsMetrics && (
             <>
+              <LastUpdated timestamp={displayOptionsMetrics.computed_at} sx={{ display: 'block', mb: 1 }} />
               <SummaryCards data={displayOptionsMetrics} sections={['flow']} />
               <UnusualVolumeTable contracts={displayOptionsMetrics.unusual_volume} />
             </>
@@ -1051,7 +1093,10 @@ export default function OptionsAnalyticsDashboardPage() {
           />
 
           {displayOptionsMetrics && (
-            <SummaryCards data={displayOptionsMetrics} sections={['greeks']} />
+            <>
+              <LastUpdated timestamp={displayOptionsMetrics.computed_at} sx={{ display: 'block', mb: 1 }} />
+              <SummaryCards data={displayOptionsMetrics} sections={['greeks']} />
+            </>
           )}
 
           <SectionHeader
@@ -1152,6 +1197,15 @@ export default function OptionsAnalyticsDashboardPage() {
                       </TableBody>
                     </Table>
                   </TableContainer>
+                )}
+
+                {recommendedStrategy && (
+                  <Box sx={{ mt: 2 }}>
+                    <Typography variant="subtitle2">Recommended Strategy</Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      {recommendedStrategy}
+                    </Typography>
+                  </Box>
                 )}
 
                 {/* Repeats the same timestamp shown next to the "Options Metrics"
