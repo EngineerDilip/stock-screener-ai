@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 import yfinance as yf
 from celery import shared_task
+from sqlalchemy import func
 
 from ..services.yfinance_service import YFinanceService
 from ..services.rate_budget_policy import RateBudgetPolicy
@@ -65,14 +66,34 @@ def batch_analyze_options_exposure(self, market: str = "US", limit: int = 2000) 
         errors = 0
         
         try:
-            # Get all active symbols for the market
+            # Get the `limit` most stale active symbols for the market --
+            # never-analyzed symbols first (NULL sorts first), then oldest
+            # snapshot first. Active US universe is currently ~10x `limit`
+            # (e.g. 9,966 vs. the 2,000 default), and an unordered
+            # `.limit(limit)` query returns the same physical-order slice of
+            # symbols on every run -- Postgres has no reason to vary it --
+            # so without this ordering the same ~2,000 symbols get
+            # re-analyzed forever while the rest of the universe never gets
+            # a single row. Ordering by staleness means every run makes
+            # forward progress toward full coverage, and once caught up,
+            # naturally cycles back to refreshing whatever's oldest.
+            latest_fetch = (
+                session.query(
+                    OptionsMetricsSnapshot.ticker.label("ticker"),
+                    func.max(OptionsMetricsSnapshot.fetched_at).label("last_fetched_at"),
+                )
+                .group_by(OptionsMetricsSnapshot.ticker)
+                .subquery()
+            )
             active_symbols = (
                 session.query(StockUniverse.symbol)
+                .outerjoin(latest_fetch, latest_fetch.c.ticker == StockUniverse.symbol)
                 .filter(StockUniverse.is_active == True, StockUniverse.market == market)
+                .order_by(latest_fetch.c.last_fetched_at.asc().nullsfirst())
                 .limit(limit)
                 .all()
             )
-            
+
             symbols = [s[0] for s in active_symbols]
             total = len(symbols)
             logger.info(f"Starting batch analysis for {total} {market} stocks")
